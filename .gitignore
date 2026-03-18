@@ -1,0 +1,7 @@
+# Ignore everything
+*
+
+# Except these files
+!.gitignore
+!infected.ts
+!zombies.strings.json
