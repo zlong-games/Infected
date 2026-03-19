@@ -6339,14 +6339,22 @@ function CompareResupplyPositions(mapIdentifier: MapNames, threshold: number = C
     return true;
 }
 
+function GetCurrentMapHQOnly(): MapNames | undefined {
+    const hqPosition = mod.GetObjectPosition(mod.GetHQ(1));
+    return CompareHQPositions(Helpers.VectorToVector3(hqPosition));
+}
+
 function GetCurrentMap(): MapNames | undefined {
     const hqPosition = mod.GetObjectPosition(mod.GetHQ(1));
-    const mapIdentifier = CompareHQPositions(Helpers.VectorToVector3(hqPosition));
+    const hqVec = Helpers.VectorToVector3(hqPosition);
+    const mapIdentifier = CompareHQPositions(hqVec);
     if (!mapIdentifier) {
+        console.log(`GetCurrentMap | HQ match failed. Polled HQ pos: x=${hqVec.x}, y=${hqVec.y}, z=${hqVec.z}`);
         return undefined;
     }
 
     if (!CompareResupplyPositions(mapIdentifier)) {
+        console.log(`GetCurrentMap | Resupply match failed for HQ-matched map: ${mapIdentifier}`);
         return undefined;
     }
 
@@ -6356,7 +6364,7 @@ function GetCurrentMap(): MapNames | undefined {
     return mapIdentifier;
 }
 
-async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames> {
+async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames | undefined> {
     let count = 0;
     const timeoutSeconds = WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS;
     const startTime = Date.now();
@@ -6383,10 +6391,22 @@ async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames
 
         const elapsedSeconds = (Date.now() - startTime) / 1000;
         if (elapsedSeconds > timeoutSeconds) {
-            console.log(`WaitForCurrentMapGate | TIMEOUT after ${timeoutSeconds}s. Could not verify map position.`);
+            console.log(`WaitForCurrentMapGate | TIMEOUT after ${timeoutSeconds}s. Could not verify map with full HQ+resupply match.`);
             const hqPos = Helpers.VectorToVector3(mod.GetObjectPosition(mod.GetHQ(1)));
             console.log(`WaitForCurrentMapGate | Actual HQ position: x=${hqPos.x}, y=${hqPos.y}, z=${hqPos.z}`);
             console.log(`WaitForCurrentMapGate | Expected positions:\nNEXUS=(${NEXUS_SURVIVOR_HQ.position.x},${NEXUS_SURVIVOR_HQ.position.y},${NEXUS_SURVIVOR_HQ.position.z}),\nSAND=(${SAND_SURVIVOR_HQ.position.x},${SAND_SURVIVOR_HQ.position.y},${SAND_SURVIVOR_HQ.position.z}),\nSAND2=(${SAND2_SURVIVOR_HQ.position.x},${SAND2_SURVIVOR_HQ.position.y},${SAND2_SURVIVOR_HQ.position.z})`);
+
+            // Fallback: accept HQ-only match when resupply verification keeps failing
+            const hqOnlyMatch = GetCurrentMapHQOnly();
+            if (hqOnlyMatch) {
+                console.log(`WaitForCurrentMapGate | Fallback: HQ-only match resolved to ${hqOnlyMatch} (resupply verification skipped)`);
+                CURRENT_MAP = hqOnlyMatch;
+                ConfigureResupplyForMap(hqOnlyMatch);
+                return hqOnlyMatch;
+            }
+
+            console.log(`WaitForCurrentMapGate | Fallback failed: HQ position does not match any known map. Aborting gate.`);
+            return undefined;
         }
 
         if (showStatusToast) {
