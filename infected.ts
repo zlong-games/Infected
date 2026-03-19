@@ -79,8 +79,9 @@ const POINTS_ROUND_SURVIVED = 850;
 const HEALTH_RESTORE_ON_INFECTED = 50;
 const LMS_RELOAD_POLL_SECONDS = 0.1;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
-const CURRENT_MAP_HQ_POSITION_THRESHOLD = 1.0;
-const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 1.0;
+const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
+const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
+const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 55; // Safety timeout to prevent infinite loops
 
 interface Vector3 {
     x: number;
@@ -118,8 +119,6 @@ enum ResupplyInteractPointId {
     POINT_301 = 301,
     POINT_302 = 302,
     POINT_303 = 303,
-    POINT_321 = 321,
-    POINT_322 = 322,
 }
 
 enum ResupplyWorldIconId {
@@ -154,15 +153,15 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.NEXUS, {
 RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND, {
     worldIcons: [ResupplyWorldIconId.PRIMARY, ResupplyWorldIconId.SECONDARY],
     positionsByInteractPoint: new Map<ResupplyInteractPointId, Vector3>([
-        [ResupplyInteractPointId.POINT_321, { x: 34.907, y: 37.947, z: -36.865 }],
-        [ResupplyInteractPointId.POINT_322, { x: -6.244, y: 39.423, z: -27.941 }],
+        [ResupplyInteractPointId.POINT_301, { x: -34.199, y: 35.913, z: -23.397 }],
+        [ResupplyInteractPointId.POINT_302, { x: -27.545, y: 37.996, z: -7.459 }],
     ]),
 });
 RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
     worldIcons: [ResupplyWorldIconId.PRIMARY, ResupplyWorldIconId.SECONDARY],
     positionsByInteractPoint: new Map<ResupplyInteractPointId, Vector3>([
-        [ResupplyInteractPointId.POINT_301, { x: -49.73, y: 36.617, z: -7.779 }], // need to verify these...
-        [ResupplyInteractPointId.POINT_302, { x: -39.284, y: 35.277, z: -24.819 }],
+        [ResupplyInteractPointId.POINT_301, { x: 34.907, y: 59.282, z: -36.942 }],
+        [ResupplyInteractPointId.POINT_302, { x: -6.244, y: 60.423, z: -27.941 }],
     ]),
 });
 
@@ -183,10 +182,6 @@ let GAME_ROUND_LIMIT = 9;
 
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
-
-const DEBUG_INTERACT_LOCATION: Map<number, mod.Vector> = new Map<number, mod.Vector>();
-DEBUG_INTERACT_LOCATION.set(DEBUG_INTERACT_POINT_1_OBJ_ID, mod.CreateVector(-44.916, 34.16, -24.278));
-
 
 // WEAPON RARITY THRESHOLDS -- lower threshold means more common, higher value means more rare
 
@@ -6363,6 +6358,9 @@ function GetCurrentMap(): MapNames | undefined {
 
 async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames> {
     let count = 0;
+    const timeoutSeconds = WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS;
+    const startTime = Date.now();
+    
     while (true) {
         const mapIdentifier = GetCurrentMap();
         if (mapIdentifier) {
@@ -6381,6 +6379,14 @@ async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames
             }
             mod.DisplayHighlightedWorldLogMessage(mapIdentifiedStringkey);
             return mapIdentifier;
+        }
+
+        const elapsedSeconds = (Date.now() - startTime) / 1000;
+        if (elapsedSeconds > timeoutSeconds) {
+            console.log(`WaitForCurrentMapGate | TIMEOUT after ${timeoutSeconds}s. Could not verify map position.`);
+            const hqPos = Helpers.VectorToVector3(mod.GetObjectPosition(mod.GetHQ(1)));
+            console.log(`WaitForCurrentMapGate | Actual HQ position: x=${hqPos.x}, y=${hqPos.y}, z=${hqPos.z}`);
+            console.log(`WaitForCurrentMapGate | Expected positions:\nNEXUS=(${NEXUS_SURVIVOR_HQ.position.x},${NEXUS_SURVIVOR_HQ.position.y},${NEXUS_SURVIVOR_HQ.position.z}),\nSAND=(${SAND_SURVIVOR_HQ.position.x},${SAND_SURVIVOR_HQ.position.y},${SAND_SURVIVOR_HQ.position.z}),\nSAND2=(${SAND2_SURVIVOR_HQ.position.x},${SAND2_SURVIVOR_HQ.position.y},${SAND2_SURVIVOR_HQ.position.z})`);
         }
 
         if (showStatusToast) {

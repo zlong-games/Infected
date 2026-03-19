@@ -58,7 +58,7 @@
   "banned_weapon_removed": "{} tried to use a survivor's weapon! Shame!",
   "banned_vehicle": "You have a license for that?",
   "need_sledgehammer_door": "Come back with a sledgehammer...",
-  "waiting_hq_position": "Waiting for HQ position verification...{}",
+  "waiting_hq_position": "Waiting up to 60 seconds for setup...{}",
   "current_map_NEXUS": "Current Map: NEXUS",
   "current_map_SAND": "Current Map: SAND",
   "current_map_SAND2": "Current Map: SAND2",
