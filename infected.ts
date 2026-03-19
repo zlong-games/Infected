@@ -7617,6 +7617,13 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
     mod.PlaySound(SFX_AREA_EXIT, 1, eventPlayer);
 }
 
+export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
+    const playerProfile = PlayerProfile.Get(eventPlayer);
+    if (playerProfile?.isInfectedTeam) {
+        mod.ForcePlayerExitVehicle(eventPlayer);
+        Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, eventPlayer);
+    }
+}
 
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
