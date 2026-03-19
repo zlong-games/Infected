@@ -7638,10 +7638,16 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
 }
 
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
-    const playerProfile = PlayerProfile.Get(eventPlayer);
-    if (playerProfile?.isInfectedTeam) {
-        mod.ForcePlayerExitVehicle(eventPlayer);
-        Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, eventPlayer);
+    const playersInVehicle = mod.GetAllPlayersInVehicle(eventVehicle);
+    console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
+    // attempting to use the mod APIs to fetch players
+    for (let i = 0; i < mod.CountOf(playersInVehicle); i++) {
+        const playerInSeat = mod.ValueInArray(playersInVehicle, i);
+        if ((mod.GetObjId(mod.GetTeam(playerInSeat)) === mod.GetObjId(INFECTED_TEAM))) {
+            console.log(`OnPlayerEnterVehicle | Vehicle(${mod.GetObjId(eventVehicle)}) has an infected player inside. Forcing Player(${mod.GetObjId(eventPlayer)}) to exit.`);
+            mod.ForcePlayerExitVehicle(playerInSeat, eventVehicle);
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, playerInSeat);
+        }
     }
 }
 
