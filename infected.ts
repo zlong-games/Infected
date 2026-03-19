@@ -2,7 +2,7 @@ import { ParseUI } from "modlib";
 
 const VERSION = "1.02.05";
 
-// resolved at mode start by matching HQ position against HQPOSITIONS
+// resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
 
 const DEBUG = false; // turn these off on publish
@@ -79,6 +79,8 @@ const POINTS_ROUND_SURVIVED = 850;
 const HEALTH_RESTORE_ON_INFECTED = 50;
 const LMS_RELOAD_POLL_SECONDS = 0.1;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
+const CURRENT_MAP_HQ_POSITION_THRESHOLD = 1.0;
+const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 1.0;
 
 interface Vector3 {
     x: number;
@@ -159,7 +161,7 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND, {
 RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
     worldIcons: [ResupplyWorldIconId.PRIMARY, ResupplyWorldIconId.SECONDARY],
     positionsByInteractPoint: new Map<ResupplyInteractPointId, Vector3>([
-        [ResupplyInteractPointId.POINT_301, { x: -49.73, y: 36.617, z: -7.779 }],
+        [ResupplyInteractPointId.POINT_301, { x: -49.73, y: 36.617, z: -7.779 }], // need to verify these...
         [ResupplyInteractPointId.POINT_302, { x: -39.284, y: 35.277, z: -24.819 }],
     ]),
 });
@@ -6304,26 +6306,52 @@ function ConfigureResupplyForMap(mapIdentifier: MapNames) {
     });
 }
 
-function CompareHQPositions(requestedHQPos: Vector3, threshold: number = 1.0): MapNames | undefined {
+function GetVector3Distance(a: Vector3, b: Vector3): number {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = a.z - b.z;
+
+    return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
+}
+
+function CompareHQPositions(requestedHQPos: Vector3, threshold: number = CURRENT_MAP_HQ_POSITION_THRESHOLD): MapNames | undefined {
     for (const [identifier, hqInfo] of HQPOSITIONS.entries()) {
-        const hqPos = hqInfo.position;
-
-        const dx = requestedHQPos.x - hqPos.x;
-        const dy = requestedHQPos.y - hqPos.y;
-        const dz = requestedHQPos.z - hqPos.z;
-        const distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
-
-        if (distance <= threshold) {
+        if (GetVector3Distance(requestedHQPos, hqInfo.position) <= threshold) {
             return identifier;
         }
     }
     return undefined;
 }
 
+function CompareResupplyPositions(mapIdentifier: MapNames, threshold: number = CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD): boolean {
+    const mapConfig = RESUPPLY_CONFIG_BY_MAP.get(mapIdentifier);
+    if (!mapConfig) {
+        return false;
+    }
+
+    for (const [interactPointId, expectedPosition] of mapConfig.positionsByInteractPoint.entries()) {
+        const interactPoint = mod.GetInteractPoint(interactPointId);
+        if (mod.GetObjId(interactPoint) !== interactPointId) {
+            return false;
+        }
+
+        const polledPosition = Helpers.VectorToVector3(mod.GetObjectPosition(interactPoint));
+        if (GetVector3Distance(polledPosition, expectedPosition) > threshold) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 function GetCurrentMap(): MapNames | undefined {
     const hqPosition = mod.GetObjectPosition(mod.GetHQ(1));
     const mapIdentifier = CompareHQPositions(Helpers.VectorToVector3(hqPosition));
     if (!mapIdentifier) {
+        return undefined;
+    }
+
+    if (!CompareResupplyPositions(mapIdentifier)) {
         return undefined;
     }
 
@@ -6338,7 +6366,7 @@ async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames
     while (true) {
         const mapIdentifier = GetCurrentMap();
         if (mapIdentifier) {
-            console.log(`WaitForCurrentMapGate | Map verified from HQ position: ${mapIdentifier}`);
+            console.log(`WaitForCurrentMapGate | Map verified from HQ and resupply positions: ${mapIdentifier}`);
             let mapIdentifiedStringkey = MakeMessage(mod.stringkeys.map_unknown);
             switch (mapIdentifier) {
                 case MapNames.NEXUS:
