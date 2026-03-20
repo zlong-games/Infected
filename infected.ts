@@ -81,7 +81,7 @@ const LMS_RELOAD_POLL_SECONDS = 0.1;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
 const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
 const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
-const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 55; // Safety timeout to prevent infinite loops
+const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 20; // Safety timeout to prevent infinite loops
 
 interface Vector3 {
     x: number;
@@ -6410,7 +6410,7 @@ async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames
         }
 
         if (showStatusToast) {
-            const waitMessage = MakeMessage(mod.stringkeys.waiting_hq_position, count);
+            const waitMessage = MakeMessage(mod.stringkeys.waiting_hq_position, WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS, count);
             if (gameStateMessageToast.isOpen()) {
                 gameStateMessageToast.refresh(waitMessage);
             } else {
@@ -7633,22 +7633,9 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
     }
     const SFX_AREA_EXIT = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_Gadgets_EpiPen_ReviveDone_1p_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
     mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.Saturated, false);
+    mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.FirstPerson);
     playerProfile?.UpdateInfectedNightOverlay(true);
     mod.PlaySound(SFX_AREA_EXIT, 1, eventPlayer);
-}
-
-export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
-    const playersInVehicle = mod.GetAllPlayersInVehicle(eventVehicle);
-    console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
-    // attempting to use the mod APIs to fetch players
-    for (let i = 0; i < mod.CountOf(playersInVehicle); i++) {
-        const playerInSeat = mod.ValueInArray(playersInVehicle, i);
-        if ((mod.GetObjId(mod.GetTeam(playerInSeat)) === mod.GetObjId(INFECTED_TEAM))) {
-            console.log(`OnPlayerEnterVehicle | Vehicle(${mod.GetObjId(eventVehicle)}) has an infected player inside. Forcing Player(${mod.GetObjId(eventPlayer)}) to exit.`);
-            mod.ForcePlayerExitVehicle(playerInSeat, eventVehicle);
-            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, playerInSeat);
-        }
-    }
 }
 
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
@@ -7698,10 +7685,32 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
         ApplyInfectedHumanAreaSprintSpeedBoost(eventPlayer, pp);
     }
     const SFX = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_Charged_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
-    mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.Saturated, true);
-    pp?.UpdateInfectedNightOverlay(false);
     mod.PlaySound(SFX, 1, eventPlayer);
+    mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.Saturated, true);
+    mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.ThirdPerson);
+    pp?.UpdateInfectedNightOverlay(false);
 
+}
+
+export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
+    const playersInVehicle = mod.GetAllPlayersInVehicle(eventVehicle);
+    console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
+    const playerProfile = PlayerProfile.Get(eventPlayer);
+    playerProfile?.loadoutDisplayBottom?.Hide();
+    // attempting to use the mod APIs to fetch players
+    for (let i = 0; i < mod.CountOf(playersInVehicle); i++) {
+        const playerInSeat = mod.ValueInArray(playersInVehicle, i);
+        if ((mod.GetObjId(mod.GetTeam(playerInSeat)) === mod.GetObjId(INFECTED_TEAM))) {
+            console.log(`OnPlayerEnterVehicle | Vehicle(${mod.GetObjId(eventVehicle)}) has an infected player inside. Forcing Player(${mod.GetObjId(eventPlayer)}) to exit.`);
+            mod.ForcePlayerExitVehicle(playerInSeat, eventVehicle);
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, playerInSeat);
+        }
+    }
+}
+
+export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
+    const playerProfile = PlayerProfile.Get(eventPlayer);
+    playerProfile?.loadoutDisplayBottom?.Show();
 }
 
 export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
