@@ -160,7 +160,7 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND, {
 RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
     worldIcons: [ResupplyWorldIconId.PRIMARY, ResupplyWorldIconId.SECONDARY],
     positionsByInteractPoint: new Map<ResupplyInteractPointId, Vector3>([
-        [ResupplyInteractPointId.POINT_301, { x: 34.907, y: 59.282, z: -36.942 }],
+        [ResupplyInteractPointId.POINT_301, { x: 37.679, y: 63.894, z: -9.451 }],
         [ResupplyInteractPointId.POINT_302, { x: -6.244, y: 60.423, z: -27.941 }],
     ]),
 });
@@ -516,6 +516,7 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
     infectedBotTarget?: mod.Player,
     nextInfectedBotTickAt?: number,
     infectedBotLadderActive?: boolean,
+    infectedBotSpawnedAt?: number,
     // Vehicle-chase anti-stutter state
     infectedBotLastMoveIssuedAt?: number,
     infectedBotLastMovePos?: mod.Vector,
@@ -3522,11 +3523,9 @@ class PlayerProfile {
                         PlayerProfile._AIPlayerProfiles.push(playerProfile)
                     }
                     if (!playerProfile.spawnerObjID) {
-                        if (!spawnerObjID) {
-                            console.log(`PlayerProfile "ERROR" | PlayerProfile is missing a spawnerObj and one wasn't given!`)
+                        if (spawnerObjID) {
+                            playerProfile.spawnerObjID = spawnerObjID;
                         }
-                        console.log(`PlayerProfile | adding spawnerObjID[${spawnerObjID}] to PlayerProfile(${mod.GetObjId(player)})`);
-                        playerProfile.spawnerObjID = spawnerObjID;
                     }
                 }
                 this._allPlayers.set(index, playerProfile);
@@ -4920,6 +4919,7 @@ class GameHandler {
     static async ClearTemporaryArrays() {
         AISpawnHandler.awaitingSpawnQueue = [];
         AISpawnHandler.spawnsInUse.clear();
+        AISpawnHandler.spawnerCooldowns.clear();
         if (AISpawnHandler.infectedSpawnIndex >= INFECTED_AI_SPAWNERS.length) {
             AISpawnHandler.infectedSpawnIndex = 0;
         }
@@ -5710,6 +5710,10 @@ class AISpawnHandler {
     static isProcessingSpawnQueue: boolean = false;
     static startingInfectedChosen: boolean = false;
     static startingSurvivorsChosen: boolean = false;
+    /** Per-spawner cooldown: maps spawnerObjID timestamp (seconds) of last use. */
+    static spawnerCooldowns = new Map<number, number>();
+    /** Minimum seconds between consecutive uses of the same spawner. */
+    static readonly SPAWNER_COOLDOWN_SECONDS = 4;
 
     /**
      * Initializes the starting survivor spawn profiles and adds them to the spawn queue.
@@ -5788,17 +5792,54 @@ class AISpawnHandler {
         }
     }
     static GetSequentialInfectedSpawnerID() {
-        let tempArray: Array<number> = [...AISpawnHandler.shuffledInfectedSpawns];
-        let spawnerObjID = tempArray.shift();
+        const now = Date.now() / 1000;
 
+        // Try to find an available spawner from the shuffled pool that is:
+        //  -not currently in spawnsInUse (pending confirmation)
+        //  -past its per-spawner cooldown
+        const tryPool = (): number | undefined => {
+            const pool = AISpawnHandler.shuffledInfectedSpawns.length
+                ? AISpawnHandler.shuffledInfectedSpawns
+                : Helpers.ShuffleArray([...INFECTED_AI_SPAWNERS]);
+            AISpawnHandler.shuffledInfectedSpawns = pool;
+
+            for (let attempt = 0; attempt < pool.length; attempt++) {
+                const id = pool.shift()!;
+                const lastUsed = AISpawnHandler.spawnerCooldowns.get(id) ?? 0;
+                if (!AISpawnHandler.spawnsInUse.has(id) && (now - lastUsed) >= AISpawnHandler.SPAWNER_COOLDOWN_SECONDS) {
+                    return id;
+                }
+                // Put it back at end of pool for later
+                pool.push(id);
+            }
+            return undefined;
+        };
+
+        let spawnerObjID = tryPool();
+
+        // Fallback: if every spawner is on cooldown, pick the one whose cooldown expires soonest
         if (!spawnerObjID) {
-            let shuffledArray = Helpers.ShuffleArray([...INFECTED_AI_SPAWNERS]);
-            AISpawnHandler.shuffledInfectedSpawns = shuffledArray;
-            spawnerObjID = shuffledArray.shift();
-            AISpawnHandler.shuffledInfectedSpawns = shuffledArray;
-            return spawnerObjID;
+            let oldestTime = Infinity;
+            let oldestId: number | undefined;
+            for (const id of INFECTED_AI_SPAWNERS) {
+                if (AISpawnHandler.spawnsInUse.has(id)) continue;
+                const t = AISpawnHandler.spawnerCooldowns.get(id) ?? 0;
+                if (t < oldestTime) {
+                    oldestTime = t;
+                    oldestId = id;
+                }
+            }
+            // Last resort: pick any spawner that isn't in spawnsInUse
+            if (!oldestId) {
+                for (const id of INFECTED_AI_SPAWNERS) {
+                    if (!AISpawnHandler.spawnsInUse.has(id)) {
+                        oldestId = id;
+                        break;
+                    }
+                }
+            }
+            spawnerObjID = oldestId;
         }
-        AISpawnHandler.shuffledInfectedSpawns = tempArray;
 
         return spawnerObjID;
     }
@@ -5819,6 +5860,8 @@ class AISpawnHandler {
         const botName = MakeMessage(botProfile.playerName);
         mod.SpawnAIFromAISpawner(botProfile.spawnerObject, botProfile.soldierClass, botName, botProfile.assignedTeamObj);
         mod.SetUnspawnDelayInSeconds(botProfile.spawnerObject, 2);
+
+        AISpawnHandler.spawnerCooldowns.set(botProfile.spawnerObjID, Date.now() / 1000);
     }
 
     static async ProcessBotSpawnQueue() {
@@ -5852,12 +5895,28 @@ class AISpawnHandler {
             }
             await mod.Wait(2);
         }
-        // begin spawning bots
-        for (let i = 0; AISpawnHandler.awaitingSpawnQueue.length; i++) {
+        // begin spawning bots 
+        // stagger each spawn to give the engine time to process
+        while (AISpawnHandler.awaitingSpawnQueue.length) {
             const botAtIndex = AISpawnHandler.awaitingSpawnQueue.shift();
             if (botAtIndex && botAtIndex.spawnerObjID) {
+                if (AISpawnHandler.spawnsInUse.has(botAtIndex.spawnerObjID)) {
+                    console.log(`ProcessBotSpawnQueue | spawnerObjID(${botAtIndex.spawnerObjID}) already in spawnsInUse - re-queuing with new spawner`);
+                    const newId = AISpawnHandler.GetSequentialInfectedSpawnerID();
+                    if (newId) {
+                        botAtIndex.spawnerObjID = newId;
+                        botAtIndex.spawnerObject = mod.GetSpawner(newId);
+                    } else {
+                        // No spawners available at all 
+                        // put back in queue for next cycle
+                        AISpawnHandler.awaitingSpawnQueue.push(botAtIndex);
+                        break;
+                    }
+                }
                 AISpawnHandler.spawnsInUse.set(botAtIndex.spawnerObjID, botAtIndex);
                 AISpawnHandler.SpawnIndividualBot(botAtIndex);
+                // Stagger spawns to prevent engine from dropping simultaneous spawner calls
+                await mod.Wait(0.1);
             }
         }
         AISpawnHandler.isProcessingSpawnQueue = false;
@@ -5874,7 +5933,25 @@ class AISpawnHandler {
                 GameHandler.isSpawnCheckRunning = false;
                 return;
             }
-            await mod.Wait(GameHandler.survivorsCount === 1 ? INFECTED_RESPAWN_TIME : INFECTED_RESPAWN_TIME_LAST_MAN);
+            await mod.Wait(GameHandler.survivorsCount === 1 ? INFECTED_RESPAWN_TIME_LAST_MAN : INFECTED_RESPAWN_TIME);
+
+            // Expire orphaned spawnsInUse entries that never received OnBotSpawnFromSpawner
+            const now = Date.now() / 1000;
+            const SPAWN_CONFIRM_TIMEOUT = 5; // seconds
+            for (const [spawnerObjID, orphanedBot] of AISpawnHandler.spawnsInUse) {
+                const spawnedAt = AISpawnHandler.spawnerCooldowns.get(spawnerObjID) ?? 0;
+                if (now - spawnedAt >= SPAWN_CONFIRM_TIMEOUT) {
+                    console.log(`OnGoingSpawnerCheck | spawn confirmation timeout for spawnerObjID(${spawnerObjID}) bot(${orphanedBot.playerName}) - re-queuing`);
+                    AISpawnHandler.spawnsInUse.delete(spawnerObjID);
+                    const newId = AISpawnHandler.GetSequentialInfectedSpawnerID();
+                    if (newId) {
+                        orphanedBot.spawnerObjID = newId;
+                        orphanedBot.spawnerObject = mod.GetSpawner(newId);
+                    }
+                    AISpawnHandler.AddToSpawnQueue(orphanedBot);
+                }
+            }
+
             AISpawnHandler.ProcessBotSpawnQueue();
         }
     }
@@ -6134,6 +6211,7 @@ function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
     nextInfectedBotTickAt?: number,
     infectedBotLastMoveIssuedAt?: number,
     infectedBotLastMovePos?: mod.Vector,
+    infectedBotSpawnedAt?: number,
 }) {
 
     // Gate: only run during active round with a valid, alive bot
@@ -6147,6 +6225,12 @@ function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
         tickState.infectedBotInitialized = true;
         tickState.infectedBotLastMoveIssuedAt = 0;
         tickState.infectedBotLastMovePos = undefined;
+        tickState.infectedBotSpawnedAt = Date.now() / 1000;
+    }
+
+    const nowGrace = Date.now() / 1000;
+    if (tickState.infectedBotSpawnedAt && (nowGrace - tickState.infectedBotSpawnedAt) < 0.5) {
+        return;
     }
 
     const now = Date.now() / 1000;
@@ -7213,14 +7297,29 @@ function CheckForBannedWeapons(player: mod.Player) {
 
 // planned to use custom ladder logic for the AI infected, but never finished it
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
-    if (!mod.IsPlayerValid(eventPlayer) || !ENABLE_AI_LADDER_LOGIC) {
-        if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(SURVIVOR_TEAM)) {
-            console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
-            mod.AIIdleBehavior(eventPlayer);
-        }
+    if (!mod.IsPlayerValid(eventPlayer)) return;
+
+    // Survivor bots: revert to BF behavior
+    if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(SURVIVOR_TEAM)) {
+        console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
+        mod.AIBattlefieldBehavior(eventPlayer);
         return;
     }
-    // if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
+
+    // Infected bots: clear stale target so the next tick picks a fresh one, fall back to battlefield behavior
+    if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
+        const objId = mod.GetObjId(eventPlayer);
+        const tickState = PLAYER_ONGOING_TICK_STATE.get(objId);
+        if (tickState) {
+            tickState.infectedBotTarget = undefined;
+            tickState.infectedBotLastMovePos = undefined;
+        }
+        mod.AIBattlefieldBehavior(eventPlayer);
+        return;
+    }
+
+    // Original ladder logic (disabled / kept for future reference)
+    // if (ENABLE_AI_LADDER_LOGIC && mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
     //     const objId = mod.GetObjId(eventPlayer);
     //     console.log(`OnAIMoveToFailed | Infected Bot(${objId}) switching to ladder logic`);
     //     const playerProfile = PlayerProfile.Get(eventPlayer);
@@ -7426,8 +7525,16 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         const playerProfile = PlayerProfile.Get(eventPlayer);
         playerProfile?.loadoutDisplayBottom?.Hide();
 
+        if (GameHandler.gameState === GameState.GameRoundIsRunning) {
+            for (const [, tickState] of PLAYER_ONGOING_TICK_STATE) {
+                if (tickState.infectedBotTarget && mod.IsPlayerValid(tickState.infectedBotTarget)
+                    && mod.GetObjId(tickState.infectedBotTarget) === playerObjID) {
+                    tickState.infectedBotTarget = undefined;
+                    tickState.infectedBotLastMovePos = undefined;
+                }
+            }
+        }
 
-        // This mess of a bot spawn system is fucked and needs a second look if DICE/Ripple/EA changes bots leaving the game after they die
         if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
             let linkedBotProfile = playerProfile?._botProfile;
             const spawnerObjID = playerProfile?.spawnerObjID;
