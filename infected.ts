@@ -1,4 +1,4 @@
-import { ParseUI } from "modlib";
+import { ParseUI, ConvertArray } from "modlib";
 
 const VERSION = "1.02.05";
 
@@ -7207,6 +7207,947 @@ function CheckForBannedWeapons(player: mod.Player) {
     return true;
 }
 
+// ============================================================
+// LEAP ATTACK SYSTEM
+// ============================================================
+
+// ============================================================
+// LEAP TUNABLE CONSTANTS -- adjust these values during testing
+// ============================================================
+
+/** Total leap distance in meters along facing direction */
+let LEAP_DISTANCE = 25;
+
+/** Cooldown between leaps in seconds */
+let LEAP_COOLDOWN_SECONDS = 2.0;
+
+/** Explosive damage dealt to occupied vehicles on collision */
+let LEAP_DAMAGE = 500;
+
+/** Collision radius for hitting vehicles during the leap path */
+let LEAP_HIT_RADIUS = 4.0;
+
+/** Number of intermediate teleport steps (more = smoother dash) */
+let LEAP_STEP_COUNT = 10;
+
+/** Seconds between each teleport step */
+let LEAP_STEP_DELAY = 0.02;
+
+/** How much vertical look angle affects leap trajectory (0 = flat, 1 = full) */
+let LEAP_VERTICAL_FACTOR = 0.3;
+
+/** Peak height of the parabolic arc at midpoint in meters */
+let LEAP_HEIGHT_ARC = 1.5;
+
+/** Seconds to hold third-person camera + VFX after landing before switching back */
+let LEAP_LANDING_LINGER = 0.5;
+
+/** Seconds the player must hold crouch before leap can activate */
+let LEAP_CROUCH_HOLD_SECONDS = 1.5;
+
+/** Toggle debug UI + console logging for RayCast testing */
+const DEBUG_LEAP = true;
+
+/** Range of the debug RayCast fired on any weapon fire */
+let DEBUG_RAY_RANGE = 100;
+
+/** How long the debug VFX marker persists at the hit point (seconds) */
+let DEBUG_RAY_VFX_DURATION = 2.0;
+
+// ============================================================
+// PER-PLAYER LEAP STATE
+// ============================================================
+
+interface LeapState {
+    lastLeapTime: number;
+    isLeaping: boolean;
+    cooldownWidget: mod.UIWidget | undefined;
+    debugWidget: mod.UIWidget | undefined;
+    debugPosWidget: mod.UIWidget | undefined;
+    debugNrmWidget: mod.UIWidget | undefined;
+    containerWidget: mod.UIWidget | undefined;
+    debugContainerWidget: mod.UIWidget | undefined;
+    /** Active landing VFX, unspawned after the post-landing linger period */
+    leapVfx: mod.Object | undefined;
+    /** Tracer dart VFX that follows the player mid-leap */
+    tracerVfx: mod.VFX | undefined;
+    /** RayCast collision point, set by OnRayCastHit before the teleport loop */
+    rayHitPoint: mod.Vector | undefined;
+    /** Distance from start position to the RayCast hit point */
+    rayHitDist: number;
+    /** VFX spawned at the collision target to indicate damage */
+    hitVfx: mod.Object | undefined;
+    /** VFX marker spawned at the debug RayCast hit point */
+    debugRayVfx: mod.Object | undefined;
+    /** Whether the pending RayCast is for the leap (true) or debug fire (false) */
+    rayIsLeap: boolean;
+    /** Tracks whether the player was firing last tick to detect fire edges */
+    wasFiring: boolean;
+    /** Timestamp (seconds) when the player started holding crouch, 0 if not crouching */
+    crouchStartTime: number;
+    /** Container widget for the leap status HUD element */
+    statusContainerWidget: mod.UIWidget | undefined;
+    /** Text widget inside the status container */
+    statusWidget: mod.UIWidget | undefined;
+}
+
+const LEAP_STATES = new Map<number, LeapState>();
+
+// ============================================================
+// LEAP VECTOR HELPERS
+// ============================================================
+
+function getVecX(v: mod.Vector): number {
+    return mod.DotProduct(v, mod.RightVector());
+}
+function getVecY(v: mod.Vector): number {
+    return mod.DotProduct(v, mod.UpVector());
+}
+function getVecZ(v: mod.Vector): number {
+    return mod.DotProduct(v, mod.BackwardVector());
+}
+
+function flattenDirection(dir: mod.Vector): mod.Vector {
+    const yComponent = mod.Multiply(mod.UpVector(), getVecY(dir));
+    return mod.Normalize(mod.Subtract(dir, yComponent));
+}
+
+function directionToYaw(dir: mod.Vector): number {
+    return Math.atan2(getVecX(dir), getVecZ(dir));
+}
+
+function arcHeight(t: number, peakHeight: number): number {
+    return 4 * peakHeight * t * (1 - t);
+}
+
+function computeLeapStepPositions(
+    startPos: mod.Vector,
+    leapDir: mod.Vector,
+    effectiveDistance: number
+): mod.Vector[] {
+    const positions: mod.Vector[] = [];
+    for (let step = 1; step <= LEAP_STEP_COUNT; step++) {
+        const t = step / LEAP_STEP_COUNT;
+        let stepPos = mod.Add(startPos, mod.Multiply(leapDir, effectiveDistance * t));
+        const heightBoost = arcHeight(t, LEAP_HEIGHT_ARC);
+        stepPos = mod.Add(stepPos, mod.Multiply(mod.UpVector(), heightBoost));
+        positions.push(stepPos);
+    }
+    return positions;
+}
+
+function vecToString(v: mod.Vector): string {
+    return `(${getVecX(v).toFixed(2)}, ${getVecY(v).toFixed(2)}, ${getVecZ(v).toFixed(2)})`;
+}
+
+// ============================================================
+// LEAP UI CREATION
+// ============================================================
+
+function createLeapUI(player: mod.Player, playerObjId: number) {
+    const containerWidget = ParseUI({
+        type: "Container",
+        name: `leap_cd_ctr_${playerObjId}`,
+        position: [0, -80, 0],
+        size: [150, 40],
+        anchor: mod.UIAnchor.Center,
+        bgColor: [0.08, 0.08, 0.08],
+        bgAlpha: 0.75,
+        bgFill: mod.UIBgFill.Blur,
+        visible: false,
+        playerId: player,
+        children: [{
+            type: "Text",
+            name: `leap_cd_txt_${playerObjId}`,
+            position: [0, 0, 0],
+            size: [140, 36],
+            anchor: mod.UIAnchor.Center,
+            textLabel: mod.Message(mod.stringkeys.leap_ready),
+            textColor: [1, 0.85, 0],
+            textAlpha: 1,
+            textSize: 16,
+            textAnchor: mod.UIAnchor.Center,
+        }],
+    });
+
+    const cooldownWidget = mod.FindUIWidgetWithName(
+        `leap_cd_txt_${playerObjId}`, containerWidget!
+    ) as mod.UIWidget | undefined;
+
+    let debugContainerWidget: mod.UIWidget | undefined;
+    let debugWidget: mod.UIWidget | undefined;
+    let debugPosWidget: mod.UIWidget | undefined;
+    let debugNrmWidget: mod.UIWidget | undefined;
+
+    if (DEBUG_LEAP) {
+        debugContainerWidget = ParseUI({
+            type: "Container",
+            name: `leap_dbg_ctr_${playerObjId}`,
+            position: [0, -135, 0],
+            size: [280, 80],
+            anchor: mod.UIAnchor.Center,
+            bgColor: [0.04, 0.04, 0.12],
+            bgAlpha: 0.85,
+            bgFill: mod.UIBgFill.Blur,
+            visible: true,
+            playerId: player,
+            children: [
+                {
+                    type: "Text",
+                    name: `leap_dbg_txt_${playerObjId}`,
+                    position: [5, 2, 0],
+                    size: [270, 22],
+                    anchor: mod.UIAnchor.TopLeft,
+                    textLabel: mod.Message(mod.stringkeys.leap_rc_waiting),
+                    textColor: [0.6, 0.9, 1],
+                    textAlpha: 1,
+                    textSize: 11,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                },
+                {
+                    type: "Text",
+                    name: `leap_dbg_pos_${playerObjId}`,
+                    position: [5, 24, 0],
+                    size: [270, 22],
+                    anchor: mod.UIAnchor.TopLeft,
+                    textLabel: mod.Message(mod.stringkeys.leap_rc_waiting),
+                    textColor: [0.5, 0.8, 0.9],
+                    textAlpha: 1,
+                    textSize: 11,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                },
+                {
+                    type: "Text",
+                    name: `leap_dbg_nrm_${playerObjId}`,
+                    position: [5, 46, 0],
+                    size: [270, 22],
+                    anchor: mod.UIAnchor.TopLeft,
+                    textLabel: mod.Message(mod.stringkeys.leap_rc_waiting),
+                    textColor: [0.5, 0.8, 0.9],
+                    textAlpha: 1,
+                    textSize: 11,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                },
+            ],
+        });
+
+        debugWidget = mod.FindUIWidgetWithName(
+            `leap_dbg_txt_${playerObjId}`, debugContainerWidget!
+        ) as mod.UIWidget | undefined;
+        debugPosWidget = mod.FindUIWidgetWithName(
+            `leap_dbg_pos_${playerObjId}`, debugContainerWidget!
+        ) as mod.UIWidget | undefined;
+        debugNrmWidget = mod.FindUIWidgetWithName(
+            `leap_dbg_nrm_${playerObjId}`, debugContainerWidget!
+        ) as mod.UIWidget | undefined;
+    }
+
+    const statusContainerWidget = ParseUI({
+        type: "Container",
+        name: `leap_status_ctr_${playerObjId}`,
+        position: [100, 100, 0],
+        size: [180, 36],
+        anchor: mod.UIAnchor.Center,
+        bgColor: [0.06, 0.06, 0.06],
+        bgAlpha: 0.8,
+        bgFill: mod.UIBgFill.Blur,
+        visible: true,
+        playerId: player,
+        children: [{
+            type: "Text",
+            name: `leap_status_txt_${playerObjId}`,
+            position: [0, 0, 0],
+            size: [170, 32],
+            anchor: mod.UIAnchor.Center,
+            textLabel: mod.Message(mod.stringkeys.leap_status_ready),
+            textColor: [0.2, 1, 0.3],
+            textAlpha: 1,
+            textSize: 14,
+            textAnchor: mod.UIAnchor.Center,
+        }],
+    });
+
+    const statusWidget = mod.FindUIWidgetWithName(
+        `leap_status_txt_${playerObjId}`, statusContainerWidget!
+    ) as mod.UIWidget | undefined;
+
+    return { containerWidget, cooldownWidget, debugContainerWidget, debugWidget, debugPosWidget, debugNrmWidget, statusContainerWidget, statusWidget };
+}
+
+// ============================================================
+// LEAP EXECUTION
+// ============================================================
+
+async function executeLeap(player: mod.Player, state: LeapState): Promise<void> {
+    state.isLeaping = true;
+    state.lastLeapTime = Date.now() / 1000;
+
+    const startPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+    const facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
+
+    const flatDir = flattenDirection(facingDir);
+    const verticalBias = getVecY(facingDir) * LEAP_VERTICAL_FACTOR;
+    const leapDir = mod.Normalize(
+        mod.Add(flatDir, mod.Multiply(mod.UpVector(), verticalBias))
+    );
+
+    const destination = mod.Add(startPos, mod.Multiply(leapDir, LEAP_DISTANCE));
+    const yaw = directionToYaw(facingDir);
+
+    if (DEBUG_LEAP) {
+        console.log(
+            `[LeapAttack] LEAP TRIGGERED | player=${mod.GetObjId(player)}`
+            + ` | from=${vecToString(startPos)} dir=${vecToString(facingDir)}`
+            + ` | dest=${vecToString(destination)} yaw=${yaw.toFixed(3)}`
+        );
+    }
+
+    // Fire RayCast to detect collision along the leap path
+    state.rayHitPoint = undefined;
+    state.rayHitDist = 0;
+    state.rayIsLeap = true;
+    const leapRayStart = mod.Add(eyePos, mod.Multiply(mod.UpVector(), 1.0));
+    mod.RayCast(player, leapRayStart, destination);
+    await mod.Wait(0.05);
+
+    // Determine effective leap distance (shortened if ray hit closer)
+    let effectiveDistance = LEAP_DISTANCE;
+    if (state.rayHitPoint && state.rayHitDist > 0 && state.rayHitDist < LEAP_DISTANCE) {
+        effectiveDistance = Math.max(state.rayHitDist - 1.0, 1.0);
+        if (DEBUG_LEAP) {
+            console.log(
+                `[LeapAttack] RayCast collision closer than leap distance`
+                + ` | rayHitDist=${state.rayHitDist.toFixed(2)} > effective=${effectiveDistance.toFixed(2)}`
+            );
+        }
+    } else if (DEBUG_LEAP) {
+        console.log(
+            `[LeapAttack] RayCast: no closer collision, using full LEAP_DISTANCE=${LEAP_DISTANCE}`
+        );
+    }
+
+    const effectiveDest = mod.Add(startPos, mod.Multiply(leapDir, effectiveDistance));
+
+    if (DEBUG_LEAP) {
+        console.log(
+            `[LeapAttack] RayCast fired | eye=${vecToString(eyePos)} > dest=${vecToString(destination)}`
+            + ` | effectiveDest=${vecToString(effectiveDest)}`
+        );
+    }
+
+    // Restrict inputs during dash
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Zoom, true);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Reload, true);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, true);
+
+    // Show "LEAPING" on cooldown widget
+    if (state.containerWidget) {
+        mod.SetUIWidgetVisible(state.containerWidget, true);
+    }
+    if (state.cooldownWidget) {
+        mod.SetUITextLabel(state.cooldownWidget, mod.Message(mod.stringkeys.leap_leaping));
+        mod.SetUITextColor(state.cooldownWidget, mod.CreateVector(1, 0.3, 0.2));
+    }
+
+    // Switch to third-person camera for the duration of the leap
+    mod.SetCameraTypeForPlayer(player, mod.Cameras.ThirdPerson);
+
+    // Pre-compute the full leap path
+    const stepPositions = computeLeapStepPositions(startPos, leapDir, effectiveDistance);
+
+    // Apply damage BEFORE teleporting (prevents vehicle despawn from collision)
+    const collision = preCheckLeapCollisions(player, stepPositions);
+
+    // If a target was hit, truncate the path to stop one step before it
+    const lastStepIndex = collision.stepIndex >= 0
+        ? collision.stepIndex - 1
+        : stepPositions.length - 1;
+
+    // Spawn hit indicator VFX at the target position (only if damage was dealt)
+    if (collision.damageDealt && collision.targetPos) {
+        if (state.hitVfx) {
+            mod.UnspawnObject(state.hitVfx);
+            state.hitVfx = undefined;
+        }
+        const hitVfx = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.FX_CarlGustaf_MK4_Impact,
+            collision.targetPos,
+            mod.CreateVector(0, 0, 0),
+            mod.CreateVector(1, 1, 1)
+        ) as mod.VFX;
+        mod.EnableVFX(hitVfx, true);
+        state.hitVfx = hitVfx;
+        if (DEBUG_LEAP) {
+            console.log(
+                `[LeapAttack] Hit VFX spawned at target pos=${vecToString(collision.targetPos)}`
+            );
+        }
+    }
+
+    if (DEBUG_LEAP && collision.stepIndex >= 0) {
+        console.log(
+            `[LeapAttack] Path truncated: collision at step ${collision.stepIndex + 1}`
+            + ` | teleporting through step ${lastStepIndex + 1} of ${stepPositions.length}`
+        );
+    }
+
+    // Spawn tracer dart VFX on the player
+    const tracerVfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
+        startPos,
+        mod.CreateVector(0, 0, 0),
+        mod.CreateVector(1, 1, 1)
+    ) as mod.VFX;
+    mod.EnableVFX(tracerVfx, true);
+    state.tracerVfx = tracerVfx;
+
+    // Stepped teleport loop (uses pre-computed positions, truncated on collision)
+    for (let i = 0; i <= lastStepIndex; i++) {
+        mod.Teleport(player, stepPositions[i], yaw);
+
+        if (state.tracerVfx) {
+            mod.MoveVFX(state.tracerVfx, stepPositions[i], mod.CreateVector(0, 0, 0));
+        }
+
+        if (i < lastStepIndex) {
+            await mod.Wait(LEAP_STEP_DELAY);
+        }
+    }
+
+    // Re-enable inputs
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Zoom, false);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Reload, false);
+    mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
+
+    // Wait until the player is on the ground before impact
+    const maxGroundWait = 20;
+    for (let i = 0; i < maxGroundWait; i++) {
+        const onGround = mod.GetSoldierState(player, mod.SoldierStateBool.IsOnGround);
+        const jumping = mod.GetSoldierState(player, mod.SoldierStateBool.IsJumping);
+        if (onGround && !jumping) break;
+        await mod.Wait(0.05);
+    }
+
+    // Spawn impact VFX at landing position
+    const landingPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const vfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Generic,
+        landingPos,
+        mod.CreateVector(0, 0, 0),
+        mod.CreateVector(1, 1, 1)
+    ) as mod.VFX;
+    state.leapVfx = vfx;
+    mod.EnableVFX(vfx, true);
+    if (DEBUG_LEAP) {
+        console.log(`[LeapAttack] Player grounded, VFX spawned at landing pos=${vecToString(landingPos)}`);
+    }
+
+    // Brief linger in third person so the player sees the impact
+    await mod.Wait(LEAP_LANDING_LINGER);
+
+    // Switch back to first person and clean up tracer VFX
+    mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
+    if (state.tracerVfx) {
+        mod.UnspawnObject(state.tracerVfx);
+        state.tracerVfx = undefined;
+    }
+
+    state.isLeaping = false;
+
+    // Start cooldown countdown UI
+    runLeapCooldownDisplay(player, state);
+}
+
+// ============================================================
+// PRE-TELEPORT COLLISION CHECK
+// ============================================================
+
+interface LeapCollisionResult {
+    stepIndex: number;
+    targetPos: mod.Vector | undefined;
+    damageDealt: boolean;
+}
+
+function preCheckLeapCollisions(
+    attacker: mod.Player,
+    stepPositions: mod.Vector[]
+): LeapCollisionResult {
+    const allVehicles = ConvertArray(mod.AllVehicles()) as mod.Vehicle[];
+
+    for (let i = 0; i < stepPositions.length; i++) {
+        const stepPos = stepPositions[i];
+
+        for (const vehicle of allVehicles) {
+            const vehiclePos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+            const dist = mod.DistanceBetween(stepPos, vehiclePos);
+
+            if (dist <= LEAP_HIT_RADIUS) {
+                const occupied = mod.IsVehicleOccupied(vehicle);
+
+                if (occupied) {
+                    mod.DealDamage(vehicle, LEAP_DAMAGE);
+                    if (DEBUG_LEAP) {
+                        console.log(
+                            `[LeapAttack] PRE-HIT OCCUPIED VEHICLE at step ${i + 1}/${stepPositions.length}`
+                            + ` | dist=${dist.toFixed(2)}m dmg=${LEAP_DAMAGE}`
+                        );
+                    }
+                    return { stepIndex: i, targetPos: vehiclePos, damageDealt: true };
+                } else {
+                    if (DEBUG_LEAP) {
+                        console.log(
+                            `[LeapAttack] BLOCKED by unoccupied vehicle at step ${i + 1}/${stepPositions.length}`
+                            + ` | dist=${dist.toFixed(2)}m (no damage)`
+                        );
+                    }
+                    return { stepIndex: i, targetPos: undefined, damageDealt: false };
+                }
+            }
+        }
+    }
+    return { stepIndex: -1, targetPos: undefined, damageDealt: false };
+}
+
+// ============================================================
+// LEAP COOLDOWN COUNTDOWN DISPLAY
+// ============================================================
+
+async function runLeapCooldownDisplay(player: mod.Player, state: LeapState): Promise<void> {
+    if (!state.cooldownWidget || !state.containerWidget) return;
+
+    mod.SetUIWidgetVisible(state.containerWidget, true);
+    mod.SetUITextColor(state.cooldownWidget, mod.CreateVector(1, 0.85, 0));
+
+    const totalSteps = Math.round(LEAP_COOLDOWN_SECONDS / 0.1);
+    for (let i = totalSteps; i >= 0; i--) {
+        if (!LEAP_STATES.has(mod.GetObjId(player))) return;
+
+        const remaining = i * 0.1;
+        const whole = Math.floor(remaining);
+        const tenths = Math.round((remaining - whole) * 10);
+        mod.SetUITextLabel(
+            state.cooldownWidget,
+            mod.Message(mod.stringkeys.leap_cooldown, whole, tenths)
+        );
+        if (i > 0) {
+            await mod.Wait(0.1);
+        }
+    }
+
+    if (!LEAP_STATES.has(mod.GetObjId(player))) return;
+    mod.SetUITextLabel(state.cooldownWidget, mod.Message(mod.stringkeys.leap_ready));
+    mod.SetUITextColor(state.cooldownWidget, mod.CreateVector(0.2, 1, 0.3));
+
+    await mod.Wait(0.5);
+
+    if (!LEAP_STATES.has(mod.GetObjId(player))) return;
+    mod.SetUIWidgetVisible(state.containerWidget, false);
+
+    if (state.leapVfx) {
+        mod.UnspawnObject(state.leapVfx);
+        state.leapVfx = undefined;
+    }
+    if (state.hitVfx) {
+        mod.UnspawnObject(state.hitVfx);
+        state.hitVfx = undefined;
+    }
+}
+
+// ============================================================
+// LEAP SYSTEM LIFECYCLE
+// ============================================================
+
+function InitLeapSystem(player: mod.Player): void {
+    const objId = mod.GetObjId(player);
+    if (objId < 0) return;
+
+    CleanupLeapSystem(player);
+
+    const ui = createLeapUI(player, objId);
+
+    LEAP_STATES.set(objId, {
+        lastLeapTime: 0,
+        isLeaping: false,
+        cooldownWidget: ui.cooldownWidget,
+        debugWidget: ui.debugWidget,
+        debugPosWidget: ui.debugPosWidget,
+        debugNrmWidget: ui.debugNrmWidget,
+        containerWidget: ui.containerWidget,
+        debugContainerWidget: ui.debugContainerWidget,
+        leapVfx: undefined,
+        hitVfx: undefined,
+        tracerVfx: undefined,
+        rayHitPoint: undefined,
+        rayHitDist: 0,
+        debugRayVfx: undefined,
+        rayIsLeap: false,
+        wasFiring: false,
+        crouchStartTime: 0,
+        statusContainerWidget: ui.statusContainerWidget,
+        statusWidget: ui.statusWidget,
+    });
+
+    if (DEBUG_LEAP) {
+        console.log(`[LeapAttack] InitLeapSystem | player=${objId}`);
+    }
+}
+
+function CleanupLeapSystem(player: mod.Player): void {
+    const objId = mod.GetObjId(player);
+    const state = LEAP_STATES.get(objId);
+    if (!state) return;
+
+    if (state.containerWidget) mod.DeleteUIWidget(state.containerWidget);
+    if (state.debugContainerWidget) mod.DeleteUIWidget(state.debugContainerWidget);
+    if (state.statusContainerWidget) mod.DeleteUIWidget(state.statusContainerWidget);
+    if (state.leapVfx) {
+        mod.UnspawnObject(state.leapVfx);
+        state.leapVfx = undefined;
+    }
+    if (state.hitVfx) {
+        mod.UnspawnObject(state.hitVfx);
+        state.hitVfx = undefined;
+    }
+    if (state.tracerVfx) {
+        mod.UnspawnObject(state.tracerVfx);
+        state.tracerVfx = undefined;
+    }
+    if (state.debugRayVfx) {
+        mod.UnspawnObject(state.debugRayVfx);
+        state.debugRayVfx = undefined;
+    }
+    mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
+
+    LEAP_STATES.delete(objId);
+
+    if (DEBUG_LEAP) {
+        console.log(`[LeapAttack] CleanupLeapSystem | player=${objId}`);
+    }
+}
+
+/** Cleanup variant that works with just an objId (for OnPlayerUndeploy) */
+function CleanupLeapStateByObjId(objId: number): void {
+    const state = LEAP_STATES.get(objId);
+    if (!state) return;
+
+    if (state.containerWidget) mod.DeleteUIWidget(state.containerWidget);
+    if (state.debugContainerWidget) mod.DeleteUIWidget(state.debugContainerWidget);
+    if (state.statusContainerWidget) mod.DeleteUIWidget(state.statusContainerWidget);
+    if (state.leapVfx) {
+        mod.UnspawnObject(state.leapVfx);
+        state.leapVfx = undefined;
+    }
+    if (state.hitVfx) {
+        mod.UnspawnObject(state.hitVfx);
+        state.hitVfx = undefined;
+    }
+    if (state.tracerVfx) {
+        mod.UnspawnObject(state.tracerVfx);
+        state.tracerVfx = undefined;
+    }
+    if (state.debugRayVfx) {
+        mod.UnspawnObject(state.debugRayVfx);
+        state.debugRayVfx = undefined;
+    }
+
+    LEAP_STATES.delete(objId);
+
+    if (DEBUG_LEAP) {
+        console.log(`[LeapAttack] CleanupLeapStateByObjId | objId=${objId}`);
+    }
+}
+
+function TickLeap(player: mod.Player): void {
+    const objId = mod.GetObjId(player);
+    const state = LEAP_STATES.get(objId);
+    if (!state) return;
+
+    if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive)) return;
+    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) return;
+
+    const isFiring = mod.GetSoldierState(player, mod.SoldierStateBool.IsFiring);
+    const isCrouching = mod.GetSoldierState(player, mod.SoldierStateBool.IsCrouching);
+    const now = Date.now() / 1000;
+
+    // Debug RayCast: fire on rising edge of fire input (any stance)
+    if (DEBUG_LEAP && isFiring && !state.wasFiring && !state.isLeaping) {
+        const eye = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const facing = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
+        const debugRayStart = mod.Add(eye, mod.Multiply(mod.UpVector(), 1.0));
+        const rayEnd = mod.Add(eye, mod.Multiply(facing, DEBUG_RAY_RANGE));
+        state.rayIsLeap = false;
+        mod.RayCast(player, debugRayStart, rayEnd);
+        if (DEBUG_LEAP) {
+            console.log(
+                `[LeapDebug] Debug RayCast fired | eye=${vecToString(eye)} > end=${vecToString(rayEnd)}`
+            );
+        }
+    }
+    state.wasFiring = isFiring;
+
+    // Track crouch hold time
+    if (isCrouching) {
+        if (state.crouchStartTime === 0) {
+            state.crouchStartTime = now;
+        }
+    } else {
+        state.crouchStartTime = 0;
+    }
+
+    // Compute cooldown remaining
+    const cooldownRemaining = Math.max(0, LEAP_COOLDOWN_SECONDS - (now - state.lastLeapTime));
+    const onCooldown = cooldownRemaining > 0 && state.lastLeapTime > 0;
+
+    // Compute crouch charge progress
+    const crouchHeld = state.crouchStartTime > 0 ? now - state.crouchStartTime : 0;
+    const crouchReady = crouchHeld >= LEAP_CROUCH_HOLD_SECONDS;
+
+    // Update status UI
+    if (state.statusWidget && state.statusContainerWidget) {
+        if (state.isLeaping) {
+            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_leaping));
+            mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.4, 0.1));
+        } else if (onCooldown) {
+            const whole = Math.floor(cooldownRemaining);
+            const tenths = Math.round((cooldownRemaining - whole) * 10);
+            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_cooldown, whole, tenths));
+            mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.85, 0));
+        } else if (isCrouching && !crouchReady) {
+            const chargeWhole = Math.floor(crouchHeld * 10);
+            const chargeTotal = Math.floor(LEAP_CROUCH_HOLD_SECONDS * 10);
+            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal));
+            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.8, 0.8, 0.2));
+        } else if (crouchReady) {
+            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_ready));
+            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.2, 1, 0.3));
+        } else {
+            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_idle));
+            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.6, 0.6, 0.6));
+        }
+    }
+
+    // Leap activation: crouch held long enough + fire
+    if (state.isLeaping) return;
+    if (!crouchReady || !isFiring) return;
+    if (onCooldown) return;
+
+    executeLeap(player, state);
+}
+
+// ============================================================
+// LEAP RAYCAST EVENT HANDLERS
+// ============================================================
+
+function HandleLeapRayCastHit(
+    eventPlayer: mod.Player,
+    eventPoint: mod.Vector,
+    eventNormal: mod.Vector
+): void {
+    const objId = mod.GetObjId(eventPlayer);
+    const state = LEAP_STATES.get(objId);
+
+    const px = getVecX(eventPoint), py = getVecY(eventPoint), pz = getVecZ(eventPoint);
+    const nx = getVecX(eventNormal), ny = getVecY(eventNormal), nz = getVecZ(eventNormal);
+
+    const playerPos = mod.GetSoldierState(eventPlayer, mod.SoldierStateVector.GetPosition);
+    const hitDist = mod.DistanceBetween(playerPos, eventPoint);
+
+    // Ignore self-hits
+    if (hitDist < 0.5) {
+        if (DEBUG_LEAP) {
+            console.log(
+                `[LeapAttack] OnRayCastHit IGNORED (self-hit) | player=${objId} dist=${hitDist.toFixed(2)}`
+            );
+        }
+        return;
+    }
+
+    if (state) {
+        state.rayHitPoint = eventPoint;
+        state.rayHitDist = hitDist;
+
+        // Spawn debug VFX marker (non-leap raycasts only)
+        if (!state.rayIsLeap && DEBUG_LEAP) {
+            if (state.debugRayVfx) {
+                mod.UnspawnObject(state.debugRayVfx);
+                state.debugRayVfx = undefined;
+            }
+            const marker = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
+                eventPoint,
+                mod.CreateVector(0, 0, 0),
+                mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(marker, true);
+            state.debugRayVfx = marker;
+
+            (async () => {
+                await mod.Wait(DEBUG_RAY_VFX_DURATION);
+                if (state.debugRayVfx === marker) {
+                    mod.UnspawnObject(marker);
+                    state.debugRayVfx = undefined;
+                }
+            })();
+        }
+    }
+
+    console.log(
+        `[LeapAttack] OnRayCastHit | player=${objId}`
+        + ` | point=(${px.toFixed(2)}, ${py.toFixed(2)}, ${pz.toFixed(2)})`
+        + ` | normal=(${nx.toFixed(2)}, ${ny.toFixed(2)}, ${nz.toFixed(2)})`
+        + ` | dist=${hitDist.toFixed(2)}`
+    );
+
+    if (state?.debugWidget) {
+        mod.SetUITextLabel(
+            state.debugWidget,
+            mod.Message(mod.stringkeys.leap_rc_hit, Math.round(hitDist * 10) / 10)
+        );
+        mod.SetUITextColor(state.debugWidget, mod.CreateVector(0.2, 1, 0.4));
+    }
+    if (state?.debugPosWidget) {
+        mod.SetUITextLabel(
+            state.debugPosWidget,
+            mod.Message(mod.stringkeys.leap_rc_hit_pos,
+                Math.round(px * 10) / 10,
+                Math.round(py * 10) / 10,
+                Math.round(pz * 10) / 10)
+        );
+        mod.SetUITextColor(state.debugPosWidget, mod.CreateVector(0.2, 1, 0.4));
+    }
+    if (state?.debugNrmWidget) {
+        mod.SetUITextLabel(
+            state.debugNrmWidget,
+            mod.Message(mod.stringkeys.leap_rc_hit_nrm,
+                Math.round(nx * 10) / 10,
+                Math.round(ny * 10) / 10,
+                Math.round(nz * 10) / 10)
+        );
+        mod.SetUITextColor(state.debugNrmWidget, mod.CreateVector(0.2, 1, 0.4));
+    }
+}
+
+function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
+    const objId = mod.GetObjId(eventPlayer);
+    const state = LEAP_STATES.get(objId);
+
+    if (state) {
+        state.rayHitPoint = undefined;
+        state.rayHitDist = 0;
+    }
+
+    console.log(`[LeapAttack] OnRayCastMissed | player=${objId}`);
+
+    if (state?.debugWidget) {
+        mod.SetUITextLabel(
+            state.debugWidget,
+            mod.Message(mod.stringkeys.leap_rc_miss)
+        );
+        mod.SetUITextColor(state.debugWidget, mod.CreateVector(1, 0.4, 0.2));
+    }
+    if (state?.debugPosWidget) {
+        mod.SetUITextLabel(state.debugPosWidget, mod.Message(mod.stringkeys.leap_rc_miss));
+        mod.SetUITextColor(state.debugPosWidget, mod.CreateVector(1, 0.4, 0.2));
+    }
+    if (state?.debugNrmWidget) {
+        mod.SetUITextLabel(state.debugNrmWidget, mod.Message(mod.stringkeys.leap_rc_miss));
+        mod.SetUITextColor(state.debugNrmWidget, mod.CreateVector(1, 0.4, 0.2));
+    }
+}
+
+// ============================================================
+// LEAP DEBUG INTERACT POINTS
+// ============================================================
+
+let leapDebugVehicle: mod.Vehicle | undefined;
+
+function initLeapDebugInteractPoints(): void {
+    if (!DEBUG_LEAP) return;
+
+    const interactPoint1 = mod.GetInteractPoint(997);
+    const interactPoint2 = mod.GetInteractPoint(995);
+    const worldIcon1 = mod.GetWorldIcon(998);
+    const worldIcon2 = mod.GetWorldIcon(994);
+
+    mod.EnableInteractPoint(interactPoint1, true);
+    mod.EnableInteractPoint(interactPoint2, true);
+
+    mod.EnableWorldIconImage(worldIcon1, true);
+    mod.EnableWorldIconImage(worldIcon2, true);
+    mod.SetWorldIconImage(worldIcon1, mod.WorldIconImages.Assist);
+    mod.SetWorldIconImage(worldIcon2, mod.WorldIconImages.Assist);
+    mod.EnableWorldIconText(worldIcon1, true);
+    mod.EnableWorldIconText(worldIcon2, true);
+    mod.SetWorldIconText(worldIcon1, mod.Message(mod.stringkeys.dbg_spawn_vehicle));
+    mod.SetWorldIconText(worldIcon2, mod.Message(mod.stringkeys.dbg_spawn_ai));
+
+    const vehicleSpawner = mod.GetVehicleSpawner(999);
+    mod.SetVehicleSpawnerVehicleType(vehicleSpawner, mod.VehicleList.Vector);
+    mod.SetVehicleSpawnerAutoSpawn(vehicleSpawner, false);
+
+    console.log("[LeapDebug] Debug interact points initialized (997=vehicle, 995=AI)");
+}
+
+function handleLeapDebugInteract(player: mod.Player, interactPoint: mod.InteractPoint): void {
+    if (!DEBUG_LEAP) return;
+
+    const point997 = mod.GetInteractPoint(997);
+    const point995 = mod.GetInteractPoint(995);
+
+    if (mod.Equals(interactPoint, point997)) {
+        const vehicleSpawner = mod.GetVehicleSpawner(999);
+        mod.ForceVehicleSpawnerSpawn(vehicleSpawner);
+        console.log(`[LeapDebug] Vehicle spawn triggered by player=${mod.GetObjId(player)}`);
+    }
+
+    if (mod.Equals(interactPoint, point995)) {
+        if (!leapDebugVehicle) {
+            console.log("[LeapDebug] No vehicle spawned yet -- interact with point 997 first");
+            return;
+        }
+        const aiSpawner = mod.GetSpawner(996);
+        const team2 = mod.GetTeam(2);
+        mod.SpawnAIFromAISpawner(aiSpawner, team2);
+        console.log(`[LeapDebug] AI spawn triggered on Team 2 by player=${mod.GetObjId(player)}`);
+    }
+}
+
+function handleLeapDebugVehicleSpawned(eventVehicle: mod.Vehicle): void {
+    if (!DEBUG_LEAP) return;
+    leapDebugVehicle = eventVehicle;
+    console.log("[LeapDebug] Vehicle spawned and stored");
+}
+
+async function handleLeapDebugSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner): Promise<void> {
+    if (!DEBUG_LEAP) return;
+
+    const aiSpawner = mod.GetSpawner(996);
+    if (!mod.Equals(eventSpawner, aiSpawner)) return;
+
+    const maxWait = 40;
+    for (let i = 0; i < maxWait; i++) {
+        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAlive)) break;
+        await mod.Wait(0.05);
+    }
+
+    if (leapDebugVehicle) {
+        mod.ForcePlayerToSeat(eventPlayer, leapDebugVehicle, -1);
+        console.log(`[LeapDebug] AI player=${mod.GetObjId(eventPlayer)} forced into vehicle`);
+    } else {
+        console.log(`[LeapDebug] AI spawned but no vehicle available`);
+    }
+
+    mod.AIEnableShooting(eventPlayer, false);
+    mod.AIEnableTargeting(eventPlayer, false);
+}
+
+// ============================================================
+// END LEAP ATTACK SYSTEM
+// ============================================================
+
 //////////////////////////////////////////////////////////////////
 ///////---------------- GAME FUNCTIONS -----------------//////////
 //////////////////////////////////////////////////////////////////
@@ -7245,6 +8186,7 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
 
 export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner) {
     mod.AIEnableShooting(eventPlayer, false);
+    handleLeapDebugSpawnerSpawned(eventPlayer, eventSpawner);
     if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
         GameHandler.gameState === GameState.EndOfRound) {
         return;
@@ -7308,7 +8250,7 @@ export function OnPlayerInteract(eventPlayer: mod.Player, eventObject: mod.Objec
     if (playerProfile?.isInfectedTeam) {
         TeleportPlayerOnInteract(eventPlayer, eventObject);
     }
-
+    handleLeapDebugInteract(eventPlayer, eventObject as mod.InteractPoint);
 }
 
 export async function OnPlayerJoinGame(eventPlayer: mod.Player) {
@@ -7393,6 +8335,9 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
             return;
         }
         PlayerProfile.CustomOnPlayerDeployed(eventPlayer);
+        if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
+            InitLeapSystem(eventPlayer);
+        }
     } else {
         console.log(`OnPlayerDeployed "CRITICAL" | Player(${mod.GetObjId(eventPlayer)}) deployed without a valid ObjID!`);
     }
@@ -7400,6 +8345,7 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
 
 export function OnPlayerUndeploy(playerObjId: number) {
     CleanupPlayerOngoingVisuals(playerObjId);
+    CleanupLeapStateByObjId(playerObjId);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -7411,12 +8357,15 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         console.log('Player was killed by GameHandler. Ignoring...');
         return;
     }
-
+    // use this after setting up a camera in Godot    
+    // mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.Fixed, 401);
+    
     // _deployedPlayers are *supposed to* only get added outside of EndOfRound
     const playerObjId = mod.GetObjId(eventPlayer);
     if (playerObjId > -1) {
         CleanupPlayerOngoingVisuals(playerObjId);
     }
+    CleanupLeapSystem(eventPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -7580,28 +8529,7 @@ function GetInfectedHumanBaseSpeedMultiplier(playerProfile: PlayerProfile): numb
     return playerProfile.isAlphaInfected ? 1.2 : 1;
 }
 
-function ApplyInfectedHumanAreaSprintSpeedBoost(player: mod.Player, playerProfile: PlayerProfile) {
-    if (playerProfile.isAI || !playerProfile.isInfectedTeam) {
-        playerProfile.infectedAreaSprintBoostWasActive = false;
-        return;
-    }
-
-    const shouldApplyBoost = playerProfile.infectedAreaSpeedBoostActive
-        && mod.GetSoldierState(player, mod.SoldierStateBool.IsSprinting);
-    if (playerProfile.infectedAreaSpeedBoostActive) {
-        UI.UpdateInfectedSpeedBoostAreaNotification(playerProfile, shouldApplyBoost);
-    }
-    if (shouldApplyBoost && !playerProfile.infectedAreaSprintBoostWasActive) {
-        // SFX_Gadgets_AdrenalineShot_Start_OneShot2D might replace with a more soft sound, it's kinda repetitive
-        const SFX = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_Gadgets_AdrenalineShot_Start_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
-        mod.PlaySound(SFX, 1, player);
-    }
-    playerProfile.infectedAreaSprintBoostWasActive = shouldApplyBoost;
-    mod.SetPlayerMovementSpeedMultiplier(
-        player,
-        shouldApplyBoost ? 3.5 : GetInfectedHumanBaseSpeedMultiplier(playerProfile)
-    );
-}
+// Speed boost zone mechanic removed
 
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
@@ -7628,14 +8556,7 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
     if (playerProfile?._botProfile) {
         playerProfile._botProfile.speedMultiplier = 1;
         mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.3 : 1);
-    } else if (playerProfile) {
-        ApplyInfectedHumanAreaSprintSpeedBoost(eventPlayer, playerProfile);
     }
-    const SFX_AREA_EXIT = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_Gadgets_EpiPen_ReviveDone_1p_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
-    mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.Saturated, false);
-    mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.FirstPerson);
-    playerProfile?.UpdateInfectedNightOverlay(true);
-    mod.PlaySound(SFX_AREA_EXIT, 1, eventPlayer);
 }
 
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
@@ -7660,19 +8581,6 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
     if (pp) {
         pp.infectedAreaSpeedBoostActive = true;
     }
-    if (pp && !pp.isAI) {
-        if (pp.playerAreaNotificationWidget) {
-            mod.DeleteUIWidget(pp.playerAreaNotificationWidget);
-            pp.playerAreaNotificationWidget = undefined;
-        }
-        pp.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
-            eventPlayer,
-            pp.playerID,
-            MakeMessage(mod.stringkeys.infected_speed_boost_ready)
-        );
-        pp.playerAreaNotificationIsSpeedBoost = true;
-        UI.UpdateInfectedSpeedBoostAreaNotification(pp, false);
-    }
     const botProfile = pp?._botProfile;
     const targetInVehicle = pp?.currentTarget ? IsPlayerInTrackedVehicle(pp.currentTarget) : false;
     const aiSpeedMultiplier = targetInVehicle ? 4 : 2;
@@ -7681,15 +8589,7 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
     }
     if (pp?.isAI) {
         mod.SetPlayerMovementSpeedMultiplier(eventPlayer, aiSpeedMultiplier);
-    } else if (pp) {
-        ApplyInfectedHumanAreaSprintSpeedBoost(eventPlayer, pp);
     }
-    const SFX = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_Charged_OneShot2D, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
-    mod.PlaySound(SFX, 1, eventPlayer);
-    mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.Saturated, true);
-    mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.ThirdPerson);
-    pp?.UpdateInfectedNightOverlay(false);
-
 }
 
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
@@ -7717,6 +8617,7 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     mod.SetVehicleMaxHealthMultiplier(eventVehicle, 0.1);
     mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(202), 3);
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
+    // handleLeapDebugVehicleSpawned(eventVehicle);
 }
 
 export async function OngoingPlayer(eventPlayer: mod.Player) {
@@ -7724,6 +8625,8 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     const playerObjId = mod.GetObjId(eventPlayer);
     if (playerObjId < 0) return;
+
+    TickLeap(eventPlayer);
 
     let tickState = PLAYER_ONGOING_TICK_STATE.get(playerObjId);
     if (!tickState) {
@@ -7745,13 +8648,7 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
         tickState.nextIconUpdateAt = now + PLAYER_ONGOING_ICON_UPDATE_SECONDS;
         if (SafeIsAlive(eventPlayer)) {
             UpdatePlayerIndicatorsAndIcons(eventPlayer);
-            if (playerProfile
-                && !playerProfile.isAI
-                && playerProfile.isInfectedTeam
-                && playerProfile.infectedAreaSpeedBoostActive
-                && GameHandler.gameState === GameState.GameRoundIsRunning) {
-                ApplyInfectedHumanAreaSprintSpeedBoost(eventPlayer, playerProfile);
-            }
+            // Speed boost zone mechanic removed
         } else {
             CleanupPlayerOngoingVisuals(playerObjId);
             return;
@@ -7851,5 +8748,19 @@ export async function OnGameModeStarted() {
     GameHandler.InitializeScoreboardTimeAndColumns();
     await GameHandler.PreGameSetup();
 
+    initLeapDebugInteractPoints();
+
     GameHandler.TickUpdate(); // main game loop
+}
+
+export function OnRayCastHit(
+    eventPlayer: mod.Player,
+    eventPoint: mod.Vector,
+    eventNormal: mod.Vector
+): void {
+    HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+}
+
+export function OnRayCastMissed(eventPlayer: mod.Player): void {
+    HandleLeapRayCastMissed(eventPlayer);
 }
