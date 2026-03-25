@@ -307,8 +307,9 @@
   "dbg_spawn_vehicle": "Spawn Vehicle",
   "dbg_spawn_ai": "Spawn AI",
   "leap_status_idle": "LEAP: CROUCH TO CHARGE",
-  "leap_status_charging": "CHARGING {}.{}s",
+  "leap_status_charging": "CHARGING {}/{}s",
   "leap_status_ready": "LEAP READY [FIRE]",
   "leap_status_cooldown": "LEAP: {}.{}",
-  "leap_status_leaping": "LEAPING"
+  "leap_status_leaping": "LEAPING",
+  "leap_status_no_room": "NOT ENOUGH ROOM"
 }
