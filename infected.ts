@@ -8852,6 +8852,10 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     // handleLeapDebugVehicleSpawned(eventVehicle);
 }
 
+export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
+    mod.UnspawnObject(eventVehicle);
+}
+
 export async function OngoingPlayer(eventPlayer: mod.Player) {
     if (!Helpers.HasValidObjId(eventPlayer)) return;
 
