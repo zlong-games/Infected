@@ -7430,11 +7430,24 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
         const steps = computeLeapStepPositions(startPos, leapDir, LEAP_DISTANCE);
 
-        // Per-segment raycast scan along the arc
+        // Immediate math-only approximate landing (no raycasts, instant update)
+        const approxLanding = steps[steps.length - 1];
+        if (state.previewVfx) {
+            mod.MoveVFX(state.previewVfx as mod.VFX, approxLanding, ZERO_VEC);
+        } else {
+            const vfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_Gadget_DeployableMortar_Target_Area,
+                approxLanding, ZERO_VEC, mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(vfx, true);
+            state.previewVfx = vfx;
+        }
+
+        // Per-segment raycast refinement along the arc
         let collisionStepIndex = -1;
         let collisionBackstepPos: mod.Vector | undefined;
-        // Start slightly above player to avoid ground self-hit
-        let prevPos = mod.Add(startPos, mod.Multiply(mod.UpVector(), 0.5));
+        // Start well above the crouching player to avoid capsule/ground clipping
+        let prevPos = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.5));
 
         for (let i = 0; i < steps.length; i++) {
             if (state.previewScanId !== scanId || !state.previewScanActive || state.isLeaping) break;
@@ -7445,7 +7458,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
             mod.RayCast(player, prevPos, steps[i]);
             await mod.Wait(0.05);
 
-            if (state.previewRayHitPoint && state.previewRayHitDist > 0.5) {
+            if (state.previewRayHitPoint && state.previewRayHitDist > 1.5) {
                 const backDir = mod.Normalize(mod.Subtract(prevPos, state.previewRayHitPoint));
                 collisionBackstepPos = mod.Add(state.previewRayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
                 collisionStepIndex = i;
@@ -7457,40 +7470,33 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
         if (state.previewScanId !== scanId || !state.previewScanActive || state.isLeaping) break;
 
-        // Dry-run vehicle check on the geometry-safe portion of the path
-        const safeSteps = collisionStepIndex >= 0 ? steps.slice(0, collisionStepIndex) : steps;
-        const vehicleCol = scanVehicleCollisionsDry(player, safeSteps);
+        // Refine with collision data if raycasts found something
+        if (collisionStepIndex >= 0 || scanVehicleCollisionsDry(player, steps).stepIndex >= 0) {
+            const safeSteps = collisionStepIndex >= 0 ? steps.slice(0, collisionStepIndex) : steps;
+            const vehicleCol = scanVehicleCollisionsDry(player, safeSteps);
 
-        // Determine predicted landing point
-        let landingPos: mod.Vector;
-        if (vehicleCol.stepIndex >= 0 && (collisionStepIndex < 0 || vehicleCol.stepIndex < collisionStepIndex)) {
-            // Vehicle collision comes first
-            if (vehicleCol.stepIndex > 0) {
-                const backDir = mod.Normalize(mod.Subtract(
-                    safeSteps[vehicleCol.stepIndex - 1], safeSteps[vehicleCol.stepIndex]
-                ));
-                landingPos = mod.Add(safeSteps[vehicleCol.stepIndex], mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
+            let refinedPos: mod.Vector;
+            if (vehicleCol.stepIndex >= 0 && (collisionStepIndex < 0 || vehicleCol.stepIndex < collisionStepIndex)) {
+                if (vehicleCol.stepIndex > 0) {
+                    const backDir = mod.Normalize(mod.Subtract(
+                        safeSteps[vehicleCol.stepIndex - 1], safeSteps[vehicleCol.stepIndex]
+                    ));
+                    refinedPos = mod.Add(safeSteps[vehicleCol.stepIndex], mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
+                } else {
+                    refinedPos = startPos;
+                }
+            } else if (collisionBackstepPos) {
+                refinedPos = collisionBackstepPos;
             } else {
-                landingPos = startPos;
+                refinedPos = approxLanding;
             }
-        } else if (collisionBackstepPos) {
-            landingPos = collisionBackstepPos;
-        } else {
-            landingPos = steps[steps.length - 1];
-        }
 
-        state.previewLandingPos = landingPos;
-
-        // Show/move the landing indicator VFX
-        if (state.previewVfx) {
-            mod.MoveVFX(state.previewVfx as mod.VFX, landingPos, ZERO_VEC);
+            state.previewLandingPos = refinedPos;
+            if (state.previewVfx) {
+                mod.MoveVFX(state.previewVfx as mod.VFX, refinedPos, ZERO_VEC);
+            }
         } else {
-            const vfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_Gadget_DeployableMortar_Target_Area,
-                landingPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
-            ) as mod.VFX;
-            mod.EnableVFX(vfx, true);
-            state.previewVfx = vfx;
+            state.previewLandingPos = approxLanding;
         }
 
         // Brief pause before restarting the scan cycle
@@ -7529,7 +7535,8 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     // Per-segment raycast scan along the arc for geometry collisions
     let geometryCollisionStep = -1;
     let geometryLandingPos: mod.Vector | undefined;
-    let prevPos = mod.Add(startPos, mod.Multiply(mod.UpVector(), 0.5));
+    // Start well above the crouching player to avoid capsule/ground clipping
+    let prevPos = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.5));
 
     for (let i = 0; i < stepPositions.length; i++) {
         state.rayHitPoint = undefined;
@@ -7538,7 +7545,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.RayCast(player, prevPos, stepPositions[i]);
         await mod.Wait(0.05);
 
-        if (state.rayHitPoint && state.rayHitDist > 0.5) {
+        if (state.rayHitPoint && state.rayHitDist > 1.5) {
             const backDir = mod.Normalize(mod.Subtract(prevPos, state.rayHitPoint));
             geometryLandingPos = mod.Add(state.rayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
             geometryCollisionStep = i;
@@ -7718,14 +7725,8 @@ function preCheckLeapCollisions(
             const dist = mod.DistanceBetween(stepPos, vehiclePos);
 
             if (dist <= LEAP_HIT_RADIUS) {
-                const occupied = mod.IsVehicleOccupied(vehicle);
-
-                if (occupied) {
-                    mod.DealDamage(vehicle, LEAP_DAMAGE);
-                    return { stepIndex: i, targetPos: vehiclePos, damageDealt: true };
-                } else {
-                    return { stepIndex: i, targetPos: undefined, damageDealt: false };
-                }
+                mod.DealDamage(vehicle, LEAP_DAMAGE);
+                return { stepIndex: i, targetPos: vehiclePos, damageDealt: true };
             }
         }
     }
@@ -7898,8 +7899,8 @@ function HandleLeapRayCastHit(
     const playerPos = mod.GetSoldierState(eventPlayer, mod.SoldierStateVector.GetPosition);
     const hitDist = mod.DistanceBetween(playerPos, eventPoint);
 
-    // Ignore self-hits
-    if (hitDist < 0.5) return;
+    // Ignore self-hits (widened to handle crouching + moving player capsule)
+    if (hitDist < 1.5) return;
 
     if (state) {
         if (state.rayMode === 'preview') {
@@ -8209,6 +8210,12 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
         if (mod.EventDamageTypeCompare(eventDamageType, mod.PlayerDamageTypes.Melee)) {
             const hitSFX = mod.SpawnObject(SFX_MELEE_HIT_FALL_DMG, POSITION_HQ2, ZERO_VEC);
             mod.PlaySound(hitSFX, 1, damageDealer);
+
+            // If the melee target is in a vehicle, deal 400 damage to it
+            if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle)) {
+                const targetVehicle = mod.GetVehicleFromPlayer(eventPlayer);
+                mod.DealDamage(targetVehicle, 400);
+            }
         }
     } else {
         if (mod.EventDamageTypeCompare(eventDamageType, mod.PlayerDamageTypes.Fire)) {
