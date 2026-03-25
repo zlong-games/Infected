@@ -7651,12 +7651,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         );
     }
 
-    // Immediate visual feedback
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Zoom, true);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Reload, true);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, true);
-
     if (state.containerWidget) {
         mod.SetUIWidgetVisible(state.containerWidget, true);
     }
@@ -7715,10 +7709,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
             mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
         }
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.Zoom, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.Reload, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
         mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
         if (state.containerWidget) {
             mod.SetUIWidgetVisible(state.containerWidget, false);
@@ -7823,12 +7813,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
             mod.MoveVFX(state.tracerVfx, finalLandingOverride, mod.CreateVector(0, 0, 0));
         }
     }
-
-    // Re-enable inputs
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Zoom, false);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Reload, false);
-    mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
 
     // Wait until the player is on the ground before impact
     const maxGroundWait = 20;
