@@ -8401,7 +8401,7 @@ export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.V
 }
 
 export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
-    mod.SetVehicleMaxHealthMultiplier(eventVehicle, 0.8);
+    mod.SetVehicleMaxHealthMultiplier(eventVehicle, 0.5);
     mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(202), 3);
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
 }
