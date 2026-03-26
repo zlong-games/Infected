@@ -1280,8 +1280,8 @@ class Weapons {
 
         // Infected loadout: fixed gear, not using saved loadout
         if (infected) {
-            let gadget = mod.Gadgets.Throwable_Stun_Grenade;
-            let gadgetText = mod.stringkeys.infected_throwable_stun;
+            let gadget = mod.Gadgets.Throwable_Throwing_Knife;
+            let gadgetText = mod.stringkeys.infected_throwable_knives;
 
             items.push({
                 gadget: mod.Gadgets.Melee_Sledgehammer,
@@ -1296,8 +1296,8 @@ class Weapons {
                 packageImage: mod.CreateNewWeaponPackage(),
             });
             if (alphaInfected) {
-                gadget = mod.Gadgets.Throwable_Throwing_Knife;
-                gadgetText = mod.stringkeys.infected_throwable_knives;
+                gadget = mod.Gadgets.Throwable_Stun_Grenade;
+                gadgetText = mod.stringkeys.infected_throwable_stun;
             }
             items.push({
                 gadget: gadget,
@@ -5555,18 +5555,14 @@ class BotProfile {
         // increment the stable per-round infectedCount once here. 
         // Guard with botProfile flag to avoid double-increments when downstream callbacks run.
         if (!playerProfile.isInfectedTeam) {
-            console.log(`DEBUG | OnAIDied BEFORE playerProfile | playerID:${mod.GetObjId(player)} | isInfectedTeam:${playerProfile.isInfectedTeam}`);
             playerProfile.isInfectedTeam = true;
-            console.log(`DEBUG | OnAIDied AFTER playerProfile | playerID:${mod.GetObjId(player)} | isInfectedTeam:${playerProfile.isInfectedTeam}`);
         }
         if (!botProfile.isInfectedTeam && (GameHandler.gameState === GameState.GameRoundIsRunning || GameHandler.gameState === GameState.GameStartCountdown)) {
-            console.log(`DEBUG | OnAIDied BEFORE botProfile | playerID:${mod.GetObjId(player)} | botIsInfected:${botProfile.isInfectedTeam} | infectedCount:${GameHandler.infectedCount}`);
             botProfile.isInfectedTeam = true; // mark so survivorBotCallbacks.onDeathCallback won't re-increment
             botProfile.isInitialSpawn = false; // this life is ending; next infected spawn will mark fresh
             playerProfile.isInitialSpawn = false;
             playerProfile.isDead = true;
             GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
-            console.log(`DEBUG | OnAIDied AFTER botProfile | playerID:${mod.GetObjId(player)} | botIsInfected:${botProfile.isInfectedTeam} | infectedCount:${GameHandler.infectedCount}`);
         }
         botProfile.botWasKilled(playerProfile.player);
 
@@ -5577,7 +5573,6 @@ class BotProfile {
 
 const survivorBotCallbacks: BotEventCallbacks = {
     onSpawnCallback: async (eventPlayer: mod.Player, botProfile: BotProfile) => {
-        console.log(`survivorBotCallbacks | OnSpawn | Player(${mod.GetObjId(eventPlayer)}) spawned spawnID:${botProfile.spawnerObjID} initialSpawn:${botProfile.isInitialSpawn} botProfile:${botProfile.playerName} isInfectedTeam:${botProfile.isInfectedTeam} teamName:${botProfile.teamName}`);
         SurvivorBotLogic(eventPlayer);
         AISpawnHandler.AssignAIEquipment(eventPlayer, TeamNameString.Survivors);
         ScoreboardUI.GlobalUpdate(TeamNameString.Survivors);
@@ -5625,7 +5620,7 @@ const survivorBotCallbacks: BotEventCallbacks = {
         let options: BotOptions = {
             playerName: botNameStringkey ? botNameStringkey : fallbackName,
             teamName: "infected",
-            health: GameHandler.currentRound >= 6 ? 220 : 110,
+            health: 110,
             speedMultiplier: 1,
             spawnerObjID: spawnerObjID,
             spawnerObject: spawnerObj,
@@ -5675,7 +5670,7 @@ const infectedBotCallbacks: BotEventCallbacks = {
             teamName: TeamNameString.Infected,
             spawnerObjID: spawnerObjID,
             spawnerObject: spawnerObj,
-            health: GameHandler.currentRound >= 6 ? 200 : 110,
+            health: 110,
             speedMultiplier: 0.9,
             isInitialSpawn: false,
             isInfectedTeam: true,
@@ -5776,7 +5771,7 @@ class AISpawnHandler {
                 teamName: TeamNameString.Infected,
                 spawnerObjID: spawnerObjID,
                 spawnerObject: spawnerObj,
-                health: GameHandler.currentRound >= 6 ? 200 : 110,
+                health: 110,
                 speedMultiplier: 0.9,
                 isInitialSpawn: true,
                 isInfectedTeam: true,
@@ -5850,7 +5845,7 @@ class AISpawnHandler {
             ) {
                 break;
             }
-            await mod.Wait(2);
+            await mod.Wait(3);
         }
         // begin spawning bots
         for (let i = 0; AISpawnHandler.awaitingSpawnQueue.length; i++) {
@@ -5885,8 +5880,6 @@ class AISpawnHandler {
         try {
             mod.RemoveEquipment(player, mod.InventorySlots.PrimaryWeapon);
             mod.RemoveEquipment(player, mod.InventorySlots.SecondaryWeapon);
-            mod.RemoveEquipment(player, mod.InventorySlots.GadgetOne);
-            mod.RemoveEquipment(player, mod.InventorySlots.GadgetTwo);
             mod.RemoveEquipment(player, mod.InventorySlots.Throwable);
             mod.RemoveEquipment(player, mod.InventorySlots.ClassGadget);
         } catch (e) {
@@ -6051,7 +6044,6 @@ async function SurvivorBotLogic(survivorBot: mod.Player) {
         return RESUPPLY_WORLD_LOCATION.get(randSupplyPoint);
     }
     if (survivorBotAliveandValid && survivorBot !== undefined) {
-        await mod.Wait(Math.floor(Math.random() * (5 - 2 + 1)) + 2); // wait between 2 and 5 seconds
         survivorBotAliveandValid = PlayerIsAliveAndValid(survivorBot);
         mod.AIDefendPositionBehavior(survivorBot, pickRandomResupply()!, AI_MIN_DEF_RANGE, AI_LEASH_RANGE);
     }
@@ -6069,63 +6061,6 @@ function IsPlayerInTrackedVehicle(player: mod.Player): boolean {
         }
     }
     return false;
-}
-
-/** Allocate or update a debug world icon that follows an infected bot.
- *  Color is determined by chase state: vehicle vs on-foot, melee vs chasing. */
-function UpdateDebugChaseIcon(
-    infectedBot: mod.Player,
-    targetPos: mod.Vector | undefined,
-    targetInVehicle: boolean,
-    inMeleeRange: boolean,
-) {
-    if (!DEBUG_INFECTED_CHASE_ICONS) return;
-    const botObjId = mod.GetObjId(infectedBot);
-    if (botObjId < 0) return;
-
-    // Lazily create a world icon for this bot
-    let icon = DEBUG_CHASE_ICON_MAP.get(botObjId);
-    if (!icon) {
-        icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, GetIconPosition(infectedBot), ZERO_VEC);
-        icon = mod.GetWorldIcon(DEBUG_CHASE_ICON_NEXT_ID++);
-        mod.SetWorldIconImage(icon, mod.WorldIconImages.FilledPing);
-        // 
-        mod.EnableWorldIconImage(icon, true);
-        mod.EnableWorldIconText(icon, false);
-        DEBUG_CHASE_ICON_MAP.set(botObjId, icon);
-    }
-
-    // Position the icon above the bot
-    const botPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
-    const iconPos = mod.CreateVector(
-        mod.XComponentOf(botPos),
-        mod.YComponentOf(botPos) + 3,
-        mod.ZComponentOf(botPos)
-    );
-    mod.SetWorldIconPosition(icon, iconPos);
-
-    // Pick color based on chase state
-    let color: mod.Vector;
-    if (!targetPos) {
-        color = DEBUG_COLOR_NO_TARGET;
-    } else if (targetInVehicle) {
-        color = inMeleeRange ? DEBUG_COLOR_VEHICLE_MELEE : DEBUG_COLOR_VEHICLE_CHASE;
-    } else {
-        color = inMeleeRange ? DEBUG_COLOR_ONFOOT_MELEE : DEBUG_COLOR_ONFOOT_CHASE;
-    }
-    mod.SetWorldIconColor(icon, color);
-}
-
-/** Remove the debug chase icon for a bot that is no longer alive. */
-function CleanupDebugChaseIcon(botObjId: number) {
-    if (!DEBUG_INFECTED_CHASE_ICONS) return;
-    const icon = DEBUG_CHASE_ICON_MAP.get(botObjId);
-    if (icon) {
-        // Move the icon far below the map to hide it (no destroy API)
-        mod.SetWorldIconPosition(icon, mod.CreateVector(0, -1000, 0));
-        mod.EnableWorldIconImage(icon, false);
-        DEBUG_CHASE_ICON_MAP.delete(botObjId);
-    }
 }
 
 function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
@@ -6208,7 +6143,6 @@ function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
         // couldn't find target for whatever reason, wander around
         mod.AIBattlefieldBehavior(infectedBot);
         tickState.infectedBotLastMovePos = undefined;
-        UpdateDebugChaseIcon(infectedBot, undefined, false, false);
         return;
     }
 
@@ -6272,9 +6206,6 @@ function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
             tickState.infectedBotLastMovePos = targetPos;
         }
     }
-
-    // Update debug chase-state icon
-    UpdateDebugChaseIcon(infectedBot, targetPos, targetInVehicle, dist <= meleeRange);
 }
 
 
@@ -7140,7 +7071,6 @@ function UpdatePlayerIndicatorsAndIcons(player: mod.Player) {
 function CleanupPlayerOngoingVisuals(playerObjId: number) {
     CleanupWorldIcon(INFECTED_WORLD_ICON_OBJECTS, playerObjId, 'CleanupPlayerOngoingVisuals');
     CleanupWorldIcon(LMS_WORLD_ICON_OBJECTS, playerObjId, 'CleanupPlayerOngoingVisuals');
-    CleanupDebugChaseIcon(playerObjId);
     const moveVfxToken = ALPHA_DEBUG_INDICATOR_TOKENS.get(playerObjId);
     if (moveVfxToken) {
         moveVfxToken.cancel = true;
@@ -7256,8 +7186,12 @@ interface LeapState {
     isLeaping: boolean;
     /** Active landing VFX, unspawned after the post-landing linger period */
     leapVfx: mod.Object | undefined;
-    /** Tracer dart VFX that follows the player mid-leap */
-    tracerVfx: mod.VFX | undefined;
+    /** Looping 3D whoosh SFX that plays once the player engages their leap attack */
+    leapStartSfx: mod.Object | undefined;
+    /** Looping 3D SFX that plays while the charge is building */
+    chargingSfx: mod.Object | undefined;
+    /** One-shot SFX played when charge reaches ready state */
+    chargeReadySfx: mod.Object | undefined;
     /** RayCast collision point, set by OnRayCastHit for leap rays */
     rayHitPoint: mod.Vector | undefined;
     /** Distance from start position to the RayCast hit point */
@@ -7284,6 +7218,10 @@ interface LeapState {
     previewRayHitPoint: mod.Vector | undefined;
     /** RayCast hit distance stored by preview rays */
     previewRayHitDist: number;
+    /** VFX shown at the player while charging/ready */
+    chargeVfx: mod.VFX | undefined;
+    /** Tracks which charge VFX is active: 'none' | 'charging' | 'ready' */
+    chargeVfxState: 'none' | 'charging' | 'ready';
 }
 
 const LEAP_STATES = new Map<number, LeapState>();
@@ -7440,6 +7378,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
                 approxLanding, ZERO_VEC, mod.CreateVector(1, 1, 1)
             ) as mod.VFX;
             mod.EnableVFX(vfx, true);
+            mod.SetVFXScale(vfx, 0.25);
             state.previewVfx = vfx;
         }
 
@@ -7518,6 +7457,13 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
 
     const startPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     const facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
+
+    // 3D one-shot sound at player's launch position
+    const leapSfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.SFX_Projectiles_Flybys_Shared_RocketStart_OneShot3D,
+        startPos, ZERO_VEC
+    );
+    mod.PlaySound(leapSfx, 1);
 
     const flatDir = flattenDirection(facingDir);
     const verticalBias = getVecY(facingDir) * LEAP_VERTICAL_FACTOR;
@@ -7624,23 +7570,18 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         state.hitVfx = hitVfx;
     }
 
-    // Spawn tracer dart VFX on the player
-    const tracerVfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
-        startPos,
-        mod.CreateVector(0, 0, 0),
-        mod.CreateVector(1, 1, 1)
-    ) as mod.VFX;
-    mod.EnableVFX(tracerVfx, true);
-    state.tracerVfx = tracerVfx;
+    // Spawn looping 3D whoosh SFX that follows the player during the leap
+    const leapMoverSfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.SFX_Destruction_Tree_Whoosh_Large_SimpleLoop3D,
+        startPos, ZERO_VEC
+    );
+    mod.PlaySound(leapMoverSfx, 1);
+    state.leapStartSfx = leapMoverSfx;
+
 
     // Stepped teleport loop
     for (let i = 0; i <= lastStepIndex && i < stepPositions.length; i++) {
         mod.Teleport(player, stepPositions[i], yaw);
-
-        if (state.tracerVfx) {
-            mod.MoveVFX(state.tracerVfx, stepPositions[i], mod.CreateVector(0, 0, 0));
-        }
 
         if (i < lastStepIndex) {
             await mod.Wait(LEAP_STEP_DELAY);
@@ -7650,9 +7591,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     // Teleport to the exact backstep landing position if we have one
     if (finalLandingOverride) {
         mod.Teleport(player, finalLandingOverride, yaw);
-        if (state.tracerVfx) {
-            mod.MoveVFX(state.tracerVfx, finalLandingOverride, mod.CreateVector(0, 0, 0));
-        }
     }
 
     // Wait until the player is on the ground before impact
@@ -7678,11 +7616,11 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     // Brief linger in third person so the player sees the impact
     await mod.Wait(LEAP_LANDING_LINGER);
 
-    // Switch back to first person and clean up tracer VFX
+    // Switch back to first person and clean up leap movement SFX
     mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
-    if (state.tracerVfx) {
-        mod.UnspawnObject(state.tracerVfx);
-        state.tracerVfx = undefined;
+    if (state.leapStartSfx) {
+        mod.UnspawnObject(state.leapStartSfx);
+        state.leapStartSfx = undefined;
     }
 
     state.isLeaping = false;
@@ -7749,7 +7687,9 @@ function InitLeapSystem(player: mod.Player): void {
         isLeaping: false,
         leapVfx: undefined,
         hitVfx: undefined,
-        tracerVfx: undefined,
+        leapStartSfx: undefined,
+        chargingSfx: undefined,
+        chargeReadySfx: undefined,
         rayHitPoint: undefined,
         rayHitDist: 0,
         rayMode: 'leap',
@@ -7762,6 +7702,8 @@ function InitLeapSystem(player: mod.Player): void {
         previewScanId: 0,
         previewRayHitPoint: undefined,
         previewRayHitDist: 0,
+        chargeVfx: undefined,
+        chargeVfxState: 'none',
     });
 }
 
@@ -7771,6 +7713,19 @@ function CleanupLeapSystem(player: mod.Player): void {
     if (!state) return;
 
     if (state.statusContainerWidget) mod.DeleteUIWidget(state.statusContainerWidget);
+    if (state.chargeVfx) {
+        mod.UnspawnObject(state.chargeVfx);
+        state.chargeVfx = undefined;
+        state.chargeVfxState = 'none';
+    }
+    if (state.chargingSfx) {
+        mod.UnspawnObject(state.chargingSfx);
+        state.chargingSfx = undefined;
+    }
+    if (state.chargeReadySfx) {
+        mod.UnspawnObject(state.chargeReadySfx);
+        state.chargeReadySfx = undefined;
+    }
     if (state.leapVfx) {
         mod.UnspawnObject(state.leapVfx);
         state.leapVfx = undefined;
@@ -7779,9 +7734,9 @@ function CleanupLeapSystem(player: mod.Player): void {
         mod.UnspawnObject(state.hitVfx);
         state.hitVfx = undefined;
     }
-    if (state.tracerVfx) {
-        mod.UnspawnObject(state.tracerVfx);
-        state.tracerVfx = undefined;
+    if (state.leapStartSfx) {
+        mod.UnspawnObject(state.leapStartSfx);
+        state.leapStartSfx = undefined;
     }
     if (state.previewVfx) {
         mod.UnspawnObject(state.previewVfx);
@@ -7800,6 +7755,19 @@ function CleanupLeapStateByObjId(objId: number): void {
     if (!state) return;
 
     if (state.statusContainerWidget) mod.DeleteUIWidget(state.statusContainerWidget);
+    if (state.chargeVfx) {
+        mod.UnspawnObject(state.chargeVfx);
+        state.chargeVfx = undefined;
+        state.chargeVfxState = 'none';
+    }
+    if (state.chargingSfx) {
+        mod.UnspawnObject(state.chargingSfx);
+        state.chargingSfx = undefined;
+    }
+    if (state.chargeReadySfx) {
+        mod.UnspawnObject(state.chargeReadySfx);
+        state.chargeReadySfx = undefined;
+    }
     if (state.leapVfx) {
         mod.UnspawnObject(state.leapVfx);
         state.leapVfx = undefined;
@@ -7808,9 +7776,9 @@ function CleanupLeapStateByObjId(objId: number): void {
         mod.UnspawnObject(state.hitVfx);
         state.hitVfx = undefined;
     }
-    if (state.tracerVfx) {
-        mod.UnspawnObject(state.tracerVfx);
-        state.tracerVfx = undefined;
+    if (state.leapStartSfx) {
+        mod.UnspawnObject(state.leapStartSfx);
+        state.leapStartSfx = undefined;
     }
     if (state.previewVfx) {
         mod.UnspawnObject(state.previewVfx);
@@ -7846,6 +7814,70 @@ function TickLeap(player: mod.Player): void {
     // Compute crouch charge progress
     const crouchHeld = state.crouchStartTime > 0 ? now - state.crouchStartTime : 0;
     const crouchReady = crouchHeld >= LEAP_CROUCH_HOLD_SECONDS;
+
+    // Charge VFX at player location
+    const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    if (isCrouching && !state.isLeaping) {
+        if (crouchReady && state.chargeVfxState !== 'ready') {
+            // Stop the charging loop SFX
+            if (state.chargingSfx) {
+                mod.UnspawnObject(state.chargingSfx);
+                state.chargingSfx = undefined;
+            }
+            const readySfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.SFX_GameModes_Gauntlet_Mission_Wreckage_ActiveBombNearby_OneShot3D,
+                playerPos, ZERO_VEC
+            );
+            mod.PlaySound(readySfx, 1);
+            state.chargeReadySfx = readySfx;
+            state.chargeVfxState = 'ready';
+        } else if (!crouchReady && state.chargeVfxState !== 'charging') {
+            // Spawn blue fire effect while charging
+            if (state.chargeVfx) {
+                mod.UnspawnObject(state.chargeVfx);
+                state.chargeVfx = undefined;
+            }
+            const chargeVfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_Vehicle_Damage_PTV_Critical,
+                playerPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(chargeVfx, true);
+            mod.SetVFXColor(chargeVfx, mod.CreateVector(0.01, 0.01, 1.0));
+            mod.SetVFXSpeed(chargeVfx, 5.0);
+            mod.SetVFXScale(chargeVfx, 0.5);
+            state.chargeVfx = chargeVfx;
+            state.chargeVfxState = 'charging';
+
+            // Start a looping charging SFX at the player
+            if (!state.chargingSfx) {
+                const chargeSfx = mod.SpawnObject(
+                    mod.RuntimeSpawn_Common.SFX_GameModes_Rush_Arm_SimpleLoop3D,
+                    playerPos, ZERO_VEC
+                );
+                mod.PlaySound(chargeSfx, 1);
+                state.chargingSfx = chargeSfx;
+            }
+        }
+        // Move existing VFX to follow the player
+        if (state.chargeVfx) {
+            mod.MoveVFX(state.chargeVfx, playerPos, ZERO_VEC);
+        }
+    } else {
+        // Not crouching or is leaping -- remove charge VFX and SFX
+        if (state.chargeVfx) {
+            mod.UnspawnObject(state.chargeVfx);
+            state.chargeVfx = undefined;
+        }
+        if (state.chargingSfx) {
+            mod.UnspawnObject(state.chargingSfx);
+            state.chargingSfx = undefined;
+        }
+        if (state.chargeReadySfx) {
+            mod.UnspawnObject(state.chargeReadySfx);
+            state.chargeReadySfx = undefined;
+        }
+        state.chargeVfxState = 'none';
+    }
 
     // Update status UI
     if (state.statusWidget && state.statusContainerWidget) {
