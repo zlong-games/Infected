@@ -7355,9 +7355,6 @@ let LEAP_CROUCH_HOLD_SECONDS = 1.0;
 /** Seconds of initial crouch hold before we engage the leap system (slide protection) */
 let LEAP_CHARGE_BUFFER_SECONDS = 0.3;
 
-/** Fraction of LEAP_CROUCH_HOLD_SECONDS at which we lock aim and begin path calculations */
-let LEAP_CHARGE_LOCK_AT = 0.65;
-
 // ============================================================
 // PER-PLAYER LEAP STATE
 // ============================================================
@@ -8010,7 +8007,6 @@ function TickLeap(player: mod.Player): void {
     const crouchHeld = state.crouchStartTime > 0 ? now - state.crouchStartTime : 0;
     // Buffer window: ignore first LEAP_CHARGE_BUFFER_SECONDS to allow slide mechanic to fire uninterrupted
     const isEngaged = crouchHeld >= LEAP_CHARGE_BUFFER_SECONDS;
-    const lockThreshold = LEAP_CHARGE_LOCK_AT * LEAP_CROUCH_HOLD_SECONDS;
     const crouchReady = crouchHeld >= LEAP_CROUCH_HOLD_SECONDS;
 
     // Charge VFX at player location
@@ -8029,13 +8025,15 @@ function TickLeap(player: mod.Player): void {
             mod.PlaySound(readySfx, 1);
             state.chargeReadySfx = readySfx;
             state.chargeVfxState = 'ready';
-            // Lock movement and camera when charge completes
+            // Snapshot final view direction, lock movement/camera, and kick off path calculation
             if (!state.inputLocked) {
+                state.lockedFacingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
                 mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, true);
                 mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, true);
                 mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, true);
                 mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, true);
                 state.inputLocked = true;
+                startTrajectoryPreview(player, state);
             }
         } else if (!crouchReady && state.chargeVfxState !== 'charging') {
             // Spawn blue fire effect while charging (starts at scale 0, grows each tick)
@@ -8074,12 +8072,6 @@ function TickLeap(player: mod.Player): void {
                 1.0
             );
             mod.SetVFXScale(state.chargeVfx, chargeProgress * 0.5);
-        }
-
-        // Lock aim and kick off path calculation at LEAP_CHARGE_LOCK_AT fraction of charge time
-        if (crouchHeld >= lockThreshold && !state.lockedFacingDir && !state.previewScanActive) {
-            state.lockedFacingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-            startTrajectoryPreview(player, state);
         }
     } else {
         // Not crouching, is leaping, or within the slide-protection buffer -- clean up
