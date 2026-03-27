@@ -524,7 +524,7 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
 const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
 const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
-const PLAYER_ONGOING_INFECTED_BOT_TICK_SECONDS = 0.04;
+const PLAYER_ONGOING_INFECTED_BOT_TICK_SECONDS = 0.5;
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
 const PLAYER_SLEDGE_REMINDER_MIN_SECONDS = 5;
 const PLAYER_SLEDGE_REMINDER_MAX_SECONDS = 10;
@@ -7355,6 +7355,12 @@ let LEAP_CROUCH_HOLD_SECONDS = 1.0;
 /** Seconds of initial crouch hold before we engage the leap system (slide protection) */
 let LEAP_CHARGE_BUFFER_SECONDS = 0.3;
 
+/** Dot-product threshold below which aim deviation resets the charge timer (~10 degrees) */
+let LEAP_AIM_DEVIATION_THRESHOLD = 0.985;
+
+/** Distance in meters the player may move from their charge-start position before the charge resets */
+let LEAP_POSITION_DEVIATION_THRESHOLD = 0.5;
+
 // ============================================================
 // PER-PLAYER LEAP STATE
 // ============================================================
@@ -7401,8 +7407,10 @@ interface LeapState {
     cachedGeometryCollisionStep: number;
     /** Backstep position from geometry collision, if any */
     cachedGeometryCollisionPos: mod.Vector | undefined;
-    /** Whether movement + camera input restrictions are currently applied */
-    inputLocked: boolean;
+    /** World position snapshotted when charging begins; resets charge if player strays too far */
+    chargeStartPosition: mod.Vector | undefined;
+    /** Single VFX that moves along the preview arc in a loop */
+    previewTrailVfx: mod.VFX | undefined;
 }
 
 const LEAP_STATES = new Map<number, LeapState>();
@@ -7506,6 +7514,10 @@ function cancelTrajectoryPreview(state: LeapState): void {
         mod.UnspawnObject(state.previewVfx);
         state.previewVfx = undefined;
     }
+    if (state.previewTrailVfx) {
+        mod.UnspawnObject(state.previewTrailVfx);
+        state.previewTrailVfx = undefined;
+    }
     state.previewLandingPos = undefined;
 }
 
@@ -7532,8 +7544,7 @@ function scanVehicleCollisionsDry(
 }
 
 /**
- * Kicked off when the player's aim is locked during the charge window. Fires
- * three keypoint raycasts along the arc path (immediate direction, rise, descent)
+ * Fires three keypoint raycasts along the arc path (immediate direction, rise, descent)
  * to detect geometry, then waits until crouchReady before showing the mortar
  * landing VFX. Cached results are consumed by executeLeap.
  */
@@ -7546,7 +7557,8 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
     }
 
     const startPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
-    const facingDir = state.lockedFacingDir!;
+    // Use the snapshotted aim direction from when charging began (reset on deviation)
+    const facingDir = state.lockedFacingDir ?? mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
     const flatDir = flattenDirection(facingDir);
     const verticalBias = getVecY(facingDir) * LEAP_VERTICAL_FACTOR;
     const leapDir = mod.Normalize(mod.Add(flatDir, mod.Multiply(mod.UpVector(), verticalBias)));
@@ -7628,23 +7640,51 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
     if (!isValid()) { state.previewScanActive = false; return; }
 
-    // Wait until crouchReady, then show mortar landing VFX
-    while (isValid() && !state.isLeaping) {
-        const now = Date.now() / 1000;
-        const crouchReady = state.crouchStartTime > 0 && (now - state.crouchStartTime) >= LEAP_CROUCH_HOLD_SECONDS;
-        if (crouchReady) {
-            if (!state.previewVfx) {
-                const vfx = mod.SpawnObject(
-                    mod.RuntimeSpawn_Common.FX_Gadget_DeployableMortar_Target_Area,
-                    landingPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
-                ) as mod.VFX;
-                mod.EnableVFX(vfx, true);
-                mod.SetVFXScale(vfx, 0.25);
-                state.previewVfx = vfx;
-            }
-            break;
+    // Spawn a single trail VFX and move it along the projected arc in a loop.
+    // Subsample the arc to NUM_MARKERS evenly-spaced points for the track.
+    const NUM_MARKERS = 6;
+    const markerSpacing = Math.max(1, Math.floor(steps.length / NUM_MARKERS));
+    const trackPoints: mod.Vector[] = [];
+    for (let i = 0; i < steps.length; i += markerSpacing) {
+        trackPoints.push(steps[i]);
+    }
+    // Always include the landing position as the final track point
+    trackPoints.push(landingPos);
+
+    if (trackPoints.length === 0 || !isValid()) { state.previewScanActive = false; return; }
+
+    // Spawn the trail VFX at the first track point
+    const trailVfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_ThrowingKnife_Trail_Friendly,
+        trackPoints[0], ZERO_VEC, mod.CreateVector(0.3, 0.3, 0.3)
+    ) as mod.VFX;
+    mod.EnableVFX(trailVfx, true);
+    state.previewTrailVfx = trailVfx;
+
+
+
+    // Animate the single VFX along the track in a loop until cancelled.
+    // Each full traversal takes the same time as the charge duration.
+    const TRACK_STEP_DELAY = trackPoints.length > 0 ? LEAP_CROUCH_HOLD_SECONDS / trackPoints.length : 0.06;
+    const TRACK_REST_DELAY = 0.5;
+    while (isValid()) {
+        for (let i = 0; i < trackPoints.length; i++) {
+            if (!isValid()) break;
+            mod.MoveVFX(trailVfx, trackPoints[i], ZERO_VEC);
+            await mod.Wait(TRACK_STEP_DELAY);
         }
-        await mod.Wait(0.05);
+        if (!isValid()) break;
+        // Brief rest at the end of the track before looping
+        await mod.Wait(TRACK_REST_DELAY);
+    }
+    // Spawn FX_TracerDart_Projectile_Glow at the destination
+    if (!state.previewVfx) {
+        const destVfx = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
+            landingPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+        ) as mod.VFX;
+        mod.EnableVFX(destVfx, true);
+        state.previewVfx = destVfx;
     }
 
     state.previewScanActive = false;
@@ -7720,7 +7760,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
             state.hitVfx = undefined;
         }
         const hitVfx = mod.SpawnObject(
-            mod.RuntimeSpawn_Common.FX_CarlGustaf_MK4_Impact,
+            mod.RuntimeSpawn_Common.FX_Rocket_ArmorPiercing_Hit_Metal,
             vehicleCollision.targetPos,
             mod.CreateVector(0, 0, 0),
             mod.CreateVector(1, 1, 1)
@@ -7728,14 +7768,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.EnableVFX(hitVfx, true);
         state.hitVfx = hitVfx;
     }
-
-    // Spawn looping 3D whoosh SFX
-    const leapMoverSfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.SFX_Destruction_Tree_Whoosh_Large_SimpleLoop3D,
-        startPos, ZERO_VEC
-    );
-    mod.PlaySound(leapMoverSfx, 1);
-    state.leapStartSfx = leapMoverSfx;
 
     // Determine the exact final landing position from any collision
     let finalLandingOverride: mod.Vector | undefined;
@@ -7760,10 +7792,17 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     const finalDest = finalLandingOverride ?? stepPositions[stepPositions.length - 1];
     const actualDist = mod.DistanceBetween(startPos, finalDest);
     const travelSteps = computeLeapStepPositions(startPos, leapDir, Math.max(actualDist, 0.01));
+    const trailBreadcrumbs: mod.VFX[] = [];
 
+    const trailVfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_Grenade_Incendiary_Trail,
+        travelSteps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
+    ) as mod.VFX;
+    mod.EnableVFX(trailVfx, true);
     // Teleport along the rescaled arc, then snap to exact landing position
     for (let i = 0; i < travelSteps.length - 1; i++) {
         mod.Teleport(player, travelSteps[i], yaw);
+        mod.MoveVFX(trailVfx, travelSteps[i], ZERO_VEC);
         await mod.Wait(LEAP_STEP_DELAY);
     }
     // Final teleport: exact collision backstep if applicable, otherwise last arc step
@@ -7781,7 +7820,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     // Spawn impact VFX at landing position
     const landingPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     const vfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Generic,
+        mod.RuntimeSpawn_Common.FX_Impact_SafeImpact_Sand,
         landingPos,
         mod.CreateVector(0, 0, 0),
         mod.CreateVector(1, 1, 1)
@@ -7798,20 +7837,22 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.UnspawnObject(state.leapStartSfx);
         state.leapStartSfx = undefined;
     }
-    if (state.inputLocked) {
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, false);
-        state.inputLocked = false;
-    }
 
     state.isLeaping = false;
     // Reset crouch hold so the player must re-charge before next leap
     state.crouchStartTime = 0;
 
+    // Reveal the arc trail 3 times at the same cadence as the actual teleport steps
+    trailBreadcrumbs.push(trailVfx);
+    for (let pass = 0; pass < 3; pass++) {
+        for (let i = 0; i < travelSteps.length; i++) {
+            mod.MoveVFX(trailVfx, travelSteps[i], ZERO_VEC);
+            await mod.Wait(LEAP_STEP_DELAY);
+        }
+    }
+
     // Clean up VFX after a brief display period
-    await mod.Wait(2.0);
+    await mod.Wait(3.0);
     if (state.leapVfx) {
         mod.UnspawnObject(state.leapVfx);
         state.leapVfx = undefined;
@@ -7819,6 +7860,9 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     if (state.hitVfx) {
         mod.UnspawnObject(state.hitVfx);
         state.hitVfx = undefined;
+    }
+    for (const tv of trailBreadcrumbs) {
+        mod.UnspawnObject(tv);
     }
 }
 
@@ -7888,7 +7932,8 @@ function InitLeapSystem(player: mod.Player): void {
         cachedStepPositions: undefined,
         cachedGeometryCollisionStep: -1,
         cachedGeometryCollisionPos: undefined,
-        inputLocked: false,
+        chargeStartPosition: undefined,
+        previewTrailVfx: undefined,
     });
 }
 
@@ -7927,15 +7972,12 @@ function CleanupLeapSystem(player: mod.Player): void {
         mod.UnspawnObject(state.previewVfx);
         state.previewVfx = undefined;
     }
+    if (state.previewTrailVfx) {
+        mod.UnspawnObject(state.previewTrailVfx);
+        state.previewTrailVfx = undefined;
+    }
     state.previewScanActive = false;
     state.previewScanId++;
-    if (state.inputLocked) {
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, false);
-        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, false);
-        state.inputLocked = false;
-    }
     mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
 
     LEAP_STATES.delete(objId);
@@ -7976,6 +8018,10 @@ function CleanupLeapStateByObjId(objId: number): void {
         mod.UnspawnObject(state.previewVfx);
         state.previewVfx = undefined;
     }
+    if (state.previewTrailVfx) {
+        mod.UnspawnObject(state.previewTrailVfx);
+        state.previewTrailVfx = undefined;
+    }
     state.previewScanActive = false;
     state.previewScanId++;
 
@@ -8011,9 +8057,11 @@ function TickLeap(player: mod.Player): void {
 
     // Charge VFX at player location
     const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const chargeVfxPos = mod.Add(playerPos, mod.Multiply(mod.UpVector(), 0.75));
+    const currentFacing = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
     if (isCrouching && !state.isLeaping && isEngaged) {
         if (crouchReady && state.chargeVfxState !== 'ready') {
-            // Stop the charging loop SFX
+            // Transition to ready: stop charging SFX, play ready SFX, swap VFX
             if (state.chargingSfx) {
                 mod.UnspawnObject(state.chargingSfx);
                 state.chargingSfx = undefined;
@@ -8024,57 +8072,82 @@ function TickLeap(player: mod.Player): void {
             );
             mod.PlaySound(readySfx, 1);
             state.chargeReadySfx = readySfx;
-            state.chargeVfxState = 'ready';
-            // Snapshot final view direction, lock movement/camera, and kick off path calculation
-            if (!state.inputLocked) {
-                state.lockedFacingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-                mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, true);
-                mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, true);
-                mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, true);
-                mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, true);
-                state.inputLocked = true;
-                startTrajectoryPreview(player, state);
+            if (state.chargeVfx) {
+                mod.UnspawnObject(state.chargeVfx);
+                state.chargeVfx = undefined;
             }
+            const readyVfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_RepairTool_Sparks_Damage,
+                chargeVfxPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(readyVfx, true);
+            state.chargeVfx = readyVfx;
+            state.chargeVfxState = 'ready';
         } else if (!crouchReady && state.chargeVfxState !== 'charging') {
-            // Spawn blue fire effect while charging (starts at scale 0, grows each tick)
+            // Just entered charge engagement: spawn subtle sparks, kick off the timed preview trail
             if (state.chargeVfx) {
                 mod.UnspawnObject(state.chargeVfx);
                 state.chargeVfx = undefined;
             }
             const chargeVfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_Vehicle_Damage_PTV_Critical,
-                playerPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+                mod.RuntimeSpawn_Common.FX_Gadget_MPAPS_Lights_Active,
+                chargeVfxPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
             ) as mod.VFX;
             mod.EnableVFX(chargeVfx, true);
-            mod.SetVFXColor(chargeVfx, mod.CreateVector(0.01, 0.01, 1.0));
-            mod.SetVFXSpeed(chargeVfx, 5.0);
-            mod.SetVFXScale(chargeVfx, 0);
+            mod.SetVFXSpeed(chargeVfx, 3.0);
             state.chargeVfx = chargeVfx;
             state.chargeVfxState = 'charging';
-
+            // Snapshot facing direction + position and start preview trail + raycasts
+            state.lockedFacingDir = currentFacing;
+            state.chargeStartPosition = playerPos;
+            startTrajectoryPreview(player, state);
             // Start a looping charging SFX at the player
             if (!state.chargingSfx) {
                 const chargeSfx = mod.SpawnObject(
-                    mod.RuntimeSpawn_Common.SFX_GameModes_Rush_Arm_SimpleLoop3D,
+                    mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_ProgressBarFillingUp_OneShot2D,
                     playerPos, ZERO_VEC
                 );
                 mod.PlaySound(chargeSfx, 1);
                 state.chargingSfx = chargeSfx;
             }
+        } else if (!crouchReady && state.chargeVfxState === 'charging' && state.lockedFacingDir) {
+            // Per-tick deviation checks: too much aim or position movement resets the charge
+            const dot = mod.DotProduct(currentFacing, state.lockedFacingDir);
+            const moved = state.chargeStartPosition
+                ? mod.DistanceBetween(playerPos, state.chargeStartPosition)
+                : 0;
+            if (dot < LEAP_AIM_DEVIATION_THRESHOLD || moved > LEAP_POSITION_DEVIATION_THRESHOLD) {
+                cancelTrajectoryPreview(state);
+                state.lockedFacingDir = currentFacing;
+                state.chargeStartPosition = playerPos;
+                // Preserve isEngaged by rolling crouchStartTime back to the buffer boundary
+                state.crouchStartTime = now - LEAP_CHARGE_BUFFER_SECONDS;
+                startTrajectoryPreview(player, state);
+            } else if (!state.previewScanActive && !state.previewVfx && !state.previewTrailVfx) {
+                // Player settled back within threshold after a deviation -- relaunch the preview
+                state.lockedFacingDir = currentFacing;
+                state.chargeStartPosition = playerPos;
+                startTrajectoryPreview(player, state);
+            }
+        } else if (crouchReady && state.chargeVfxState === 'ready' && state.lockedFacingDir) {
+            // Per-tick deviation checks in ready state: redraw preview at new position/aim
+            const dot = mod.DotProduct(currentFacing, state.lockedFacingDir);
+            const moved = state.chargeStartPosition
+                ? mod.DistanceBetween(playerPos, state.chargeStartPosition)
+                : 0;
+            if (dot < LEAP_AIM_DEVIATION_THRESHOLD || moved > LEAP_POSITION_DEVIATION_THRESHOLD) {
+                cancelTrajectoryPreview(state);
+                state.lockedFacingDir = currentFacing;
+                state.chargeStartPosition = playerPos;
+                startTrajectoryPreview(player, state);
+            }
         }
-        // Move existing VFX to follow the player and scale it with charge progress
+        // Move existing charge VFX to follow the player
         if (state.chargeVfx) {
-            mod.MoveVFX(state.chargeVfx, playerPos, ZERO_VEC);
-            // Scale from 0 to 0.5 over the charge window (capped at 0.5 once ready)
-            const chargeProgress = Math.min(
-                (crouchHeld - LEAP_CHARGE_BUFFER_SECONDS) /
-                (LEAP_CROUCH_HOLD_SECONDS - LEAP_CHARGE_BUFFER_SECONDS),
-                1.0
-            );
-            mod.SetVFXScale(state.chargeVfx, chargeProgress * 0.5);
+            mod.MoveVFX(state.chargeVfx, chargeVfxPos, ZERO_VEC);
         }
     } else {
-        // Not crouching, is leaping, or within the slide-protection buffer -- clean up
+        // Not crouching, is leaping, or within slide-protection buffer -- clean up
         if (state.chargeVfx) {
             mod.UnspawnObject(state.chargeVfx);
             state.chargeVfx = undefined;
@@ -8092,18 +8165,11 @@ function TickLeap(player: mod.Player): void {
         if (state.previewScanActive || state.previewVfx) {
             cancelTrajectoryPreview(state);
         }
+        state.chargeStartPosition = undefined;
         state.lockedFacingDir = undefined;
         state.cachedStepPositions = undefined;
         state.cachedGeometryCollisionStep = -1;
         state.cachedGeometryCollisionPos = undefined;
-        // Release movement + camera locks if crouch was released early
-        if (state.inputLocked) {
-            mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
-            mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
-            mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, false);
-            mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, false);
-            state.inputLocked = false;
-        }
     }
 
     // Update status UI
