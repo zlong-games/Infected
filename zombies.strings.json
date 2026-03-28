@@ -311,5 +311,8 @@
   "leap_status_ready": "LEAP READY [FIRE]",
   "leap_status_cooldown": "LEAP: {}.{}",
   "leap_status_leaping": "LEAPING",
-  "leap_status_no_room": "NOT ENOUGH ROOM"
+  "leap_status_no_room": "NOT ENOUGH ROOM",
+  "dbg_spawn_scenario": "Spawn Scenario",
+  "dbg_camera_fixed": "Switch Team",
+  "dbg_cleanup": "Cleanup"
 }
