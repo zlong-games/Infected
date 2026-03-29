@@ -1,4 +1,4 @@
-import { ParseUI, ConvertArray } from "modlib";
+﻿import { ParseUI, ConvertArray } from "modlib";
 
 const VERSION = "1.03.00";
 
@@ -7400,13 +7400,28 @@ let LEAP_VERTICAL_FACTOR = 0.5;
 let LEAP_HEIGHT_ARC = 1.5;
 
 /** Minimum effective distance required to execute a leap */
-let LEAP_MIN_DISTANCE = 2;
+let LEAP_MIN_DISTANCE = 7;
 
 /** Meters to backstep from a collision point along the arc */
-let LEAP_COLLISION_BACKSTEP = 0.25;
+let LEAP_COLLISION_BACKSTEP = 0.1;
+
+/** Maximum vertical displacement (meters) any arc step is allowed above the start position.
+ *  Prevents steep upward aim angles from launching the player to extreme heights and causing
+ *  an abrupt stop at the distance limit while still airborne. Arc peak height scales
+ *  proportionally so short leaps still feel smooth. */
+let LEAP_MAX_HEIGHT = 5.0;
+
+/** Seconds between each marker step in the preview trail animation.
+ *  Lower = faster looping animation. */
+let LEAP_PREVIEW_STEP_DELAY = 0.05;
+
+/** Extra time (seconds) added on top of each step's travel time when predicting where a
+ *  moving vehicle will be during the leap. Acts as a safety margin so vehicles entering
+ *  the path just after the snaphot are still caught. */
+let LEAP_VEHICLE_PREDICT_MARGIN = 0.1;
 
 /** Seconds to hold third-person camera + VFX after landing before switching back */
-let LEAP_LANDING_LINGER = 0.5;
+let LEAP_LANDING_LINGER = 1.0;
 
 /** Seconds the player must hold crouch before leap can activate */
 let LEAP_CROUCH_HOLD_SECONDS = 1.0;
@@ -7460,6 +7475,12 @@ interface LeapState {
     cachedGeometryCollisionPos: mod.Vector | undefined;
     /** Single VFX that moves along the preview arc in a loop */
     previewTrailVfx: mod.VFX | undefined;
+    /** Last camera mode set via setLeapCamera - guards against redundant engine calls */
+    currentCamera: mod.Cameras | undefined;
+    /** True while the preview scan detects that the approach is too short to leap */
+    previewIsBlocked: boolean;
+    /** WorldIcon spawned at the blocked location instead of the normal arc, visible only to the owning player */
+    blockedWarnIcon: mod.WorldIcon | undefined;
 }
 
 const LEAP_STATES = new Map<number, LeapState>();
@@ -7494,7 +7515,8 @@ function arcHeight(t: number, peakHeight: number): number {
 function computeLeapStepPositions(
     startPos: mod.Vector,
     leapDir: mod.Vector,
-    effectiveDistance: number
+    effectiveDistance: number,
+    peakHeight: number = LEAP_HEIGHT_ARC
 ): mod.Vector[] {
     // Scale step count with distance; minimum ensures short leaps still animate
     const stepCount = Math.max(LEAP_STEP_MIN, Math.round(effectiveDistance / LEAP_METERS_PER_STEP));
@@ -7503,7 +7525,7 @@ function computeLeapStepPositions(
         // Ease-in: concentrate steps near launch so early movement feels snappy
         const t = Math.pow(step / stepCount, 1.5);
         let stepPos = mod.Add(startPos, mod.Multiply(leapDir, effectiveDistance * t));
-        const heightBoost = arcHeight(t, LEAP_HEIGHT_ARC);
+        const heightBoost = arcHeight(t, peakHeight);
         stepPos = mod.Add(stepPos, mod.Multiply(mod.UpVector(), heightBoost));
         positions.push(stepPos);
     }
@@ -7512,14 +7534,41 @@ function computeLeapStepPositions(
 
 /** Shared computation for both preview and execution: builds the leap arc
  *  from a player's current position and facing, returning the direction,
- *  full step positions, and subsampled track points for VFX display. */
+ *  full step positions, and subsampled track points for VFX display.
+ *
+ *  Height clamping: at steep upward angles the combined leapDir Y-component and
+ *  parabolic arc height can push the endpoint well above ground level, causing an
+ *  abrupt stop in mid-air when LEAP_DISTANCE is exhausted. This function solves for
+ *  the analytical peak of the combined curve (f(t) = dist*t*Vy + 4*H*t*(1-t)) and
+ *  reduces effectiveDistance until that peak stays within LEAP_MAX_HEIGHT. Arc height
+ *  scales proportionally so short leaps still have a natural-looking arc. */
 function computeLeapTrack(player: mod.Player) {
     const startPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     const facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
     const flatDir = flattenDirection(facingDir);
     const verticalBias = getVecY(facingDir) * LEAP_VERTICAL_FACTOR;
     const leapDir = mod.Normalize(mod.Add(flatDir, mod.Multiply(mod.UpVector(), verticalBias)));
-    const steps = computeLeapStepPositions(startPos, leapDir, LEAP_DISTANCE);
+    const leapDirY = getVecY(leapDir);
+    const H_base = LEAP_HEIGHT_ARC;
+    const rawPeakH_atFull = (function () {
+        const H = H_base; // at full distance, proportional H = H_base
+        if (leapDirY <= 0) return 0; // aiming downward -- arc always descends, no height risk
+        // t* for the curve dist*t*Vy + 4H*t*(1-t) at t where derivative = 0:
+        // derivative: dist*Vy + 4H*(1-2t) = 0 => t* = (dist*Vy + 4H) / (8H)
+        const D = LEAP_DISTANCE;
+        const tStar = Math.min(1, Math.max(0, (D * leapDirY + 4 * H) / (8 * H)));
+        return D * tStar * leapDirY + arcHeight(tStar, H);
+    })();
+
+    // Scale effective distance down proportionally so peak fits within LEAP_MAX_HEIGHT
+    let effectiveDistance = LEAP_DISTANCE;
+    if (rawPeakH_atFull > LEAP_MAX_HEIGHT && rawPeakH_atFull > 0) {
+        effectiveDistance = LEAP_DISTANCE * (LEAP_MAX_HEIGHT / rawPeakH_atFull);
+    }
+    // Scale arc peak height proportionally so shorter leaps have a flatter, consistent arc
+    const scaledPeakHeight = H_base * (effectiveDistance / LEAP_DISTANCE);
+
+    const steps = computeLeapStepPositions(startPos, leapDir, effectiveDistance, scaledPeakHeight);
     const NUM_MARKERS = 6;
     const markerSpacing = Math.max(1, Math.floor(steps.length / NUM_MARKERS));
     const trackPoints: mod.Vector[] = [];
@@ -7527,7 +7576,7 @@ function computeLeapTrack(player: mod.Player) {
         trackPoints.push(steps[i]);
     }
     trackPoints.push(steps[steps.length - 1]);
-    return { startPos, facingDir, leapDir, steps, trackPoints };
+    return { startPos, facingDir, leapDir, steps, trackPoints, effectiveDistance, scaledPeakHeight };
 }
 
 // ============================================================
@@ -7583,6 +7632,11 @@ function cancelTrajectoryPreview(state: LeapState): void {
         mod.UnspawnObject(state.previewTrailVfx);
         state.previewTrailVfx = undefined;
     }
+    if (state.blockedWarnIcon) {
+        mod.UnspawnObject(state.blockedWarnIcon);
+        state.blockedWarnIcon = undefined;
+    }
+    state.previewIsBlocked = false;
     state.previewLandingPos = undefined;
 }
 
@@ -7600,106 +7654,147 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
         return state.previewScanActive && state.previewScanId === scanId && LEAP_STATES.has(mod.GetObjId(player));
     }
 
-    // --- One-time collision scan using snapshot at scan start ---
-    const { startPos, facingDir, leapDir, steps } = computeLeapTrack(player);
-    const startAbove = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.5));
-    const peakIdx = Math.floor(steps.length / 2);
-
-    state.cachedStepPositions = steps;
+    state.cachedStepPositions = undefined;
     state.cachedGeometryCollisionStep = -1;
     state.cachedGeometryCollisionPos = undefined;
 
-    let collisionPos: mod.Vector | undefined;
+    // Compute initial arc so VFXes can be spawned at a sensible starting position
+    const initialTrack = computeLeapTrack(player);
 
-    // --- Ray 1: Immediate direction (full pitch + yaw) ---
-    state.rayHitPoint = undefined;
-    state.rayHitDist = 0;
-    mod.RayCast(player, startAbove, mod.Add(startPos, mod.Multiply(facingDir, LEAP_DISTANCE)));
-    await mod.Wait(0.05);
-    if (!isValid()) { state.previewScanActive = false; return; }
-    if (state.rayHitPoint && state.rayHitDist > 1.5) {
-        const backDir = mod.Normalize(mod.Subtract(startAbove, state.rayHitPoint));
-        collisionPos = mod.Add(state.rayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
-        state.cachedGeometryCollisionStep = 0;
-        state.cachedGeometryCollisionPos = collisionPos;
-    }
-
-    // --- Ray 2: Rise (startAbove --> arc peak) ---
-    if (!collisionPos) {
-        state.rayHitPoint = undefined;
-        state.rayHitDist = 0;
-        mod.RayCast(player, startAbove, steps[peakIdx]);
-        await mod.Wait(0.05);
-        if (!isValid()) { state.previewScanActive = false; return; }
-        if (state.rayHitPoint && state.rayHitDist > 1.5) {
-            const backDir = mod.Normalize(mod.Subtract(startAbove, state.rayHitPoint));
-            collisionPos = mod.Add(state.rayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
-            state.cachedGeometryCollisionStep = peakIdx;
-            state.cachedGeometryCollisionPos = collisionPos;
-        }
-    }
-
-    // --- Ray 3: Descent (arc peak --> landing) ---
-    if (!collisionPos) {
-        state.rayHitPoint = undefined;
-        state.rayHitDist = 0;
-        mod.RayCast(player, steps[peakIdx], steps[steps.length - 1]);
-        await mod.Wait(0.05);
-        if (!isValid()) { state.previewScanActive = false; return; }
-        if (state.rayHitPoint && state.rayHitDist > 1.5) {
-            const backDir = mod.Normalize(mod.Subtract(steps[peakIdx], state.rayHitPoint));
-            collisionPos = mod.Add(state.rayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
-            state.cachedGeometryCollisionStep = steps.length - 1;
-            state.cachedGeometryCollisionPos = collisionPos;
-        }
-    }
-
-    if (!isValid()) { state.previewScanActive = false; return; }
-
-    // Spawn trail VFX once - it will be moved each loop iteration
+    // Spawn trail VFX once - repositioned via MoveVFX each iteration
+    // original used FX_ThrowingKnife_Trail
     const trailVfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.FX_ThrowingKnife_Trail,
-        steps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
+        mod.RuntimeSpawn_Common.FX_EODBot_Active_Friendly,
+        initialTrack.steps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
     ) as mod.VFX;
+    mod.SetVFXColor(trailVfx, mod.CreateVector(1, 0.3, 0));
     mod.EnableVFX(trailVfx, true);
     state.previewTrailVfx = trailVfx;
 
-    const TRACK_REST_DELAY = 0.25;
+    // Spawn destination indicator once - repositioned via MoveVFX each iteration.
+    const destVfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_Gadget_DeployableMortar_Target_Area,
+        initialTrack.steps[initialTrack.steps.length - 1], ZERO_VEC, mod.CreateVector(1, 1, 1)
+    ) as mod.VFX;
+    mod.SetVFXColor(destVfx, mod.CreateVector(0.08, 1, 0.27));
+    mod.EnableVFX(destVfx, false); // hidden until charge is ready
+    state.previewVfx = destVfx;
 
-    // --- Animation loop: recompute arc from live player state each pass ---
+    const TRACK_REST_DELAY = 0.12;
+    // Passes before the blocked-warning SFX may fire again.
+    // Each pass takes ~0.17s (0.05s raycast + 0.12s rest), so 6 passes ~= 1s.
+    const BLOCKED_WARN_PASSES = 6;
+    let blockedSfxCooldown = 0; // start at 0 so the first blocked detection fires immediately
+
+    // --- Animation loop: each pass recomputes the arc and fires ONE fresh geometry probe ---
+    // Doing the collision check per-iteration (instead of once at startup) ensures the
+    // indicator and trail truncation are always consistent with the player's current
+    // position and facing direction, fixing stale-cache issues for all three VFX bugs.
     while (isValid()) {
-        // Clear previous destination indicator
-        if (state.previewVfx) {
-            mod.UnspawnObject(state.previewVfx);
-            state.previewVfx = undefined;
-        }
-
-        // Recompute arc from current player position and facing
+        // Recompute arc from the player's live position and facing direction
         const liveTrack = computeLeapTrack(player);
         const liveTrackPoints = liveTrack.trackPoints;
         state.cachedStepPositions = liveTrack.steps;
-        state.previewLandingPos = liveTrack.steps[liveTrack.steps.length - 1];
+        const arcEndpoint = liveTrack.steps[liveTrack.steps.length - 1];
 
-        // Timing: traverse in LEAP_CROUCH_HOLD_SECONDS * 0.5
-        const stepDelay = 0.06;
-
-        for (let i = 0; i < liveTrackPoints.length; i++) {
-            if (!isValid()) break;
-            mod.MoveVFX(trailVfx, liveTrackPoints[i], ZERO_VEC);
-            await mod.Wait(stepDelay);
-        }
+        // Single-ray geometry probe along the chord from eye level to the arc endpoint.
+        // One ray covers most common obstacle cases and resolves within ~50ms.
+        state.rayHitPoint = undefined;
+        state.rayHitDist = 0;
+        const scanAbove = mod.Add(liveTrack.startPos, mod.Multiply(mod.UpVector(), 1.5));
+        mod.RayCast(player, scanAbove, arcEndpoint);
+        await mod.Wait(0.05);
         if (!isValid()) break;
 
-        // Show destination indicator at the final track point
-        if (!state.previewVfx) {
-            const destVfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
-                liveTrackPoints[liveTrackPoints.length - 1], ZERO_VEC, mod.CreateVector(1, 1, 1)
-            ) as mod.VFX;
-            mod.EnableVFX(destVfx, true);
-            state.previewVfx = destVfx;
+        // Resolve the destination from the fresh raycast result
+        let destPos = arcEndpoint;
+        if (state.rayHitPoint && state.rayHitDist > 1.5) {
+            const backDir = mod.Normalize(mod.Subtract(scanAbove, state.rayHitPoint));
+            destPos = mod.Add(state.rayHitPoint, mod.Multiply(backDir, LEAP_COLLISION_BACKSTEP));
+        }
+        state.previewLandingPos = destPos;
+        // Keep cached state in sync so executeLeap can read a recent estimate
+        const hasCollision = destPos !== arcEndpoint;
+        state.cachedGeometryCollisionPos = hasCollision ? destPos : undefined;
+        state.cachedGeometryCollisionStep = hasCollision ? 0 : -1;
+
+        // Blocked check: geometry collides too close for a valid leap
+        const travelDist = mod.DistanceBetween(liveTrack.startPos, destPos);
+        const isBlocked = travelDist < LEAP_MIN_DISTANCE;
+        state.previewIsBlocked = isBlocked;
+
+        if (isBlocked) {
+            // Spawn the warning WorldIcon once; reposition it each pass with SetWorldIconPosition.
+            // Owner is set to the individual player so it is only visible to them.
+            if (!state.blockedWarnIcon) {
+                const iconObj = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, destPos, ZERO_VEC);
+                const icon = iconObj as mod.WorldIcon;
+                mod.SetWorldIconOwner(icon, player);
+                mod.SetWorldIconImage(icon, mod.WorldIconImages.Cross);
+                mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.2, 0.2));
+                mod.EnableWorldIconImage(icon, true);
+                mod.EnableWorldIconText(icon, false);
+                state.blockedWarnIcon = icon;
+            } else {
+                mod.SetWorldIconPosition(state.blockedWarnIcon, destPos);
+            }
+            // Hide normal preview VFXes while blocked
+            mod.EnableVFX(trailVfx, false);
+            mod.EnableVFX(destVfx, false);
+            // Throttled SFX + oscillation - at most once per ~1 second
+            blockedSfxCooldown--;
+            if (blockedSfxCooldown <= 0) {
+                // Brief horizontal pulse to draw attention to the blocked indicator
+                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.RightVector(), 0.2)));
+                await mod.Wait(0.08);
+                Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.LeftVector(), 0.2)));
+                await mod.Wait(0.08);
+                if (!isValid()) break;
+                mod.SetWorldIconPosition(state.blockedWarnIcon, destPos);
+                blockedSfxCooldown = BLOCKED_WARN_PASSES;
+            }
+            await mod.Wait(TRACK_REST_DELAY);
+            continue;
         }
 
+        // Recovering from blocked: remove the WorldIcon and restore normal display
+        if (state.blockedWarnIcon) {
+            mod.UnspawnObject(state.blockedWarnIcon);
+            state.blockedWarnIcon = undefined;
+            mod.EnableVFX(trailVfx, true);
+            // Only restore the dest indicator if the charge is already complete
+            if (state.chargeVfxState === 'ready') {
+                mod.EnableVFX(destVfx, true);
+            }
+        }
+
+        // Sync dest indicator visibility to charge-ready state each iteration
+        const destVfxShouldShow = state.chargeVfxState === 'ready';
+        mod.EnableVFX(destVfx, destVfxShouldShow);
+
+        // Immediately reposition indicator to the freshly resolved destination.
+        // set an aggressive negative vertical offset to sink the mortar VFX circle into ground
+        mod.MoveVFX(destVfx, mod.Subtract(destPos, mod.Multiply(mod.UpVector(), 15)), ZERO_VEC);
+        mod.SetVFXColor(destVfx, mod.CreateVector(0.08, 1, 0.27));
+
+        // Truncate the trail animation to stop at the collision point when geometry
+        // was detected, so the trail doesn't visually sweep through the obstacle.
+        let animPoints = liveTrackPoints;
+        if (hasCollision) {
+            const collisionDist = mod.DistanceBetween(liveTrack.startPos, destPos);
+            const fraction = Math.min(1, collisionDist / Math.max(liveTrack.effectiveDistance, 0.01));
+            const cutoff = Math.max(1, Math.ceil(liveTrackPoints.length * fraction));
+            animPoints = liveTrackPoints.slice(0, cutoff);
+        }
+
+        // Animate the trail through the arc markers
+        for (let i = 0; i < animPoints.length; i++) {
+            if (!isValid()) break;
+            mod.MoveVFX(trailVfx, animPoints[i], ZERO_VEC);
+            await mod.Wait(LEAP_PREVIEW_STEP_DELAY);
+        }
+        if (!isValid()) break;
         await mod.Wait(TRACK_REST_DELAY);
     }
 
@@ -7709,6 +7804,16 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 // ============================================================
 // LEAP EXECUTION
 // ============================================================
+
+/**
+ * Guards against back-to-back camera switches that can cause a black-screen flash.
+ * Only calls the engine API when the requested mode differs from the last known mode.
+ */
+function setLeapCamera(player: mod.Player, state: LeapState, camera: mod.Cameras): void {
+    if (state.currentCamera === camera) return;
+    state.currentCamera = camera;
+    mod.SetCameraTypeForPlayer(player, camera);
+}
 
 async function executeLeap(player: mod.Player, state: LeapState): Promise<void> {
     state.isLeaping = true;
@@ -7722,7 +7827,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     state.cachedGeometryCollisionPos = undefined;
 
     // Compute a fresh path from the player's current position and facing
-    const { startPos, facingDir, leapDir, steps: stepPositions } = computeLeapTrack(player);
+    const { startPos, facingDir, leapDir, steps: stepPositions, effectiveDistance, scaledPeakHeight } = computeLeapTrack(player);
     const yaw = directionToYaw(facingDir);
 
     // Min-distance check
@@ -7733,7 +7838,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
             mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
         }
-        mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
+        setLeapCamera(player, state, mod.Cameras.FirstPerson);
         state.isLeaping = false;
         state.crouchStartTime = 0;
         return;
@@ -7745,7 +7850,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         startPos, ZERO_VEC
     );
     mod.PlaySound(leapSfx, 1);
-    mod.SetCameraTypeForPlayer(player, mod.Cameras.ThirdPerson);
+    setLeapCamera(player, state, mod.Cameras.ThirdPerson);
 
     // --- Inline geometry collision check (3 raycasts) ---
     const startAbove = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.5));
@@ -7831,6 +7936,30 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         }
     }
 
+    // Motion-prediction pass: covers vehicles that are moving and will enter the teleport
+    // path between the snapshot and the actual step execution. For each step we estimate
+    // where the vehicle will be at that moment in time using its current linear velocity.
+    // A small extra margin (LEAP_VEHICLE_PREDICT_MARGIN) ensures vehicles arriving just
+    // after the snapshot window are still caught.
+    if (!vehicleHitRef) {
+        const allVehiclesC = ConvertArray(mod.AllVehicles()) as mod.Vehicle[];
+        for (let i = 0; i < stepPositions.length && !vehicleHitRef; i++) {
+            const t = i * LEAP_STEP_DELAY + LEAP_VEHICLE_PREDICT_MARGIN;
+            for (const vehicle of allVehiclesC) {
+                const vPos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+                const vVel = mod.GetVehicleState(vehicle, mod.VehicleStateVector.LinearVelocity);
+                // Predicted position = current + velocity * elapsed time at this step
+                const predictedPos = mod.Add(vPos, mod.Multiply(vVel, t));
+                if (mod.DistanceBetween(stepPositions[i], predictedPos) <= LEAP_HIT_RADIUS) {
+                    vehicleHitRef = vehicle;
+                    // Use the predicted position for the backstep so the player stops
+                    // short of where the vehicle will actually be, not where it is now.
+                    vehicleHitPos = predictedPos;
+                }
+            }
+        }
+    }
+
     // Compute stop position: back up from the vehicle centre so the player lands
     // just outside the hit radius and never teleports into the vehicle body.
     let vehicleStopPos: mod.Vector | undefined;
@@ -7849,9 +7978,11 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
 
     // Recompute the arc steps scaled to the actual travel distance so that
     // short-distance leaps (e.g. wall collision) get the same step density as long ones.
+    // scaledPeakHeight is threaded through so height-clamped arcs keep a proportional peak.
     const finalDest = finalLandingOverride ?? stepPositions[stepPositions.length - 1];
     const actualDist = mod.DistanceBetween(startPos, finalDest);
-    const travelSteps = computeLeapStepPositions(startPos, leapDir, Math.max(actualDist, 0.01));
+    const travelPeakHeight = scaledPeakHeight * Math.min(1, actualDist / Math.max(effectiveDistance, 0.01));
+    const travelSteps = computeLeapStepPositions(startPos, leapDir, Math.max(actualDist, 0.01), travelPeakHeight);
     const trailBreadcrumbs: mod.VFX[] = [];
 
     const trailVfx = mod.SpawnObject(
@@ -7868,6 +7999,51 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     mod.EnableVFX(trailVfx, false);
     // Final teleport: exact collision backstep if applicable, otherwise last arc step
     mod.Teleport(player, finalLandingOverride ?? travelSteps[travelSteps.length - 1], yaw);
+
+    // Knockback: only when the player hit a real vertical obstacle (wall or vehicle).
+    // A geometry collision that is at or below the player's start height is just the
+    // arc naturally truncating against the ground, not a wall impact -- skip knockback there.
+    const isVehicleCollision = !!vehicleHitRef;
+    const isWallCollision = !!geoCollisionPos
+        && (getVecY(geoCollisionPos) - getVecY(startPos)) > 0.5;
+    if (finalLandingOverride && (isVehicleCollision || isWallCollision)) {
+        // Concussion ringing plays only for the leaping player (2D - no world position needed)
+        // SFX_Soldier_Damage_Explosion_Ring_SimpleLoop2D
+        const ragdollOrigin = travelSteps[travelSteps.length - 1];
+        const soldierImpactSfx = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.SFX_Soldier_Damage_Fall_Low_OneShot2D,
+            ragdollOrigin, ZERO_VEC, mod.CreateVector(1, 1, 1)
+        );
+        const soldierReactSfx = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.SFX_Soldier_Revive_Effort_MaleHurt_OneShot3D,
+            ragdollOrigin, ZERO_VEC, mod.CreateVector(1, 1, 1)
+        );
+        // Body-impact ragdoll SFX plays in world space so nearby players also hear it (3D).
+        // Spawn at the step closest to the obstacle so the sound origin feels correct.
+        const ragdollSfxObj = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.SFX_Soldier_Ragdoll_OnDeath_OneShot3D,
+            ragdollOrigin, ZERO_VEC, mod.CreateVector(1, 1, 1)
+        );
+        mod.PlaySound(soldierImpactSfx, 1, player);
+        mod.PlaySound(ragdollSfxObj, 1);
+        // Brief pause so the player "feels" the wall before being thrown back
+        await mod.Wait(0.05);
+        mod.PlaySound(soldierReactSfx, 1);
+
+        // Repel in two steps directly opposite the leap direction so there's a
+        // clear visual difference between hitting the wall and rebounding from it.
+        const backDir = mod.Normalize(mod.Multiply(leapDir, -1));
+        const lift = mod.Multiply(mod.UpVector(), 0.5);
+
+        const repelStep1 = mod.Add(mod.Add(finalLandingOverride, mod.Multiply(backDir, 2)), lift);
+        mod.Teleport(player, repelStep1, yaw);
+        await mod.Wait(0.12);
+
+        const repelStep2 = mod.Add(mod.Add(finalLandingOverride, mod.Multiply(backDir, 4)), lift);
+        mod.Teleport(player, repelStep2, yaw);
+        await mod.Wait(0.12);
+        mod.StopSound(soldierImpactSfx, player);
+    }
 
     // Apply vehicle damage now that the arc is complete. The player stopped short of
     // the vehicle (never teleported into it), so the entity is still alive and valid.
@@ -7914,7 +8090,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     await mod.Wait(LEAP_LANDING_LINGER);
 
     // Switch back to first person and clean up leap movement SFX
-    mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
+    setLeapCamera(player, state, mod.Cameras.FirstPerson);
     if (state.leapStartSfx) {
         mod.UnspawnObject(state.leapStartSfx);
         state.leapStartSfx = undefined;
@@ -7974,31 +8150,46 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
         cachedGeometryCollisionStep: -1,
         cachedGeometryCollisionPos: undefined,
         previewTrailVfx: undefined,
+        currentCamera: mod.Cameras.FirstPerson,
+        previewIsBlocked: false,
+        blockedWarnIcon: undefined,
     });
 
     // basic AI leap test
     if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && LEAP_TEST_MODE) {
-        // wait for AI to settle into vehicle
+        // Wait for the survivor bot to settle into the vehicle seat.
         await mod.Wait(4);
-        let allVehicles = mod.AllVehicles();
-        let driver: mod.Player[] = [];
-        if (!activeVehicle) {
-            for (let i = 0; i < mod.CountOf(allVehicles); i++) {
-                const vehicle = mod.ValueInArray(allVehicles, i) as mod.Vehicle;
-                driver?.push(mod.GetPlayerFromVehicleSeat(vehicle, 0));
-            }
-        }
-        while (true && driver?.length) {
-            if (!activeVehicle || !mod.GetPlayerFromVehicleSeat(activeVehicle, 0)) break;
-            for (let d of driver) {
-                if (!mod.GetSoldierState(d, mod.SoldierStateBool.IsAlive)) continue;
-                mod.AISetTarget(player, d);
+
+        // Resolve the target vehicle. When the test harness spawns via the interact point
+        // it passes activeVehicle directly; fall back to scanning all vehicles otherwise.
+        let targetVehicle: mod.Vehicle | undefined = activeVehicle;
+
+        // Re-enable targeting so AISetTarget is honoured. onBotSpawned calls
+        // AIEnableTargeting(false) before InitLeapSystem runs, which silently blocks
+        // any AISetTarget call made while that flag is still down.
+        mod.AIEnableTargeting(player, true);
+        mod.AISetMoveSpeed(player, mod.MoveSpeed.Walk);
+
+        // Chase and charge-leap the vehicle driver until the seat is vacated or the AI dies.
+        while (targetVehicle) {
+            let MIN_LEAP_DIST = 4;
+            const driver = mod.GetPlayerFromVehicleSeat(targetVehicle, 0);
+            if (!driver || !mod.GetSoldierState(driver, mod.SoldierStateBool.IsAlive)) break;
+
+            // Explicitly set the engagement target and move toward the vehicle so
+            // the bot actually closes distance (without AIMoveToBehavior it just stands still).
+            const vehiclePos = mod.GetVehicleState(targetVehicle, mod.VehicleStateVector.VehiclePosition);
+            if (mod.DistanceBetween(mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition), vehiclePos) > MIN_LEAP_DIST) {
+                mod.AISetTarget(player, driver);
+                // mod.AIMoveToBehavior(player, vehiclePos);
+                // Hold crouch so TickLeap accumulates charge time, then fire to trigger the leap.
+                mod.AISetStance(player, mod.Stance.Crouch);
+                await mod.Wait(2);
+                mod.AIForceFire(player, 2);
+                mod.AIIdleBehavior(player);
             }
             mod.AISetStance(player, mod.Stance.Crouch);
-            await mod.Wait(2);
-            mod.AIForceFire(player, 2);
         }
-        driver = [];
         mod.Kill(player);
     }
     return;
@@ -8043,9 +8234,13 @@ function CleanupLeapSystem(player: mod.Player): void {
         mod.UnspawnObject(state.previewTrailVfx);
         state.previewTrailVfx = undefined;
     }
+    if (state.blockedWarnIcon) {
+        mod.UnspawnObject(state.blockedWarnIcon);
+        state.blockedWarnIcon = undefined;
+    }
     state.previewScanActive = false;
     state.previewScanId++;
-    mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
+    setLeapCamera(player, state, mod.Cameras.FirstPerson);
 
     LEAP_STATES.delete(objId);
 }
@@ -8088,6 +8283,10 @@ function CleanupLeapStateByObjId(objId: number): void {
     if (state.previewTrailVfx) {
         mod.UnspawnObject(state.previewTrailVfx);
         state.previewTrailVfx = undefined;
+    }
+    if (state.blockedWarnIcon) {
+        mod.UnspawnObject(state.blockedWarnIcon);
+        state.blockedWarnIcon = undefined;
     }
     state.previewScanActive = false;
     state.previewScanId++;
@@ -8163,11 +8362,11 @@ function TickLeap(player: mod.Player): void {
             state.chargeVfx = chargeVfx;
             state.chargeVfxState = 'charging';
             startTrajectoryPreview(player, state);
-            // Start a looping charging SFX at the player
-            const chargeSfx = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_Charge_OneShot3D;
+            // Start a charging SFX at the player
+            const proxChargeSfx = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_Charge_OneShot3D;
             if (!state.chargingSfx) {
                 const chargeSfxObj = mod.SpawnObject(
-                    chargeSfx,
+                    proxChargeSfx,
                     playerPos, ZERO_VEC
                 );
                 mod.PlaySound(chargeSfxObj, 1);
@@ -8216,8 +8415,13 @@ function TickLeap(player: mod.Player): void {
             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal));
             mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.8, 0.8, 0.2));
         } else if (crouchReady) {
-            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_ready));
-            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.2, 1, 0.3));
+            if (state.previewIsBlocked) {
+                mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
+                mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
+            } else {
+                mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_ready));
+                mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.2, 1, 0.3));
+            }
         } else {
             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_idle));
             mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.6, 0.6, 0.6));
@@ -8227,6 +8431,7 @@ function TickLeap(player: mod.Player): void {
     // Leap activation: crouch held long enough + fire
     if (state.isLeaping) return;
     if (!crouchReady || !isFiring) return;
+    if (state.previewIsBlocked) return;
 
     executeLeap(player, state);
 }
@@ -8318,7 +8523,6 @@ export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mo
         return;
     }
 
-    // await mod.Wait(0.25);
     if (Helpers.HasValidObjId(eventPlayer)) {
         AISpawnHandler.OnBotSpawnFromSpawner(eventPlayer, mod.GetObjId(eventSpawner));
     }
