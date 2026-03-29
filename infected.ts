@@ -15,7 +15,7 @@ const DEBUG_ALPHA_STATE = false;
 const DEBUG_ALPHA_DEBUG_MOVE_INDICATOR = true;
 const DEBUG_INFECTED_CHASE_ICONS = false; // world icon per infected bot, color-coded by chase state
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
-const LEAP_TEST_MODE = true; // bypass all game logic; spawn a minimal sandbox for testing leap attacks
+const LEAP_TEST_MODE = false; // bypass all game logic; spawn a minimal sandbox for testing leap attacks
 
 const LOADOUT_SELECTION_TIME = 40;
 const DEBUG_TIME = DEBUG && FAST_ROUNDS ? 7 : 60;
