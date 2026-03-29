@@ -3583,8 +3583,6 @@ class PlayerProfile {
         playerProfile.isDead = false;
         InfectedIconDisplay(player);
 
-        // RunDeferredOnPlayerDeployedTasks(player, playerProfile);
-
         if (GameHandler.gameState === GameState.GameRoundIsRunning) {
             playerProfile.scoreboardUI?.Show();
             playerProfile.loadoutDisplayBottom?.Show();
@@ -7584,6 +7582,9 @@ function computeLeapTrack(player: mod.Player) {
 // ============================================================
 
 function createLeapUI(player: mod.Player, playerObjId: number) {
+    if (mod.GetObjId(mod.GetTeam(player)) !== mod.GetObjId(INFECTED_TEAM)) {
+        return { statusContainerWidget: undefined, statusWidget: undefined };
+    }
     const statusContainerWidget = ParseUI({
         type: "Container",
         name: `leap_status_ctr_${playerObjId}`,
@@ -7662,9 +7663,9 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
     const initialTrack = computeLeapTrack(player);
 
     // Spawn trail VFX once - repositioned via MoveVFX each iteration
-    // original used FX_ThrowingKnife_Trail
-    const trailVfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.FX_EODBot_Active_Friendly,
+    // dot color changes based on charge state and set below before iteration
+    let trailVfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.FX_EODBot_Active_Enemy,
         initialTrack.steps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
     ) as mod.VFX;
     mod.SetVFXColor(trailVfx, mod.CreateVector(1, 0.3, 0));
@@ -7685,6 +7686,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
     // Each pass takes ~0.17s (0.05s raycast + 0.12s rest), so 6 passes ~= 1s.
     const BLOCKED_WARN_PASSES = 6;
     let blockedSfxCooldown = 0; // start at 0 so the first blocked detection fires immediately
+    let currentTrailIsReady = false;
 
     // --- Animation loop: each pass recomputes the arc and fires ONE fresh geometry probe ---
     // Doing the collision check per-iteration (instead of once at startup) ensures the
@@ -7758,6 +7760,21 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
             continue;
         }
 
+        // Swap trail VFX only when charge state transitions (charging <-> ready)
+        const trailReady = state.chargeVfxState === 'ready';
+        if (trailReady !== currentTrailIsReady) {
+            mod.UnspawnObject(trailVfx);
+            trailVfx = mod.SpawnObject(
+                trailReady
+                    ? mod.RuntimeSpawn_Common.FX_EODBot_Active_Friendly
+                    : mod.RuntimeSpawn_Common.FX_EODBot_Active_Enemy,
+                liveTrackPoints[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(trailVfx, true);
+            state.previewTrailVfx = trailVfx;
+            currentTrailIsReady = trailReady;
+        }
+
         // Recovering from blocked: remove the WorldIcon and restore normal display
         if (state.blockedWarnIcon) {
             mod.UnspawnObject(state.blockedWarnIcon);
@@ -7776,7 +7793,6 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
         // Immediately reposition indicator to the freshly resolved destination.
         // set an aggressive negative vertical offset to sink the mortar VFX circle into ground
         mod.MoveVFX(destVfx, mod.Subtract(destPos, mod.Multiply(mod.UpVector(), 15)), ZERO_VEC);
-        mod.SetVFXColor(destVfx, mod.CreateVector(0.08, 1, 0.27));
 
         // Truncate the trail animation to stop at the collision point when geometry
         // was detected, so the trail doesn't visually sweep through the obstacle.
@@ -7853,7 +7869,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     setLeapCamera(player, state, mod.Cameras.ThirdPerson);
 
     // --- Inline geometry collision check (3 raycasts) ---
-    const startAbove = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.5));
+    const startAbove = mod.Add(startPos, mod.Multiply(mod.UpVector(), 1.2));
     const peakIdx = Math.floor(stepPositions.length / 2);
     let geoCollisionStep = -1;
     let geoCollisionPos: mod.Vector | undefined;
@@ -8007,6 +8023,27 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     const isWallCollision = !!geoCollisionPos
         && (getVecY(geoCollisionPos) - getVecY(startPos)) > 0.5;
     if (finalLandingOverride && (isVehicleCollision || isWallCollision)) {
+        // Apply vehicle damage now that the arc is complete. The player stopped short of
+        // the vehicle (never teleported into it), so the entity is still alive and valid.
+        if (vehicleHitRef && vehicleHitPos) {
+            const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
+            const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
+            mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
+            mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
+            if (state.hitVfx) {
+                mod.UnspawnObject(state.hitVfx);
+                state.hitVfx = undefined;
+            }
+            const hitVfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_Autocannon_30mm_AP_Hit_Metal_GS,
+                vehicleHitPos,
+                mod.CreateVector(0, 0, 0),
+                mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(hitVfx, true);
+            state.hitVfx = hitVfx;
+        }
+        
         // Concussion ringing plays only for the leaping player (2D - no world position needed)
         // SFX_Soldier_Damage_Explosion_Ring_SimpleLoop2D
         const ragdollOrigin = travelSteps[travelSteps.length - 1];
@@ -8043,27 +8080,6 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.Teleport(player, repelStep2, yaw);
         await mod.Wait(0.12);
         mod.StopSound(soldierImpactSfx, player);
-    }
-
-    // Apply vehicle damage now that the arc is complete. The player stopped short of
-    // the vehicle (never teleported into it), so the entity is still alive and valid.
-    if (vehicleHitRef && vehicleHitPos) {
-        const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
-        const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
-        mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
-        mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
-        if (state.hitVfx) {
-            mod.UnspawnObject(state.hitVfx);
-            state.hitVfx = undefined;
-        }
-        const hitVfx = mod.SpawnObject(
-            mod.RuntimeSpawn_Common.FX_Autocannon_30mm_AP_Hit_Metal_GS,
-            vehicleHitPos,
-            mod.CreateVector(0, 0, 0),
-            mod.CreateVector(1, 1, 1)
-        ) as mod.VFX;
-        mod.EnableVFX(hitVfx, true);
-        state.hitVfx = hitVfx;
     }
 
     // Wait until the player is on the ground before impact
@@ -8667,7 +8683,6 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
             return;
         }
         if (GameHandler.gameState === GameState.EndOfRound) {
-            console.log(`A player(${mod.GetObjId(eventPlayer)}) was undeployed during EndRoundCleanup`);
             // mod.UndeployPlayer(player); // this forces unwanted bots to spawn. DO NOT USE THIS.
             mod.Kill(eventPlayer);
             return;
@@ -8698,8 +8713,6 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         console.log('Player was killed by GameHandler. Ignoring...');
         return;
     }
-    // use this after setting up a camera in Godot    
-    // mod.SetCameraTypeForPlayer(eventPlayer, mod.Cameras.Fixed, 401);
 
     // _deployedPlayers are *supposed to* only get added outside of EndOfRound
     const playerObjId = mod.GetObjId(eventPlayer);
@@ -8871,12 +8884,6 @@ export async function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlay
         playerProfile.UpdatePlayerScoreboard();
     }
 }
-
-function GetInfectedHumanBaseSpeedMultiplier(playerProfile: PlayerProfile): number {
-    return playerProfile.isAlphaInfected ? 1.2 : 1;
-}
-
-// Speed boost zone mechanic removed
 
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
