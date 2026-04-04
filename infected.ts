@@ -34,8 +34,10 @@ const AI_MIN_DEF_RANGE = 3;
 
 // Vehicle-chase anti-stutter constants
 const AI_VEHICLE_MELEE_DISTANCE = 2;                // attack radius when target is in a vehicle
-const AI_VEHICLE_MOVE_REISSUE_SECONDS = 2.25;        // throttle AIMoveTo when target is in the tracked vehicle
+const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1.25;       // throttle for normal (on-foot) targets
+const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.3;         // reissue very frequently when within melee range
+const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.3; // lower values are easier
 const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 0.5;
 const MAX_PLAYER_COUNT = 12;
@@ -5819,6 +5821,7 @@ interface InfectedBotTickState {
     trackedVehicle?: mod.Vehicle;
     leapInProgress?: boolean;
     inAreaTrigger?: boolean;
+    lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
 }
 
 /** One slot per spawner in INFECTED_AI_SPAWNERS. Persists across deaths. */
@@ -6474,6 +6477,14 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const targetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
+    // Always sprint never slow down. Slowing for a melee swing causes the bot to
+    // fall behind a moving target, and it may then attempt to attack out of weapon range.
+    const desiredSpeed = mod.MoveSpeed.Sprint;
+    if (tick.lastMoveSpeed !== desiredSpeed) {
+        mod.AISetMoveSpeed(infectedBot, desiredSpeed);
+        tick.lastMoveSpeed = desiredSpeed;
+    }
+
     // --- Vehicle chase path ---
     if (targetInVehicle) {
         // Acquire or re-use the tracked vehicle reference
@@ -6487,34 +6498,43 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
             const vehiclePos = mod.GetVehicleState(veh, mod.VehicleStateVector.VehiclePosition);
             const dist = mod.DistanceBetween(infectedBotPos, vehiclePos);
 
+            // Reissue move every tick the vehicle's position changes every frame and
+            // a stale destination causes the bot to run to where the vehicle was.
+            const timeSinceLastMove = now - tick.lastMoveIssuedAt;
+            if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
+                mod.AIMoveToBehavior(infectedBot, vehiclePos);
+                tick.lastMoveIssuedAt = now;
+                tick.lastMovePos = vehiclePos;
+            }
+
             if (dist <= AI_VEHICLE_MELEE_DISTANCE) {
-                // Within melee range: enable attacks, slow to run
-                const desiredSpeed = mod.MoveSpeed.Sprint;
-                if (tick.lastMoveSpeed !== desiredSpeed) {
-                    mod.AISetMoveSpeed(infectedBot, desiredSpeed);
-                    tick.lastMoveSpeed = desiredSpeed;
-                }
-                if (tick.shootingEnabled !== true) {
-                    mod.AIEnableShooting(infectedBot, true);
-                    tick.shootingEnabled = true;
-                }
-                if (tick.targetingEnabled !== true) {
-                    mod.AIEnableTargeting(infectedBot, true);
-                    tick.targetingEnabled = true;
-                }
-                const timeSinceLastMove = now - tick.lastMoveIssuedAt;
-                if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
-                    mod.AIValidatedMoveToBehavior(infectedBot, vehiclePos);
-                    tick.lastMoveIssuedAt = now;
-                    tick.lastMovePos = vehiclePos;
+                // Use explicit ForceFire with a cooldown instead of always-on targeting.
+                // Auto-targeting in melee range triggers animations that lock the bot in place;
+                // if the vehicle then accelerates away the engine kills the bot mid-animation.
+                const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
+                if (timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
+                    if (tick.shootingEnabled !== true) {
+                        mod.AIEnableShooting(infectedBot, true);
+                        tick.shootingEnabled = true;
+                    }
+                    if (tick.targetingEnabled !== true) {
+                        mod.AIEnableTargeting(infectedBot, true);
+                        tick.targetingEnabled = true;
+                    }
+                    mod.AIForceFire(infectedBot, 0.3);
+                    tick.lastSwingAt = now;
+                } else {
+                    if (tick.shootingEnabled !== false) {
+                        mod.AIEnableShooting(infectedBot, false);
+                        tick.shootingEnabled = false;
+                    }
+                    if (tick.targetingEnabled !== false) {
+                        mod.AIEnableTargeting(infectedBot, false);
+                        tick.targetingEnabled = false;
+                    }
                 }
             } else {
-                // Outside melee range: sprint toward vehicle, disable all attacking
-                const desiredSpeed = mod.MoveSpeed.Sprint;
-                if (tick.lastMoveSpeed !== desiredSpeed) {
-                    mod.AISetMoveSpeed(infectedBot, desiredSpeed);
-                    tick.lastMoveSpeed = desiredSpeed;
-                }
+                // Outside melee range: keep all attacking disabled, focus on chasing.
                 if (tick.shootingEnabled !== false) {
                     mod.AIEnableShooting(infectedBot, false);
                     tick.shootingEnabled = false;
@@ -6522,12 +6542,6 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
                 if (tick.targetingEnabled !== false) {
                     mod.AIEnableTargeting(infectedBot, false);
                     tick.targetingEnabled = false;
-                }
-                const timeSinceLastMove = now - tick.lastMoveIssuedAt;
-                if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
-                    mod.AIMoveToBehavior(infectedBot, vehiclePos);
-                    tick.lastMoveIssuedAt = now;
-                    tick.lastMovePos = vehiclePos;
                 }
                 if (slot.isAlpha) {
                     TriggerAIChargeLeap(slot, infectedBot);
@@ -6547,46 +6561,55 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const dist = mod.DistanceBetween(infectedBotPos, targetPos);
 
     if (dist <= AI_INFECTED_MELEE_DISTANCE) {
-        const desiredSpeed = mod.MoveSpeed.Run;
-        if (tick.lastMoveSpeed !== desiredSpeed) {
-            mod.AISetMoveSpeed(infectedBot, desiredSpeed);
-            tick.lastMoveSpeed = desiredSpeed;
-        }
+        // Issue move very frequently when in melee range so the bot tracks
+        // target movement between ticks rather than chasing a stale position.
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
-        if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
+        if (timeSinceLastMove >= AI_MELEE_CLOSE_REISSUE_SECONDS || !tick.lastMovePos) {
             mod.AIValidatedMoveToBehavior(infectedBot, targetPos);
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
-        // Suppress shooting AND targeting when the bot is in the survivor's rear hemisphere
-        // to prevent the engine from triggering a Takedown animation that instantly kills the survivor.
-        // GetFacingDirection is the survivor's forward unit vector; dirToBot points from
-        // the survivor toward the bot. A negative dot product means the bot is behind them.
+        // Use explicit ForceFire with cooldown instead of always-on targeting.
+        // Always-on targeting in melee range can trigger a Takedown animation that locks
+        // the bot; if the target then moves the engine kills the bot mid-animation.
+        // The backstab check still guards the rear hemisphere.
         const targetFacing = mod.GetSoldierState(target, mod.SoldierStateVector.GetFacingDirection);
         const dirToBot = mod.Normalize(mod.Subtract(infectedBotPos, targetPos));
         const behindDot = mod.DotProduct(targetFacing, dirToBot);
         const allowAttacking = behindDot >= AI_MELEE_BACKSTAB_DOT_THRESHOLD;
-        if (tick.shootingEnabled !== allowAttacking) {
-            mod.AIEnableShooting(infectedBot, allowAttacking);
-            tick.shootingEnabled = allowAttacking;
-        }
-        if (tick.targetingEnabled !== allowAttacking) {
-            mod.AIEnableTargeting(infectedBot, allowAttacking);
-            tick.targetingEnabled = allowAttacking;
+        const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
+        if (allowAttacking && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
+            if (tick.shootingEnabled !== true) {
+                mod.AIEnableShooting(infectedBot, true);
+                tick.shootingEnabled = true;
+            }
+            if (tick.targetingEnabled !== true) {
+                mod.AIEnableTargeting(infectedBot, true);
+                tick.targetingEnabled = true;
+            }
+            mod.AIForceFire(infectedBot, 0.4);
+            tick.lastSwingAt = now;
+        } else {
+            if (tick.shootingEnabled !== false) {
+                mod.AIEnableShooting(infectedBot, false);
+                tick.shootingEnabled = false;
+            }
+            if (tick.targetingEnabled !== false) {
+                mod.AIEnableTargeting(infectedBot, false);
+                tick.targetingEnabled = false;
+            }
         }
     } else {
-        const desiredSpeed = mod.MoveSpeed.Sprint;
-        if (tick.lastMoveSpeed !== desiredSpeed) {
-            mod.AISetMoveSpeed(infectedBot, desiredSpeed);
-            tick.lastMoveSpeed = desiredSpeed;
+        // Outside melee range: sprint with attacking fully disabled.
+        // Keeping attacks off during the approach prevents mid-sprint melee animations
+        // that interrupt momentum and expose the bot to a stale-target kill.
+        if (tick.shootingEnabled !== false) {
+            mod.AIEnableShooting(infectedBot, false);
+            tick.shootingEnabled = false;
         }
-        if (tick.shootingEnabled !== true) {
-            mod.AIEnableShooting(infectedBot, true);
-            tick.shootingEnabled = true;
-        }
-        if (tick.targetingEnabled !== true) {
-            mod.AIEnableTargeting(infectedBot, true);
-            tick.targetingEnabled = true;
+        if (tick.targetingEnabled !== false) {
+            mod.AIEnableTargeting(infectedBot, false);
+            tick.targetingEnabled = false;
         }
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
         if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
