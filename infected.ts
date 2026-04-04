@@ -85,11 +85,7 @@ const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to a
 const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 10; // Useless, just a player-facing message. Game/AI need to run for nearly 2 minutes before things settle.
 
 const INFECTED_HINT_STRING_KEYS = [
-    "infected_hint_vehicle_leap",
-    "infected_hint_alpha_tankier",
-    "infected_hint_assault_ladder",
     "infected_hint_alpha_leap",
-    "infected_hint_leap_mechanic",
 ] as const;
 
 const LMS_BUFF_STRING_KEYS = [
@@ -97,6 +93,12 @@ const LMS_BUFF_STRING_KEYS = [
     "lms_buff_bonus_health",
     "lms_buff_damage_resist",
     "lms_buff_ammo_on_kill",
+] as const;
+
+const ALPHA_BUFF_STRING_KEYS = [
+    "alpha_buff_tankier",
+    "alpha_buff_leap_attack",
+    "alpha_buff_speed",
 ] as const;
 
 interface Vector3 {
@@ -333,6 +335,10 @@ function GetLastManStandingBuffMessages(): mod.Message[] {
     return LMS_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
 }
 
+function GetAlphaInfectedBuffMessages(): mod.Message[] {
+    return ALPHA_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
+}
+
 
 class Helpers {
 
@@ -563,6 +569,7 @@ enum AttachmentSlot {
     Underbarrel,
     Top,
     Ergonomic,
+    Rail,
 }
 
 // InventorySlot: where the item is equipped in the player's inventory
@@ -703,6 +710,10 @@ class Weapons {
             mod.WeaponAttachments.Barrel_114mm_Factory,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ]
+        // vz61: [
+        //     mod.WeaponAttachments.Ammo_FMJ,
+        //     mod.WeaponAttachments.Magazine_10rnd_Magazine,
+        // ]
     };
 
     static BuildWeaponPackageFromAttachments(attachments: mod.WeaponAttachments[]): mod.WeaponPackage {
@@ -733,7 +744,8 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Muzzle_Compensated_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_compensated_brake", rarity: 15, compatibleNameKeys: ["rpkm", "kord6p67", "ak205", "usg90"] },
         { attachment: mod.WeaponAttachments.Muzzle_Single_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_single_port_brake", rarity: 15, compatibleNameKeys: ["rpkm", "kord6p67", "ak205"] },
         { attachment: mod.WeaponAttachments.Muzzle_Double_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_double_port_brake", rarity: 20, compatibleNameKeys: ["rpkm", "kord6p67", "m277", "ak205", "185ksk"] },
-        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12"] },
+        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12", "m45a1", "m44", "m357", "es57", "p18"] },
+        { attachment: mod.WeaponAttachments.Muzzle_Standard_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_standard_suppressor", rarity: 15, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18"] },
         { attachment: mod.WeaponAttachments.Bottom_Ribbed_Stubby, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_ribbed_stubby", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Bottom_Folding_Vertical, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_folding_vertical", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Bottom_Slim_Handstop, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_slim_handstop", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
@@ -769,6 +781,28 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Magazine_40rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_40rnd_fast_mag", rarity: 20, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_45rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_45rnd_fast_mag", rarity: 30, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_75rnd_Drum, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_75rnd_drum", rarity: 30, compatibleNameKeys: ["rpkm"] },
+        // Rail attachments (Top / Right / Left) lasers, flashlights, and lights
+        { attachment: mod.WeaponAttachments.Top_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Top_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Right_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Left_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
     ];
 
     static getAmmoAttachmentKey(item?: EquippedItem): string | undefined {
@@ -810,6 +844,8 @@ class Weapons {
                 return "12g";
             case "m277":
                 return "68";
+            case "vz61":
+                return "32acp";
             default:
                 return undefined;
         }
@@ -835,7 +871,8 @@ class Weapons {
                                     : caliberGroup === "545" ? "545_fmj"
                                         : caliberGroup === "68" ? "68_fmj"
                                             : caliberGroup === "762" ? "762_fmj"
-                                                : undefined;
+                                                :caliberGroup === "32acp" ? "32acp_fmj"
+                                                    : undefined;
             case "attachment_ammo_hollow_point":
                 return caliberGroup === "fn" ? "fn_hp"
                     : caliberGroup === "9mm" ? "9mm_hp"
@@ -913,6 +950,7 @@ class Weapons {
     static baseWeapons: PooledItemDef[] = [
         { nameKey: "p18", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_P18, packageImage: Weapons.baseWeaponPackages["p18"] },
         { nameKey: "g22", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_GGH_22, packageImage: Weapons.baseWeaponPackages["g22"] },
+        // { nameKey: "vz61", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Side, packageImage: Weapons.baseWeaponPackages["vz61"] },
         { nameKey: "es57", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_ES_57, packageImage: Weapons.baseWeaponPackages["es57"] },
         { nameKey: "m45a1", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M45A1, packageImage: Weapons.baseWeaponPackages["m45a1"] },
         { nameKey: "m357", rarity: 60, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
@@ -931,6 +969,7 @@ class Weapons {
     static weaponAmmoProfiles: Record<string, WeaponAmmoProfile> = {
         // Sidearms
         g22: { baseMagSize: 15, reserveMags: 3, resupplyMags: 3 },
+        // vz61: { baseMagSize: 10, reserveMags: 3, resupplyMags: 3 },
         p18: { baseMagSize: 17, reserveMags: 3, resupplyMags: 3 },
         es57: { baseMagSize: 20, reserveMags: 3, resupplyMags: 3 },
         m45a1: { baseMagSize: 7, reserveMags: 3, resupplyMags: 3 },
@@ -1012,7 +1051,8 @@ class Weapons {
         { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
         { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
         { nameKey: "supply_pouch", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
-        { nameKey: "ap_mine", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
+        { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
+        { nameKey: "c4_remote", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         { nameKey: "incendiary_shotgun", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
         { nameKey: "thermobaric_launcher", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
@@ -1641,6 +1681,70 @@ class UI {
     static UpdateLastManStandingBuffWidget(playerID: number, lineIndex: number, message: mod.Message): void {
         const widget = mod.FindUIWidgetWithName(`lms_buff_line_text_${playerID}_${lineIndex}`) as mod.UIWidget;
         const container = mod.FindUIWidgetWithName(`lms_buff_line_${playerID}_${lineIndex}`) as mod.UIWidget;
+        if (widget) {
+            mod.SetUITextLabel(widget, message);
+            mod.SetUITextColor(widget, UI.battlefieldWhite);
+        }
+        if (container) {
+            mod.SetUIWidgetBgAlpha(container, 0);
+            mod.SetUIWidgetDepth(container, mod.UIDepth.AboveGameUI);
+            mod.SetUIWidgetVisible(container, true);
+        }
+    }
+
+    static CreateAlphaBuffWidget(
+        player: mod.Player,
+        playerID: number,
+        lineIndex: number,
+        message: mod.Message,
+    ): mod.UIWidget | undefined {
+        const containerWidth = 450;
+        const containerHeight = 24;
+        const iconSize = 45;
+        const textOffset = 30;
+        const xOffset = -(1024 / 2 - containerWidth / 2);
+        const yOffset = UI.ammoFeedbackY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
+
+        return ParseUI({
+            type: "Container",
+            name: `alpha_buff_line_${playerID}_${lineIndex}`,
+            position: [xOffset, yOffset, 0],
+            size: [containerWidth, containerHeight],
+            anchor: mod.UIAnchor.TopCenter,
+            bgAlpha: 0,
+            depth: mod.UIDepth.AboveGameUI,
+            playerId: player,
+            children: [
+                {
+                    type: "Image",
+                    name: `alpha_buff_line_icon_${playerID}_${lineIndex}`,
+                    position: [0, 0, 0],
+                    size: [iconSize, iconSize, 0],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    imageType: mod.UIImageType.SelfHeal,
+                    imageColor: UI.battlefieldRedBg,
+                    imageAlpha: 1,
+                    bgAlpha: 0,
+                },
+                {
+                    type: "Text",
+                    name: `alpha_buff_line_text_${playerID}_${lineIndex}`,
+                    position: [textOffset, 0, 0],
+                    size: [containerWidth - textOffset, containerHeight],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                    textSize: 16,
+                    bgAlpha: 0,
+                    textColor: UI.battlefieldWhite,
+                    textLabel: message,
+                },
+            ],
+        });
+    }
+
+    static UpdateAlphaBuffWidget(playerID: number, lineIndex: number, message: mod.Message): void {
+        const widget = mod.FindUIWidgetWithName(`alpha_buff_line_text_${playerID}_${lineIndex}`) as mod.UIWidget;
+        const container = mod.FindUIWidgetWithName(`alpha_buff_line_${playerID}_${lineIndex}`) as mod.UIWidget;
         if (widget) {
             mod.SetUITextLabel(widget, message);
             mod.SetUITextColor(widget, UI.battlefieldWhite);
@@ -3477,6 +3581,7 @@ class PlayerProfile {
     nextPlayerAreaHintRotationAt: number = 0;
     loadoutDisplayBottom?: LoadoutDisplayBottomView;
     lmsBuffWidgets: mod.UIWidget[] = [];
+    alphaBuffWidgets: mod.UIWidget[] = [];
     chosenAsAlphaInfectedWidget: mod.UIWidget[] = [];
     playerAmmoFeedbackWidget: mod.UIWidget[] = [];
     teamIndicationWidget: mod.UIWidget[] = [];
@@ -3748,6 +3853,39 @@ class PlayerProfile {
         this.lmsBuffWidgets = [];
     }
 
+    DeleteAlphaBuffWidgets() {
+        if (this.alphaBuffWidgets.length === 0) return;
+        this.alphaBuffWidgets.forEach(widget => {
+            try { mod.DeleteUIWidget(widget); } catch { }
+        });
+        this.alphaBuffWidgets = [];
+    }
+
+    UpdateAlphaBuffWidgets() {
+        if (this.isAI) return;
+
+        const shouldShowBuffs = this.isAlphaInfected
+            && SafeIsAlive(this.player)
+            && GameHandler.gameState === GameState.GameRoundIsRunning;
+
+        if (!shouldShowBuffs) {
+            this.DeleteAlphaBuffWidgets();
+            return;
+        }
+
+        const buffMessages = GetAlphaInfectedBuffMessages();
+        for (let index = 0; index < buffMessages.length; index++) {
+            const message = buffMessages[index];
+            if (!this.alphaBuffWidgets[index]) {
+                const widget = UI.CreateAlphaBuffWidget(this.player, this.playerID, index, message);
+                if (widget) {
+                    this.alphaBuffWidgets[index] = widget;
+                }
+            }
+            UI.UpdateAlphaBuffWidget(this.playerID, index, message);
+        }
+    }
+
     UpdatePlayerAreaNotificationWidget() {
         if (this.isAI) return;
         const isInfected = this.isInfectedTeam || (mod.GetObjId(mod.GetTeam(this.player)) === mod.GetObjId(INFECTED_TEAM));
@@ -3860,6 +3998,7 @@ class PlayerProfile {
             this.teamIndicationWidget,
             this.alphaInfectedWidgetInstances,
             this.lmsBuffWidgets,
+            this.alphaBuffWidgets,
         ];
 
         for (const group of widgetGroups) {
@@ -4124,6 +4263,9 @@ class PlayerProfile {
                     try { mod.DeleteUIWidget(widget); } catch (e) { }
                 });
                 this.alphaInfectedWidgetInstances = [];
+
+                // Delete alpha buff widgets
+                this.DeleteAlphaBuffWidgets();
 
                 // Delete spawn message
                 if (this.loadoutDisplayBottom) {
@@ -4533,10 +4675,12 @@ class GameHandler {
 
     static sand2_Sfx = [
         { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
-        { id: 2503, attenuation: 2, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
+        { id: 2503, attenuation: 7, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
         { id: 2504, attenuation: 3, object: mod.RuntimeSpawn_Common.SFX_Levels_Brooklyn_Shared_Spots_GarbageFlies_SimpleLoop3D },
         { id: 2505, attenuation: 10, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingWarm_SimpleLoop3D },
         { id: 2506, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+        { id: 2507, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+        { id: 2508, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -9264,6 +9408,7 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
         }
         playerProfile.UpdatePlayerAreaNotificationWidget();
         playerProfile.UpdateLastManStandingBuffWidgets();
+        playerProfile.UpdateAlphaBuffWidgets();
         if (DEBUG_SHOW_ALL_UI_ELEMENTS) {
             playerProfile.DebugForceShowAllUIWidgets();
         }
