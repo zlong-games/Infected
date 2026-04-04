@@ -3,6 +3,8 @@
   "infected_hint_vehicle_leap": "Leap attacks are most effective against vehicles",
   "infected_hint_alpha_tankier": "Alpha Infected have more health and take less damage",
   "infected_hint_assault_ladder": "Use your Assault Ladder to flank a well-defended survivor",
+  "infected_hint_alpha_leap": "Only the Alpha Infected can perform leap attacks",
+  "infected_hint_leap_mechanic": "Crouch to charge your leap, then attack to launch",
   "lms_buff_fast_reload": "Weapon reloads are faster",
   "lms_buff_bonus_health": "Max health increased to 240",
   "lms_buff_damage_resist": "Incoming damage reduced",
