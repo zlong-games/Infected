@@ -24,6 +24,9 @@ const INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS = 3;
 const PLAYER_REDEPLOY_TIME = 1;
 const SURVIVOR_AI_SPAWNERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33];
+// Spawner IDs reserved for the parachute drop pool — enabled after a round where 2+ survivors remain.
+// TODO: replace with actual map spawner IDs configured in the level editor.
+const PARACHUTE_INFECTED_SPAWNERS: number[] = [34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 1;
 // DotProduct(survivorFacing, normalizedDirSurvivorToBot) < this value means the bot is in the
@@ -35,7 +38,7 @@ const AI_MIN_DEF_RANGE = 3;
 // Vehicle-chase anti-stutter constants
 const AI_VEHICLE_MELEE_DISTANCE = 2;                // attack radius when target is in a vehicle
 const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
-const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1.25;       // throttle for normal (on-foot) targets
+const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.3;        // throttle for normal (on-foot) targets
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.3;         // reissue very frequently when within melee range
 const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.3; // lower values are easier
@@ -510,7 +513,7 @@ function GetSurvivorCandidates(): PlayerProfile[] {
 }
 
 // for bot name assignment
-const ALL_SPAWNS = SURVIVOR_AI_SPAWNERS.concat(INFECTED_AI_SPAWNERS);
+const ALL_SPAWNS = SURVIVOR_AI_SPAWNERS.concat(INFECTED_AI_SPAWNERS).concat(PARACHUTE_INFECTED_SPAWNERS);
 const BOT_NAME_MAP: Map<number, string> = new Map();
 Helpers.GenerateBotNameMap();
 
@@ -531,7 +534,7 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
 const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
 const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
-const AI_BOT_TICK_SECONDS = 0.5; // interval between AI logic ticks per infected bot slot
+const AI_BOT_TICK_SECONDS = 0.15; // interval between AI logic ticks per infected bot slot
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
 const PLAYER_SLEDGE_REMINDER_MIN_SECONDS = 5;
 const PLAYER_SLEDGE_REMINDER_MAX_SECONDS = 10;
@@ -783,28 +786,31 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Magazine_40rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_40rnd_fast_mag", rarity: 20, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_45rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_45rnd_fast_mag", rarity: 30, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_75rnd_Drum, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_75rnd_drum", rarity: 30, compatibleNameKeys: ["rpkm"] },
+        // Lights and lasers (sidearms)
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_red", rarity: 5, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_green", rarity: 10, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_50mw_green", rarity: 20, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 20, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
         // Rail attachments (Top / Right / Left) lasers, flashlights, and lights
-        { attachment: mod.WeaponAttachments.Top_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Top_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Right_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Left_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 20, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm"] },
+        { attachment: mod.WeaponAttachments.Right_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk",  "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk",  "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
     ];
 
     static getAmmoAttachmentKey(item?: EquippedItem): string | undefined {
@@ -4746,6 +4752,10 @@ class GameHandler {
     static nextRoundFinalFive: boolean = false;
     static vehicleSpawnedThisRound: boolean = false;
     static shouldShowLoadoutSelection: boolean = true;
+    /** Accumulates 25 % per round that 2+ survivors remain; resets when LMS or 0-survivors triggers. */
+    static infectedSpawnMultiplier: number = 1.0;
+    /** True once the parachute spawner pool has been unlocked (first time 2+ survivors survive). */
+    static parachuteSpawnersEnabled: boolean = false;
 
     // Recent infected increment events (for detecting accidental double-increments)
     // Each entry: { t: timestamp_ms, source: string, playerID?: number }
@@ -5175,6 +5185,8 @@ class GameHandler {
             GameHandler.preserveAlpha = false;
             GameHandler.nextRoundFinalFive = false;
             GameHandler.nextRoundForcedAlphaPlayerID = undefined;
+            GameHandler.infectedSpawnMultiplier = 1.0;
+            GameHandler.parachuteSpawnersEnabled = false;
             console.log('End of Round Condition: 0 survivors - resetting survivors and infected next round.');
             return;
         }
@@ -5206,13 +5218,20 @@ class GameHandler {
             if (GameHandler.infectedCount >= 2 && GameHandler.survivorsCount >= 2) {
                 GameHandler.endOfRoundCondition = '2+ infected';
                 GameHandler.survivorsNextRound = this.GetNumberOfBotsToSpawn(SURVIVOR_TEAM, GameHandler.survivorsCount);
-                // use the actual alive infected count (humans + AI) to calculate bots needed for next round
-                GameHandler.infectedNextRound = this.GetNumberOfBotsToSpawn(INFECTED_TEAM, GameHandler.infectedCount);
+                // Stack the infected spawn multiplier (+25%) each round that 2+ survivors survive.
+                // Resets only when LMS or 0-survivors condition triggers.
+                GameHandler.infectedSpawnMultiplier *= 1.25;
+                // Scale the infected count by the accumulated multiplier and derive bot slots needed.
+                const baseInfectedCount = Math.max(MAX_PLAYER_COUNT - GameHandler.survivorsCount, GameHandler.infectedCount);
+                const scaledInfectedCount = Math.round(baseInfectedCount * GameHandler.infectedSpawnMultiplier);
+                GameHandler.infectedNextRound = this.GetNumberOfBotsToSpawn(INFECTED_TEAM, scaledInfectedCount);
+                // Enable the parachute spawner pool going into the next round.
+                GameHandler.parachuteSpawnersEnabled = true;
                 GameHandler.skipAlphaSelection = true;
                 GameHandler.preserveAlpha = true;
                 GameHandler.nextRoundFinalFive = GameHandler.survivorsCount > 0 && GameHandler.survivorsCount <= 5;
                 GameHandler.survivorsRoundsWon++;
-                console.log('End of Round Condition: 2+ infected - skipping alpha selection next round.');
+                console.log(`End of Round Condition: 2+ infected - multiplier now x${GameHandler.infectedSpawnMultiplier.toFixed(2)}, spawning ${GameHandler.infectedNextRound} infected next round (parachute pool enabled).`);
 
             }
             else if (GameHandler.infectedCount >= 2 && GameHandler.survivorsCount === 1) {
@@ -5226,6 +5245,8 @@ class GameHandler {
                 GameHandler.preserveAlpha = false;
                 GameHandler.nextRoundFinalFive = false;
                 GameHandler.survivorsRoundsWon++;
+                GameHandler.infectedSpawnMultiplier = 1.0;
+                GameHandler.parachuteSpawnersEnabled = false;
                 console.log('End of Round Condition: 2+ infected + 1 survivor (LMS) - full reset; LMS preserved as forced alpha.');
             }
             else if (GameHandler.infectedCount === 1) {
@@ -5237,6 +5258,8 @@ class GameHandler {
                 GameHandler.nextRoundFinalFive = false;
                 GameHandler.nextRoundForcedAlphaPlayerID = undefined;
                 GameHandler.survivorsRoundsWon++;
+                GameHandler.infectedSpawnMultiplier = 1.0;
+                GameHandler.parachuteSpawnersEnabled = false;
                 console.log('End of Round Condition: 1 infected - resetting survivors and infected next round.');
             }
             return
@@ -5824,12 +5847,14 @@ interface InfectedBotTickState {
     lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
 }
 
-/** One slot per spawner in INFECTED_AI_SPAWNERS. Persists across deaths. */
+/** One slot per spawner in INFECTED_AI_SPAWNERS (plus PARACHUTE_INFECTED_SPAWNERS when enabled). Persists across deaths. */
 class InfectedBotSlot {
     slotIndex: number;
     assignedSpawnerID: number;
     name: string;
     isAlpha: boolean = false;
+    /** True when this slot was drawn from PARACHUTE_INFECTED_SPAWNERS; spawns with AIParachuteBehavior on round start. */
+    isParachuteSpawner: boolean = false;
     state: BotSlotState = BotSlotState.Idle;
     player?: mod.Player;
     playerObjID?: number;
@@ -5845,10 +5870,11 @@ class InfectedBotSlot {
     /** Tracks dead bots by their last ObjID until the spawner unspawns the body (OnPlayerLeaveGame). */
     static deadByObjID: Map<number, InfectedBotSlot> = new Map();
 
-    constructor(index: number, name: string, assignedSpawnerID: number) {
+    constructor(index: number, name: string, assignedSpawnerID: number, isParachuteSpawner: boolean = false) {
         this.slotIndex = index;
         this.name = name;
         this.assignedSpawnerID = assignedSpawnerID;
+        this.isParachuteSpawner = isParachuteSpawner;
     }
 
     static InitSlots(): void {
@@ -5859,7 +5885,16 @@ class InfectedBotSlot {
         for (let i = 0; i < INFECTED_AI_SPAWNERS.length; i++) {
             const id = INFECTED_AI_SPAWNERS[i];
             const name = BOT_NAME_MAP.get(id) ?? `infected_bot_${id}`;
-            InfectedBotSlot.slots.push(new InfectedBotSlot(i, name, id));
+            InfectedBotSlot.slots.push(new InfectedBotSlot(i, name, id, false));
+        }
+        if (GameHandler.parachuteSpawnersEnabled) {
+            const baseLen = INFECTED_AI_SPAWNERS.length;
+            for (let i = 0; i < PARACHUTE_INFECTED_SPAWNERS.length; i++) {
+                const id = PARACHUTE_INFECTED_SPAWNERS[i];
+                const name = BOT_NAME_MAP.get(id) ?? `infected_bot_${id}`;
+                InfectedBotSlot.slots.push(new InfectedBotSlot(baseLen + i, name, id, true));
+            }
+            console.log(`InfectedBotSlot.InitSlots | Parachute pool enabled: added ${PARACHUTE_INFECTED_SPAWNERS.length} parachute slot(s). Total slots: ${InfectedBotSlot.slots.length}`);
         }
     }
 
@@ -5968,14 +6003,16 @@ class InfectedBotSlot {
             // stripping all the extra AI flags here and just using per-tick logic. 
             // might be causing problems sending too many commands at once
             if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
-            // mod.AIEnableShooting(player, true);
-            mod.SetPlayerMaxHealth(player, this.isAlpha ? 300 : 110);
-            mod.AISetMoveSpeed(player, this.isAlpha ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run);
-            // mod.AISetStance(player, mod.Stance.Stand);
-            // mod.AIEnableTargeting(player, false);
+            mod.SetPlayerMaxHealth(player, this.isAlpha ? 300 : 50);
+            if (this.isParachuteSpawner) {
+                // Parachute drop: let the bot glide in before switching to normal pursuit behavior.
+                mod.AIParachuteBehavior(player);
+                await mod.Wait(5);
+                if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
+            }
+            // mod.AISetMoveSpeed(player, this.isAlpha ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run);
             await AISpawnHandler.AssignAIEquipment(player, TeamNameString.Infected);
             if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
-            // mod.AIEnableTargeting(player, true);
             ShowAlphaInfectedIndicator(player);
             ShowAlphaInfectedDebugIndicator(player);
             if (this.isAlpha) {
@@ -6004,9 +6041,6 @@ class InfectedBotSlot {
 
         this.state = BotSlotState.DeadAwaitingRespawn;
         if (prevObjID !== undefined) {
-            // Wait for OnPlayerLeaveGame (spawner body cleanup) before respawning.
-            // This prevents racing with the engine's unspawn cycle which would cause double-spawns
-            // from the same spawner with different bots.
             InfectedBotSlot.deadByObjID.set(prevObjID, this);
             // Watchdog fallback: if OnPlayerLeaveGame never fires (engine edge case),
             // CheckStuckInfectedSlots will call Respawn() once this timeout expires.
@@ -6230,7 +6264,8 @@ class AISpawnHandler {
 
     static InitializeStartingInfectedSpawns(amountToSpawn: number): void {
         if (AISpawnHandler.startingInfectedChosen) return;
-        if (InfectedBotSlot.slots.length === 0) InfectedBotSlot.InitSlots();
+        // Always re-init slots each round so parachute pool changes (enabled/disabled) take effect.
+        InfectedBotSlot.InitSlots();
         let spawned = 0;
         for (const slot of InfectedBotSlot.slots) {
             if (spawned >= amountToSpawn) break;
@@ -6299,7 +6334,8 @@ class AISpawnHandler {
         const humanInfected = GameHandler.GetHumanPlayersOnTeam(INFECTED_TEAM).length;
         const expectedBotPool = Math.max(
             0,
-            Math.min(INFECTED_AI_SPAWNERS.length, (GameHandler.infectedCount ?? 0) - humanInfected)
+            // Use InfectedBotSlot.slots.length so the parachute pool is included in the cap when active.
+            Math.min(InfectedBotSlot.slots.length, (GameHandler.infectedCount ?? 0) - humanInfected)
         );
         const activeOrPendingBotSlots = InfectedBotSlot.slots.filter(s => s.state !== BotSlotState.Idle).length;
 
@@ -6479,11 +6515,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
 
     // Always sprint never slow down. Slowing for a melee swing causes the bot to
     // fall behind a moving target, and it may then attempt to attack out of weapon range.
-    const desiredSpeed = mod.MoveSpeed.Sprint;
-    if (tick.lastMoveSpeed !== desiredSpeed) {
-        mod.AISetMoveSpeed(infectedBot, desiredSpeed);
-        tick.lastMoveSpeed = desiredSpeed;
-    }
+    mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
 
     // --- Vehicle chase path ---
     if (targetInVehicle) {
@@ -8566,7 +8598,7 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
         // AIEnableTargeting(false) before InitLeapSystem runs, which silently blocks
         // any AISetTarget call made while that flag is still down.
         mod.AIEnableTargeting(player, true);
-        mod.AISetMoveSpeed(player, mod.MoveSpeed.Walk);
+        // mod.AISetMoveSpeed(player, mod.MoveSpeed.Walk);
 
         // Chase and charge-leap the vehicle driver until the seat is vacated or the AI dies.
         while (targetVehicle) {
