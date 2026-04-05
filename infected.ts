@@ -1,41 +1,45 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.03.00";
+const VERSION = "1.04.00";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
 
 const DEBUG = false; // turn these off on publish
-const FAST_ROUNDS = false;
 const FAST_START = false;
 const SKIP_SESSION_START = false;
-const ENABLE_AI_LADDER_LOGIC = false;
 const DEBUG_ALPHA_HUMAN_ONLY = false;
 const DEBUG_ALPHA_STATE = false;
 const DEBUG_ALPHA_DEBUG_MOVE_INDICATOR = true;
-const DEBUG_INFECTED_CHASE_ICONS = false; // world icon per infected bot, color-coded by chase state
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
-const LEAP_TEST_MODE = false; // bypass all game logic; spawn a minimal sandbox for testing leap attacks
+const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
 
 const LOADOUT_SELECTION_TIME = 40;
-const DEBUG_TIME = DEBUG && FAST_ROUNDS ? 7 : 60;
 const GAME_COUNTDOWN_TIME = FAST_START ? 5 : LOADOUT_SELECTION_TIME;
 const WAIT_FOR_SPAWN_TIMEOUT = 3;
 
 const INFECTED_RESPAWN_TIME = 2;
-const INFECTED_RESPAWN_TIME_LAST_MAN = 5;
+const INFECTED_RESPAWN_TIME_LAST_MAN = 4;
+const INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS = 3;
 const PLAYER_REDEPLOY_TIME = 1;
 const SURVIVOR_AI_SPAWNERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+// TODO: replace with actual map spawner IDs configured in the level editor.
+const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 1;
+// DotProduct(survivorFacing, normalizedDirSurvivorToBot) < this value means the bot is in the
+// survivor's rear hemisphere. Shooting is suppressed there to prevent engine-forced takedown kills.
+const AI_MELEE_BACKSTAB_DOT_THRESHOLD = 0.0;
 const AI_LEASH_RANGE = 5;
 const AI_MIN_DEF_RANGE = 3;
 
 // Vehicle-chase anti-stutter constants
-const AI_VEHICLE_MELEE_DISTANCE = 4;                // attack radius when target is in a vehicle
-const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.8;        // throttle AIMoveTo when target is in the tracked vehicle
-const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.15;       // throttle for normal (on-foot) targets
+const AI_VEHICLE_MELEE_DISTANCE = 2;                // attack radius when target is in a vehicle
+const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
+const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.3;        // throttle for normal (on-foot) targets
+const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.3;         // reissue very frequently when within melee range
+const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.3; // lower values are easier
 const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 0.5;
 const MAX_PLAYER_COUNT = 12;
@@ -71,7 +75,6 @@ const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
-// const ALPHA_DEBUG_INDICATOR_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow; // blinking red light useful for debugging
 const SURVIVOR_TEAM = mod.GetTeam(1);
 const INFECTED_TEAM = mod.GetTeam(2);
 const POINTS_PER_INFECTED_KILL = 100;
@@ -80,9 +83,41 @@ const POINTS_ROUND_SURVIVED = 850;
 const HEALTH_RESTORE_ON_INFECTED = 50;
 const LMS_RELOAD_POLL_SECONDS = 0.1;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
+const INFECTED_HINT_ROTATION_SECONDS = 8;
 const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
 const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
-const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 20; // Safety timeout to prevent infinite loops
+const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 10; // Useless, just a player-facing message. Game/AI need to run for nearly 2 minutes before things settle.
+
+const INFECTED_HINT_STRING_KEYS = [
+    "infected_hint_alpha_leap",
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
+const INFECTED_ALPHA_HINT_STRING_KEYS = [
+    "infected_hint_vehicle_leap",
+    "infected_hint_leap_mechanic",
+    "infected_hint_alpha_leap",
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
+const LMS_HINT_STRING_KEYS = [
+    "lms_hint_you_are_last"
+] as const;
+
+const LMS_BUFF_STRING_KEYS = [
+    "lms_buff_fast_reload",
+    "lms_buff_bonus_health",
+    "lms_buff_damage_resist",
+    "lms_buff_ammo_on_kill",
+] as const;
+
+const ALPHA_BUFF_STRING_KEYS = [
+    "alpha_buff_tankier",
+    "alpha_buff_leap_attack",
+    "alpha_buff_speed",
+] as const;
 
 interface Vector3 {
     x: number;
@@ -161,8 +196,8 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND, {
 RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
     worldIcons: [ResupplyWorldIconId.PRIMARY, ResupplyWorldIconId.SECONDARY],
     positionsByInteractPoint: new Map<ResupplyInteractPointId, Vector3>([
-        [ResupplyInteractPointId.POINT_301, { x: 34.907, y: 59.282, z: -36.942 }],
-        [ResupplyInteractPointId.POINT_302, { x: -6.244, y: 60.423, z: -27.941 }],
+        [ResupplyInteractPointId.POINT_301, { x: 37.679, y: 63.894, z: -9.451 }],
+        [ResupplyInteractPointId.POINT_302, { x: -6.948, y: 60.076, z: -28.143 }],
     ]),
 });
 
@@ -170,10 +205,6 @@ const POSITION_HQ1 = mod.GetObjectPosition(mod.GetHQ(1));
 const POSITION_HQ2 = mod.GetObjectPosition(mod.GetHQ(2));
 const ZERO_VEC: mod.Vector = mod.CreateVector(0, 0, 0);
 
-const DEBUG_INTERACT_POINT_1_OBJ_ID = 305;
-const SAND2_WARP_INTERACT_POINT_TOP = 402;
-const SAND2_WARP_INTERACT_POINT_BOTTOM = 403;
-// const SAND2_DEBUG_VEHICLE_BOT_SPAWN = 201;
 let RESUPPLY_WORLD_ICONS: ResupplyWorldIconId[] = [];
 let RESUPPLY_INTERACT_POINTS: ResupplyInteractPointId[] = [];
 const RESUPPLY_WORLD_LOCATION: Map<ResupplyInteractPointId, mod.Vector> = new Map<ResupplyInteractPointId, mod.Vector>();
@@ -184,8 +215,18 @@ let GAME_ROUND_LIMIT = 9;
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
 
-// WEAPON RARITY THRESHOLDS -- lower threshold means more common, higher value means more rare
+// Vehicle spawner IDs to randomly pick from when final five triggers
+const VEHICLE_SPAWNER_IDS: number[] = [202, 203];
 
+// Pool of vehicle types randomly selected each time the final five vehicle spawns
+const VEHICLE_TYPES: mod.VehicleList[] = [
+    mod.VehicleList.Vector,
+    mod.VehicleList.Quadbike,
+    mod.VehicleList.GolfCart,
+    mod.VehicleList.Flyer60,
+];
+
+// WEAPON RARITY THRESHOLDS -- lower threshold means more common, higher value means more rare
 const RARITY_MEDIUM_THRESHOLD = 30;
 const RARITY_HIGH_THRESHOLD = 60;
 const RARITY_RARE_THRESHOLD = 80;
@@ -299,39 +340,37 @@ function MakeMessage(message: string, ...args: any[]) {
     }
 }
 
+function ResolveStringKeyMessage(key: string): mod.Message {
+    return MakeMessage((mod.stringkeys as Record<string, string>)[key] ?? key);
+}
+
+function GetInfectedHintMessage(index: number): mod.Message {
+    const normalizedIndex = ((index % INFECTED_HINT_STRING_KEYS.length) + INFECTED_HINT_STRING_KEYS.length) % INFECTED_HINT_STRING_KEYS.length;
+    return ResolveStringKeyMessage(INFECTED_HINT_STRING_KEYS[normalizedIndex]);
+}
+
+function GetAlphaInfectedHintMessage(index: number): mod.Message {
+    const normalizedIndex = ((index % INFECTED_ALPHA_HINT_STRING_KEYS.length) + INFECTED_ALPHA_HINT_STRING_KEYS.length) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
+    return ResolveStringKeyMessage(INFECTED_ALPHA_HINT_STRING_KEYS[normalizedIndex]);
+}
+
+function GetLastManStandingBuffMessages(): mod.Message[] {
+    return LMS_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
+}
+
+function GetAlphaInfectedBuffMessages(): mod.Message[] {
+    return ALPHA_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
+}
+
 
 class Helpers {
 
     /**
-     * Validates that a player has a valid ObjID (> -1)
      * Game engine returns -1 for players that have left or are invalid
      */
     static HasValidObjId(player: mod.Player | undefined): boolean {
         if (!player) return false;
         return mod.IsPlayerValid(player) && mod.GetObjId(player) > -1;
-    }
-
-    static async GetObjIdWithRetry(
-        player: mod.Player,
-        maxAttempts: number = 10,
-        delayMs: number = 0.2
-    ): Promise<number> {
-        let objId = mod.GetObjId(player);
-        let attempt = 0;
-
-        while (objId === -1 && attempt < maxAttempts) {
-            await mod.Wait(delayMs);
-            objId = mod.GetObjId(player);
-            attempt++;
-        }
-
-        if (objId === -1) {
-            console.log(`GetObjIdWithRetry | Failed to get valid ObjID after ${maxAttempts} attempts`);
-        } else if (attempt > 0) {
-            console.log(`GetObjIdWithRetry | Got valid ObjID(${objId}) after ${attempt} retry attempt(s)`);
-        }
-
-        return objId;
     }
 
     static GetRandomSpawnFromRange(min: number, max: number): number {
@@ -419,6 +458,13 @@ class Helpers {
         }
         return array
     }
+    static GetVector3Distance(a: Vector3, b: Vector3): number {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const dz = a.z - b.z;
+
+        return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    }
 
     static VectorToVector3(position: mod.Vector): Vector3 {
         return {
@@ -485,26 +531,16 @@ function GetSurvivorCandidates(): PlayerProfile[] {
 }
 
 // for bot name assignment
-const ALL_SPAWNS = SURVIVOR_AI_SPAWNERS.concat(INFECTED_AI_SPAWNERS);
+const ALL_SPAWNS = SURVIVOR_AI_SPAWNERS.concat(INFECTED_AI_SPAWNERS).concat(PARACHUTE_INFECTED_SPAWNERS);
 const BOT_NAME_MAP: Map<number, string> = new Map();
 Helpers.GenerateBotNameMap();
 
-const INFECTED_LOGIC_TOKENS: Map<number, { cancel: boolean }> = new Map();
 const ALPHA_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
 const ALPHA_DEBUG_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
 const INFECTED_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 const LMS_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 
-// Debug chase-state world icons -- one per infected bot, keyed by player objId
-const DEBUG_CHASE_ICON_MAP: Map<number, mod.WorldIcon> = new Map();
-let DEBUG_CHASE_ICON_NEXT_ID = 901; // world icon IDs 901+ reserved for debug
-
-// Color vectors for debug chase icons (R, G, B  0-1)
-const DEBUG_COLOR_VEHICLE_MELEE = mod.CreateVector(1.0, 0.0, 1.0);   // magenta -- attacking vehicle
-const DEBUG_COLOR_VEHICLE_CHASE = mod.CreateVector(1.0, 0.5, 0.0);   // orange  -- chasing vehicle
-const DEBUG_COLOR_ONFOOT_MELEE = mod.CreateVector(0.0, 1.0, 0.0);   // green   -- attacking on-foot
-const DEBUG_COLOR_ONFOOT_CHASE = mod.CreateVector(1.0, 1.0, 0.0);   // yellow  -- chasing on-foot
-const DEBUG_COLOR_NO_TARGET = mod.CreateVector(1.0, 0.0, 0.0);   // red     -- no target
+// Human-player-only tick state. AI players never enter the human tick path.
 const PLAYER_ONGOING_TICK_STATE: Map<number, {
     nextIconUpdateAt: number,
     nextBannedCheckAt: number,
@@ -512,19 +548,11 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
     bannedChecksEnabledAt?: number,
     lastLadderAmmo?: number,
     nextSledgeReminderAt?: number,
-    // Infected bot tick-driven chase state
-    infectedBotInitialized?: boolean,
-    infectedBotTarget?: mod.Player,
-    nextInfectedBotTickAt?: number,
-    infectedBotLadderActive?: boolean,
-    // Vehicle-chase anti-stutter state
-    infectedBotLastMoveIssuedAt?: number,
-    infectedBotLastMovePos?: mod.Vector,
 }> = new Map();
 const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
 const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
-const PLAYER_ONGOING_INFECTED_BOT_TICK_SECONDS = 0.5;
+const AI_BOT_TICK_SECONDS = 0.15; // interval between AI logic ticks per infected bot slot
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
 const PLAYER_SLEDGE_REMINDER_MIN_SECONDS = 5;
 const PLAYER_SLEDGE_REMINDER_MAX_SECONDS = 10;
@@ -564,6 +592,7 @@ enum AttachmentSlot {
     Underbarrel,
     Top,
     Ergonomic,
+    Rail,
 }
 
 // InventorySlot: where the item is equipped in the player's inventory
@@ -704,6 +733,10 @@ class Weapons {
             mod.WeaponAttachments.Barrel_114mm_Factory,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ]
+        // vz61: [
+        //     mod.WeaponAttachments.Ammo_FMJ,
+        //     mod.WeaponAttachments.Magazine_10rnd_Magazine,
+        // ]
     };
 
     static BuildWeaponPackageFromAttachments(attachments: mod.WeaponAttachments[]): mod.WeaponPackage {
@@ -734,7 +767,8 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Muzzle_Compensated_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_compensated_brake", rarity: 15, compatibleNameKeys: ["rpkm", "kord6p67", "ak205", "usg90"] },
         { attachment: mod.WeaponAttachments.Muzzle_Single_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_single_port_brake", rarity: 15, compatibleNameKeys: ["rpkm", "kord6p67", "ak205"] },
         { attachment: mod.WeaponAttachments.Muzzle_Double_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_double_port_brake", rarity: 20, compatibleNameKeys: ["rpkm", "kord6p67", "m277", "ak205", "185ksk"] },
-        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12"] },
+        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12", "m45a1", "m44", "m357", "es57", "p18"] },
+        { attachment: mod.WeaponAttachments.Muzzle_Standard_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_standard_suppressor", rarity: 15, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18"] },
         { attachment: mod.WeaponAttachments.Bottom_Ribbed_Stubby, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_ribbed_stubby", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Bottom_Folding_Vertical, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_folding_vertical", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Bottom_Slim_Handstop, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_slim_handstop", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm"] },
@@ -770,6 +804,31 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Magazine_40rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_40rnd_fast_mag", rarity: 20, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_45rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_45rnd_fast_mag", rarity: 30, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_75rnd_Drum, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_75rnd_drum", rarity: 30, compatibleNameKeys: ["rpkm"] },
+        // Lights and lasers (sidearms)
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_red", rarity: 5, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_green", rarity: 10, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_50mw_green", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        // Rail attachments (Top / Right / Left) lasers, flashlights, and lights
+        { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 20, compatibleNameKeys: ["db12", "m277"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm"] },
+        { attachment: mod.WeaponAttachments.Right_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12", "kord6p67", "m277", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk",  "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_flashlight", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk",  "ak205", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Left_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_vis_ir_light", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "ak205", "rpkm", "usg90"] },
     ];
 
     static getAmmoAttachmentKey(item?: EquippedItem): string | undefined {
@@ -811,6 +870,8 @@ class Weapons {
                 return "12g";
             case "m277":
                 return "68";
+            case "vz61":
+                return "32acp";
             default:
                 return undefined;
         }
@@ -836,7 +897,8 @@ class Weapons {
                                     : caliberGroup === "545" ? "545_fmj"
                                         : caliberGroup === "68" ? "68_fmj"
                                             : caliberGroup === "762" ? "762_fmj"
-                                                : undefined;
+                                                :caliberGroup === "32acp" ? "32acp_fmj"
+                                                    : undefined;
             case "attachment_ammo_hollow_point":
                 return caliberGroup === "fn" ? "fn_hp"
                     : caliberGroup === "9mm" ? "9mm_hp"
@@ -914,6 +976,7 @@ class Weapons {
     static baseWeapons: PooledItemDef[] = [
         { nameKey: "p18", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_P18, packageImage: Weapons.baseWeaponPackages["p18"] },
         { nameKey: "g22", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_GGH_22, packageImage: Weapons.baseWeaponPackages["g22"] },
+        // { nameKey: "vz61", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Side, packageImage: Weapons.baseWeaponPackages["vz61"] },
         { nameKey: "es57", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_ES_57, packageImage: Weapons.baseWeaponPackages["es57"] },
         { nameKey: "m45a1", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M45A1, packageImage: Weapons.baseWeaponPackages["m45a1"] },
         { nameKey: "m357", rarity: 60, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
@@ -932,6 +995,7 @@ class Weapons {
     static weaponAmmoProfiles: Record<string, WeaponAmmoProfile> = {
         // Sidearms
         g22: { baseMagSize: 15, reserveMags: 3, resupplyMags: 3 },
+        // vz61: { baseMagSize: 10, reserveMags: 3, resupplyMags: 3 },
         p18: { baseMagSize: 17, reserveMags: 3, resupplyMags: 3 },
         es57: { baseMagSize: 20, reserveMags: 3, resupplyMags: 3 },
         m45a1: { baseMagSize: 7, reserveMags: 3, resupplyMags: 3 },
@@ -1013,7 +1077,8 @@ class Weapons {
         { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
         { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
         { nameKey: "supply_pouch", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
-        { nameKey: "ap_mine", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
+        { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
+        { nameKey: "c4_remote", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         { nameKey: "incendiary_shotgun", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
         { nameKey: "thermobaric_launcher", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
@@ -1272,7 +1337,7 @@ class Weapons {
     * - Else if isFinalFive: Primary weapon from saved loadout
      * 
      * For infected:
-     * - Fixed gear: Sledgehammer, Assault Ladder, Throwable (Stun/Knife for alpha)
+     * - Fixed gear: Sledgehammer, Assault Ladder, Throwable (Flash or Stun for alpha)
      */
     static GetRoundLoadout(playerProfile: PlayerProfile): Array<EquippedItem> {
         const items: Array<EquippedItem> = [];
@@ -1281,7 +1346,7 @@ class Weapons {
 
         // Infected loadout: fixed gear, not using saved loadout
         if (infected) {
-            let gadget = mod.Gadgets.Throwable_Throwing_Knife;
+            let gadget = mod.Gadgets.Throwable_Flash_Grenade;
             let gadgetText = mod.stringkeys.infected_throwable_knives;
 
             items.push({
@@ -1337,14 +1402,12 @@ class Weapons {
         const isRoundRunning = GameHandler.gameState === GameState.GameRoundIsRunning;
         if (isRoundRunning) {
             if (playerProfile.isLastManStanding) {
-                console.log(`GetRoundLoadout | Player ${playerProfile.playerID} is the last man standing! Assigning LMS weapon`);
                 const lmsWeapon = savedLoadout.find(item => item.inventorySlot === InventorySlot.LMS);
                 if (lmsWeapon) {
                     // Grant LMS weapon in Primary slot
                     items.push({ ...lmsWeapon, inventorySlot: InventorySlot.Primary });
                 }
             } else if (playerProfile.isFinalFive) {
-                console.log(`GetRoundLoadout | Player ${playerProfile.playerID} is in the final five! Assigning Primary weapon`);
                 const primaryWeapon = savedLoadout.find(item => item.inventorySlot === InventorySlot.Primary);
                 if (primaryWeapon) items.push(primaryWeapon);
             }
@@ -1518,7 +1581,7 @@ class UI {
         message: mod.Message = mod.Message(mod.stringkeys.survivor_area_warning),
         showIcon: mod.UIImageType = mod.UIImageType.QuestionMark
     ): mod.UIWidget | undefined {
-        const containerWidth = 450;
+        const containerWidth = 500;
         const containerHeight = 40;
 
         const xOffset = -(1024 / 2 - containerWidth / 2); // -287: aligns left edge with the scoreboard
@@ -1526,7 +1589,7 @@ class UI {
             {
                 type: "Text",
                 name: `player_area_notification_text_${playerID}`,
-                position: [0, 0, 0],
+                position: [0, 0, 10],
                 size: [containerWidth, containerHeight],
                 anchor: mod.UIAnchor.Center,
                 textAnchor: mod.UIAnchor.Center,
@@ -1554,7 +1617,7 @@ class UI {
         return ParseUI({
             type: "Container",
             name: `player_area_notification_${playerID}`,
-            position: [xOffset, UI.areaTriggerNotificationY, 0],
+            position: [xOffset, UI.areaTriggerNotificationY, 5],
             size: [containerWidth, containerHeight],
             anchor: mod.UIAnchor.TopCenter,
             bgFill: mod.UIBgFill.Blur,
@@ -1566,38 +1629,157 @@ class UI {
 
     }
 
-    static UpdateInfectedSpeedBoostAreaNotification(playerProfile: PlayerProfile, isBoostActive: boolean) {
-        if (!playerProfile.playerAreaNotificationWidget || !playerProfile.playerAreaNotificationIsSpeedBoost) return;
+    static UpdatePlayerAreaNotification(
+        playerProfile: PlayerProfile,
+        message: mod.Message,
+        showIcon: mod.UIImageType = mod.UIImageType.QuestionMark,
+        bgColor: mod.Vector = UI.battlefieldGrey,
+    ) {
+        if (!playerProfile.playerAreaNotificationWidget) return;
 
         const textWidget = mod.FindUIWidgetWithName(`player_area_notification_text_${playerProfile.playerID}`) as mod.UIWidget;
         const imageWidget = mod.FindUIWidgetWithName(`player_area_notification_icon_${playerProfile.playerID}`) as mod.UIWidget;
-        let bgColor = UI.battlefieldGrey;
-        let boostMessage = MakeMessage(mod.stringkeys.infected_speed_boost_ready);
-        let boostImage = mod.UIImageType.SelfHeal;
-        if (isBoostActive) {
-            boostMessage = MakeMessage(mod.stringkeys.infected_speed_boost_active);
-            boostImage = mod.UIImageType.RifleAmmo;
-            bgColor = UI.infectedNightGreen;
-        }
 
         if (textWidget) {
-            mod.SetUITextLabel(
-                textWidget,
-                boostMessage
-            );
+            mod.SetUITextLabel(textWidget, message);
             mod.SetUITextColor(textWidget, UI.battlefieldWhite);
         }
         if (imageWidget) {
-            mod.SetUIImageType(imageWidget, boostImage);
+            mod.SetUIImageType(imageWidget, showIcon);
         }
 
-        mod.SetUIWidgetBgColor(
-            playerProfile.playerAreaNotificationWidget,
-            bgColor
-        );
+        mod.SetUIWidgetBgColor(playerProfile.playerAreaNotificationWidget, bgColor);
         mod.SetUIWidgetBgAlpha(playerProfile.playerAreaNotificationWidget, 1);
         mod.SetUIWidgetDepth(playerProfile.playerAreaNotificationWidget, mod.UIDepth.AboveGameUI);
         mod.SetUIWidgetVisible(playerProfile.playerAreaNotificationWidget, true);
+    }
+
+    static CreateLastManStandingBuffWidget(
+        player: mod.Player,
+        playerID: number,
+        lineIndex: number,
+        message: mod.Message,
+    ): mod.UIWidget | undefined {
+        const containerWidth = 450;
+        const containerHeight = 24;
+        const iconSize = 30;
+        const textOffset = 30;
+        const xOffset = -(1024 / 2 - containerWidth / 2);
+        const yOffset = UI.survivorNotificationY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
+
+        return ParseUI({
+            type: "Container",
+            name: `lms_buff_line_${playerID}_${lineIndex}`,
+            position: [xOffset, yOffset, 0],
+            size: [containerWidth, containerHeight],
+            anchor: mod.UIAnchor.TopCenter,
+            bgAlpha: 0,
+            depth: mod.UIDepth.AboveGameUI,
+            playerId: player,
+            children: [
+                {
+                    type: "Image",
+                    name: `lms_buff_line_icon_${playerID}_${lineIndex}`,
+                    position: [0, 0, 0],
+                    size: [iconSize, iconSize, 0],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    imageType: mod.UIImageType.SpawnBeacon,
+                    imageColor: UI.battlefieldYellow,
+                    imageAlpha: 1,
+                    bgAlpha: 0,
+                },
+                {
+                    type: "Text",
+                    name: `lms_buff_line_text_${playerID}_${lineIndex}`,
+                    position: [textOffset, 0, 0],
+                    size: [containerWidth - textOffset, containerHeight],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                    textSize: 16,
+                    bgAlpha: 0,
+                    textColor: UI.battlefieldWhite,
+                    textLabel: message,
+                },
+            ],
+        });
+    }
+
+    static UpdateLastManStandingBuffWidget(playerID: number, lineIndex: number, message: mod.Message): void {
+        const widget = mod.FindUIWidgetWithName(`lms_buff_line_text_${playerID}_${lineIndex}`) as mod.UIWidget;
+        const container = mod.FindUIWidgetWithName(`lms_buff_line_${playerID}_${lineIndex}`) as mod.UIWidget;
+        if (widget) {
+            mod.SetUITextLabel(widget, message);
+            mod.SetUITextColor(widget, UI.battlefieldWhite);
+        }
+        if (container) {
+            mod.SetUIWidgetBgAlpha(container, 0);
+            mod.SetUIWidgetDepth(container, mod.UIDepth.AboveGameUI);
+            mod.SetUIWidgetVisible(container, true);
+        }
+    }
+
+    static CreateAlphaBuffWidget(
+        player: mod.Player,
+        playerID: number,
+        lineIndex: number,
+        message: mod.Message,
+    ): mod.UIWidget | undefined {
+        const containerWidth = 450;
+        const containerHeight = 24;
+        const iconSize = 30;
+        const textOffset = 30;
+        const xOffset = -(1024 / 2 - containerWidth / 2);
+        const yOffset = UI.ammoFeedbackY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
+
+        return ParseUI({
+            type: "Container",
+            name: `alpha_buff_line_${playerID}_${lineIndex}`,
+            position: [xOffset, yOffset, 0],
+            size: [containerWidth, containerHeight],
+            anchor: mod.UIAnchor.TopCenter,
+            bgAlpha: 0,
+            depth: mod.UIDepth.AboveGameUI,
+            playerId: player,
+            children: [
+                {
+                    type: "Image",
+                    name: `alpha_buff_line_icon_${playerID}_${lineIndex}`,
+                    position: [0, 0, 0],
+                    size: [iconSize, iconSize, 0],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    imageType: mod.UIImageType.SpawnBeacon,
+                    imageColor: UI.battlefieldRedBg,
+                    imageAlpha: 1,
+                    bgAlpha: 0,
+                },
+                {
+                    type: "Text",
+                    name: `alpha_buff_line_text_${playerID}_${lineIndex}`,
+                    position: [textOffset, 0, 0],
+                    size: [containerWidth - textOffset, containerHeight],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    textAnchor: mod.UIAnchor.CenterLeft,
+                    textSize: 16,
+                    bgAlpha: 0,
+                    textColor: UI.battlefieldWhite,
+                    textLabel: message,
+                },
+            ],
+        });
+    }
+
+    static UpdateAlphaBuffWidget(playerID: number, lineIndex: number, message: mod.Message): void {
+        const widget = mod.FindUIWidgetWithName(`alpha_buff_line_text_${playerID}_${lineIndex}`) as mod.UIWidget;
+        const container = mod.FindUIWidgetWithName(`alpha_buff_line_${playerID}_${lineIndex}`) as mod.UIWidget;
+        if (widget) {
+            mod.SetUITextLabel(widget, message);
+            mod.SetUITextColor(widget, UI.battlefieldWhite);
+        }
+        if (container) {
+            mod.SetUIWidgetBgAlpha(container, 0);
+            mod.SetUIWidgetDepth(container, mod.UIDepth.AboveGameUI);
+            mod.SetUIWidgetVisible(container, true);
+        }
     }
 
     static CreateInfectedNightOverlay(playerProfile: PlayerProfile): mod.UIWidget {
@@ -3080,6 +3262,11 @@ class LoadoutDisplayBottomView {
     }
 
     async Show() {
+        if (this._PlayerProfile.invehicle) {
+            this.Hide();
+            return;
+        }
+
         if (!this.rootWidget) {
             console.log(`SpawnMessage | rootWidget is undefined! Creating new rootWidget`);
             this.rootWidget = this.CreateUI() as mod.UIWidget;
@@ -3088,7 +3275,15 @@ class LoadoutDisplayBottomView {
             if (GameHandler.gameState === GameState.GameRoundIsRunning) {
                 await mod.Wait(0.25); // wait during player spawn
             }
+            if (this._PlayerProfile.invehicle) {
+                this.Hide();
+                return;
+            }
             this.BuildEquipmentIcons();
+            if (this._PlayerProfile.invehicle) {
+                this.Hide();
+                return;
+            }
 
             mod.SetUIWidgetVisible(this.rootWidget, true);
             mod.SetUIWidgetBgAlpha(this.rootWidget, 1);
@@ -3148,6 +3343,10 @@ class LoadoutDisplayBottomView {
 
     BuildEquipmentIcons() {
         console.log(`SpawnMessage | Building equipment icons for player ${this._PlayerProfile.playerID}`);
+        if (this._PlayerProfile.invehicle) {
+            this.Hide();
+            return;
+        }
         const equipmentIconsContainer = mod.FindUIWidgetWithName(`${this.uiID}_equipment_icons_container_${this._PlayerProfile.playerID}`);
         const isInfected = this._PlayerProfile.isInfectedTeam ||
             (mod.GetObjId(mod.GetTeam(this._PlayerProfile.player)) === mod.GetObjId(INFECTED_TEAM));
@@ -3162,12 +3361,6 @@ class LoadoutDisplayBottomView {
         // start with fresh widgets
         if (this.parentContainers.length > 0) {
             let i = 1;
-            let n = 1;
-            if (DEBUG) console.log(`SpawnMessage | (${this.parentContainers.length})Existing parent container widgets:`);
-            this.parentContainers.forEach(widget => {
-                const name = mod.GetUIWidgetName(widget);
-                console.log(`SpawnMessage | Widget(${n++}/${this.parentContainers.length}) Name:${name}`);
-            });
             for (let widget of this.parentContainers) {
                 const name = mod.GetUIWidgetName(widget);
                 if (DEBUG) console.log(`SpawnMessage | Deleting ${name}...${i++}/${this.parentContainers.length}`);
@@ -3378,7 +3571,7 @@ class LoadoutDisplayBottomView {
     }
 
     Hide() {
-        if (!this.loadoutWidgets) return;
+        if (!this.rootWidget) return;
         mod.SetUIWidgetVisible(this.rootWidget as mod.UIWidget, false);
     }
 
@@ -3387,26 +3580,6 @@ class LoadoutDisplayBottomView {
 
 const gameStateMessageToast = new GameStateNotificationWidget();
 const survivorCountNotificationToast = new SurvivorCountNotificationWidget();
-
-//////////////////////////////////////////////////////////////////
-///////----------------- SCORES AND STATS -----------------///////
-//////////////////////////////////////////////////////////////////
-
-type PlayerStats = {
-    score: number;
-    kills: number;
-    infected: number;
-    deaths: number;
-    survived: number;
-}
-
-const INITIAL_STATS = {
-    score: 0,
-    kills: 0,
-    infected: 0,
-    deaths: 0,
-    survived: 0
-}
 
 /////////////////////////////////////////////////////////////////
 ///////------------- BOT AND PLAYER PROFILES -------------///////
@@ -3420,18 +3593,21 @@ class PlayerProfile {
     isDead: boolean;
     isAlphaInfected: boolean = false;
     isInfectedTeam: boolean = false;
+    invehicle: boolean = false;
     isLastManStanding: boolean = false;
     isInitialSpawn: boolean = false;
     isFinalFive: boolean = false;
     lmsReloadLoopActive: boolean = false;
-    infectedAreaSpeedBoostActive: boolean = false;
-    infectedAreaSprintBoostWasActive: boolean = false;
     youInfectedWidget?: mod.UIWidget;
     infectedByWidget?: mod.UIWidget;
     infectedNightOverlay?: mod.UIWidget;
     playerAreaNotificationWidget?: mod.UIWidget;
-    playerAreaNotificationIsSpeedBoost: boolean = false;
+    showSurvivorRoadWarning: boolean = false;
+    playerAreaHintIndex: number = 0;
+    nextPlayerAreaHintRotationAt: number = 0;
     loadoutDisplayBottom?: LoadoutDisplayBottomView;
+    lmsBuffWidgets: mod.UIWidget[] = [];
+    alphaBuffWidgets: mod.UIWidget[] = [];
     chosenAsAlphaInfectedWidget: mod.UIWidget[] = [];
     playerAmmoFeedbackWidget: mod.UIWidget[] = [];
     teamIndicationWidget: mod.UIWidget[] = [];
@@ -3581,7 +3757,6 @@ class PlayerProfile {
         });
 
         playerProfile.isDead = false;
-        InfectedIconDisplay(player);
 
         if (GameHandler.gameState === GameState.GameRoundIsRunning) {
             playerProfile.scoreboardUI?.Show();
@@ -3622,6 +3797,7 @@ class PlayerProfile {
                 playerProfile.isInfectedTeam = true;
                 GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
                 console.log(`CustomOnPlayerDeployed | Initial infected human -> infectedCount: ${GameHandler.infectedCount}`);
+                GameHandler.RebuildPlayerLists();
             }
             ScoreboardUI.GlobalUpdate(TeamNameString.Both);
         }
@@ -3661,6 +3837,7 @@ class PlayerProfile {
         mod.SetTeam(player, INFECTED_TEAM); // scoreboard bugs out on local games >:C
 
         GameHandler.RecalculateCounts();
+        GameHandler.RebuildPlayerLists();
         // must refresh both teams since survivors count also decreases
         ScoreboardUI.GlobalUpdate(TeamNameString.Both);
         this.scoreboardUI?.Show();
@@ -3684,40 +3861,214 @@ class PlayerProfile {
         mod.SetUIWidgetDepth(this.infectedNightOverlay, mod.UIDepth.AboveGameUI);
     }
 
+    DeletePlayerAreaNotificationWidget() {
+        if (this.playerAreaNotificationWidget) {
+            mod.DeleteUIWidget(this.playerAreaNotificationWidget);
+            this.playerAreaNotificationWidget = undefined;
+        }
+        this.showSurvivorRoadWarning = false;
+        this.playerAreaHintIndex = 0;
+        this.nextPlayerAreaHintRotationAt = 0;
+    }
+
+    DeleteLastManStandingBuffWidgets() {
+        if (this.lmsBuffWidgets.length === 0) return;
+        this.lmsBuffWidgets.forEach(widget => {
+            try { mod.DeleteUIWidget(widget); } catch { }
+        });
+        this.lmsBuffWidgets = [];
+    }
+
+    DeleteAlphaBuffWidgets() {
+        if (this.alphaBuffWidgets.length === 0) return;
+        this.alphaBuffWidgets.forEach(widget => {
+            try { mod.DeleteUIWidget(widget); } catch { }
+        });
+        this.alphaBuffWidgets = [];
+    }
+
+    UpdateAlphaBuffWidgets() {
+        if (this.isAI) return;
+
+        const shouldShowBuffs = this.isAlphaInfected
+            && SafeIsAlive(this.player)
+            && GameHandler.gameState === GameState.GameRoundIsRunning;
+
+        if (!shouldShowBuffs) {
+            this.DeleteAlphaBuffWidgets();
+            return;
+        }
+
+        const buffMessages = GetAlphaInfectedBuffMessages();
+        for (let index = 0; index < buffMessages.length; index++) {
+            const message = buffMessages[index];
+            if (!this.alphaBuffWidgets[index]) {
+                const widget = UI.CreateAlphaBuffWidget(this.player, this.playerID, index, message);
+                if (widget) {
+                    this.alphaBuffWidgets[index] = widget;
+                }
+            }
+            UI.UpdateAlphaBuffWidget(this.playerID, index, message);
+        }
+    }
+
     UpdatePlayerAreaNotificationWidget() {
         if (this.isAI) return;
         const isInfected = this.isInfectedTeam || (mod.GetObjId(mod.GetTeam(this.player)) === mod.GetObjId(INFECTED_TEAM));
+        const isAlive = SafeIsAlive(this.player);
+        const isGameRoundActive = GameHandler.gameState === GameState.GameRoundIsRunning;
+        const shouldShowSurvivorWarning = !isInfected
+            && this.showSurvivorRoadWarning
+            && isAlive
+            && isGameRoundActive;
+        const shouldShowLMSHint = !isInfected
+            && this.isLastManStanding
+            && isAlive
+            && isGameRoundActive;
+        const shouldShowHint = isInfected
+            && isAlive
+            && isGameRoundActive;
 
-        if (!isInfected) {
+        if (!shouldShowHint && !shouldShowSurvivorWarning && !shouldShowLMSHint) {
+            this.DeletePlayerAreaNotificationWidget();
             return;
         }
 
-        if (!this.infectedAreaSpeedBoostActive) {
-            if (this.playerAreaNotificationWidget && this.playerAreaNotificationIsSpeedBoost) {
-                mod.DeleteUIWidget(this.playerAreaNotificationWidget);
-                this.playerAreaNotificationWidget = undefined;
-                this.playerAreaNotificationIsSpeedBoost = false;
+        if (shouldShowSurvivorWarning) {
+            if (!this.playerAreaNotificationWidget) {
+                this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                    this.player,
+                    this.playerID,
+                    MakeMessage(mod.stringkeys.survivor_area_warning),
+                );
             }
-            return;
-        }
-
-        if (!this.playerAreaNotificationWidget || !this.playerAreaNotificationIsSpeedBoost) {
             if (this.playerAreaNotificationWidget) {
-                mod.DeleteUIWidget(this.playerAreaNotificationWidget);
-                this.playerAreaNotificationWidget = undefined;
+                UI.UpdatePlayerAreaNotification(this, MakeMessage(mod.stringkeys.survivor_area_warning));
             }
+            return;
+        }
+
+        if (shouldShowLMSHint) {
+            const lmsHintMessage = ResolveStringKeyMessage(LMS_HINT_STRING_KEYS[0]);
+            if (!this.playerAreaNotificationWidget) {
+                this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                    this.player,
+                    this.playerID,
+                    lmsHintMessage,
+                );
+            }
+            if (this.playerAreaNotificationWidget) {
+                UI.UpdatePlayerAreaNotification(this, lmsHintMessage, mod.UIImageType.SpawnBeacon, mod.CreateVector(1,1,1));
+            }
+            return;
+        }
+
+        const now = Date.now() / 1000;
+
+        // Alpha infected: show leap charge status when crouching, rotate alpha tips when idle
+        if (this.isAlphaInfected) {
+            const leapState = LEAP_STATES.get(mod.GetObjId(this.player));
+            if (leapState && leapState.chargeVfxState !== 'none') {
+                if (!this.playerAreaNotificationWidget) {
+                    this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                        this.player,
+                        this.playerID,
+                        MakeMessage(mod.stringkeys.leap_status_charging, 0, Math.floor(LEAP_CROUCH_HOLD_SECONDS)),
+                    );
+                }
+                // Reset the tip rotation timer so we get a full window after un-crouching
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+                if (this.playerAreaNotificationWidget) {
+                    if (leapState.chargeVfxState === 'charging') {
+                        const crouchHeld = leapState.crouchStartTime > 0 ? now - leapState.crouchStartTime : 0;
+                        const chargeWhole = Math.floor(crouchHeld * 10);
+                        const chargeTotal = Math.floor(LEAP_CROUCH_HOLD_SECONDS);
+                        UI.UpdatePlayerAreaNotification(
+                            this,
+                            MakeMessage(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal),
+                            mod.UIImageType.CrownOutline,
+                            UI.battlefieldYellowBg,
+                        );
+                    } else {
+                        if (leapState.previewIsBlocked) {
+                            UI.UpdatePlayerAreaNotification(
+                                this,
+                                MakeMessage(mod.stringkeys.leap_status_no_room),
+                                mod.UIImageType.CrownOutline,
+                                UI.battlefieldRedBg,
+                            );
+                        } else {
+                            UI.UpdatePlayerAreaNotification(
+                                this,
+                                MakeMessage(mod.stringkeys.leap_status_ready),
+                                mod.UIImageType.CrownSolid,
+                                mod.CreateVector(0.063, 0.25, 0.094),
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Not crouching: rotate alpha-specific tips
+            if (!this.playerAreaNotificationWidget) {
+                this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                    this.player,
+                    this.playerID,
+                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex),
+                );
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+            } else if (now >= this.nextPlayerAreaHintRotationAt) {
+                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+            }
+            if (this.playerAreaNotificationWidget) {
+                UI.UpdatePlayerAreaNotification(this, GetAlphaInfectedHintMessage(this.playerAreaHintIndex));
+            }
+            return;
+        }
+
+        // Non-alpha infected: rotate standard infected tips
+        if (!this.playerAreaNotificationWidget) {
             this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
                 this.player,
                 this.playerID,
-                MakeMessage(mod.stringkeys.infected_speed_boost_ready),
-
+                GetInfectedHintMessage(this.playerAreaHintIndex),
             );
-            this.playerAreaNotificationIsSpeedBoost = true;
+            this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+        } else if (now >= this.nextPlayerAreaHintRotationAt) {
+            this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_HINT_STRING_KEYS.length;
+            this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+        }
+        if (this.playerAreaNotificationWidget) {
+            UI.UpdatePlayerAreaNotification(this, GetInfectedHintMessage(this.playerAreaHintIndex));
+        }
+    }
+
+    UpdateLastManStandingBuffWidgets() {
+        if (this.isAI) return;
+
+        const isSurvivor = !this.isInfectedTeam && (mod.GetObjId(mod.GetTeam(this.player)) === mod.GetObjId(SURVIVOR_TEAM));
+        const shouldShowBuffs = isSurvivor
+            && this.isLastManStanding
+            && SafeIsAlive(this.player)
+            && GameHandler.gameState === GameState.GameRoundIsRunning;
+
+        if (!shouldShowBuffs) {
+            this.DeleteLastManStandingBuffWidgets();
+            return;
         }
 
-        if (this.playerAreaNotificationWidget) {
-            const isSprinting = mod.GetSoldierState(this.player, mod.SoldierStateBool.IsSprinting);
-            UI.UpdateInfectedSpeedBoostAreaNotification(this, isSprinting);
+        const buffMessages = GetLastManStandingBuffMessages();
+        for (let index = 0; index < buffMessages.length; index++) {
+            const message = buffMessages[index];
+            if (!this.lmsBuffWidgets[index]) {
+                const widget = UI.CreateLastManStandingBuffWidget(this.player, this.playerID, index, message);
+                if (widget) {
+                    this.lmsBuffWidgets[index] = widget;
+                }
+            }
+            UI.UpdateLastManStandingBuffWidget(this.playerID, index, message);
         }
     }
 
@@ -3756,6 +4107,8 @@ class PlayerProfile {
             this.playerAmmoFeedbackWidget,
             this.teamIndicationWidget,
             this.alphaInfectedWidgetInstances,
+            this.lmsBuffWidgets,
+            this.alphaBuffWidgets,
         ];
 
         for (const group of widgetGroups) {
@@ -3790,9 +4143,9 @@ class PlayerProfile {
             }
             playerProfile.isLastManStanding = false;
             playerProfile.lmsReloadLoopActive = false;
-            playerProfile.infectedAreaSpeedBoostActive = false;
-            playerProfile.infectedAreaSprintBoostWasActive = false;
-            playerProfile.playerAreaNotificationIsSpeedBoost = false;
+            playerProfile.invehicle = false;
+            playerProfile.DeletePlayerAreaNotificationWidget();
+            playerProfile.DeleteLastManStandingBuffWidgets();
             if (GameHandler.shouldShowLoadoutSelection) {
                 playerProfile.chosenLoadoutThisRound = undefined;
             }
@@ -3955,6 +4308,7 @@ class PlayerProfile {
         PlayerProfile._allPlayers.forEach((pp, key) => {
             console.log(`\t_allPlayers Map | key:${key} mod.ObjID:${mod.GetObjId(pp.player)} pp.playerID:${pp.playerID} isAi:${pp.isAI} isInfectedTeam:${pp.isInfectedTeam} isInitialSpawn:${pp.isInitialSpawn}`);
         });
+        GameHandler.RebuildPlayerLists();
         return;
     }
 
@@ -3993,11 +4347,8 @@ class PlayerProfile {
                     mod.DeleteUIWidget(this.infectedNightOverlay);
                     this.infectedNightOverlay = undefined;
                 }
-                if (this.playerAreaNotificationWidget) {
-                    mod.DeleteUIWidget(this.playerAreaNotificationWidget);
-                    this.playerAreaNotificationWidget = undefined;
-                }
-                this.playerAreaNotificationIsSpeedBoost = false;
+                this.DeletePlayerAreaNotificationWidget();
+                this.DeleteLastManStandingBuffWidgets();
 
                 // Delete alpha infected widget array
                 this.chosenAsAlphaInfectedWidget.forEach(widget => {
@@ -4022,6 +4373,9 @@ class PlayerProfile {
                     try { mod.DeleteUIWidget(widget); } catch (e) { }
                 });
                 this.alphaInfectedWidgetInstances = [];
+
+                // Delete alpha buff widgets
+                this.DeleteAlphaBuffWidgets();
 
                 // Delete spawn message
                 if (this.loadoutDisplayBottom) {
@@ -4109,7 +4463,7 @@ class PlayerProfile {
         mod.AddUIText(
             widgetName,
             mod.CreateVector(0, yOffset, 0),
-            mod.CreateVector(550, 40, 0),
+            mod.CreateVector(550, 40, 60), //above other below-scoreboard msgs
             mod.UIAnchor.TopCenter,
             MakeMessage(mod.stringkeys.spawn_message, this.player),
             this.player
@@ -4402,7 +4756,7 @@ class GameHandler {
 
         // decoration
         { id: mod.RuntimeSpawn_Sand.CardboardTrashPile_01_A, position: { x: -27.105, y: 32.518, z: -49.61 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-    ]
+    ];
 
     static sandFXProps = [
         { id: mod.RuntimeSpawn_Common.FX_BASE_Fire_L, position: { x: 12.807, y: 33.216, z: -18.708 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
@@ -4413,20 +4767,31 @@ class GameHandler {
         { id: mod.RuntimeSpawn_Common.FX_Car_Fire_M_GS, position: { x: -5.944, y: 32.896, z: -8.017 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
         // supposed to be center-ish, only birds are working
         { id: mod.RuntimeSpawn_Common.FX_BASE_Birds_Black_Circulating, position: { x: -46.727, y: 32.668, z: -29.203 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_Snow_WhiteLeaves_01, position: { x: -46.727, y: 32.668, z: -29.203 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
+        { id: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow, position: { x: -46.727, y: 32.668, z: -29.203 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
         { id: mod.RuntimeSpawn_Common.FX_BASE_Dust_Large_Area, position: { x: -46.727, y: 32.668, z: -23.676 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
         { id: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_A, position: { x: -46.727, y: 32.668, z: -25.676 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
         { id: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_B, position: { x: -46.727, y: 32.668, z: -27.203 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-    ]
+    ];
 
-    static sand2FXProps = [
-        { id: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_Black_L, position: { x: 70.423, y: 59.969, z: -81.828 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_Car_Fire_M_GS, position: { x: 70.392, y: 59.086, z: -82.348 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow, position: { x: 81.614, y: 63.436, z: 8.468 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_Snow_WhiteLeaves_01, position: { x: 40.096, y: 80.207, z: -13.362 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Column_XXL, position: { x: 12.329, y: 51.796, z: 79.435 }, rotation: { x: -0.707, y: 0, z: 0, w: 0.707 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-        { id: mod.RuntimeSpawn_Common.FX_Granite_Strike_Smoke_Marker_Red, position: { x: 22.192, y: 75.779, z: -55.832 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1.0, y: 1.0, z: 1.0 } },
-    ]
+    // VFX placed as nodes in the Godot scene enabled via mod.GetVFX(id)
+    static sand2_Vfx = [
+        { id: 501, object: mod.RuntimeSpawn_Common.FX_Granite_Strike_Smoke_Marker_Red },
+        { id: 1502, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_Black_L },
+        { id: 1503, object: mod.RuntimeSpawn_Common.FX_CivCar_Tire_fire_S_GS },
+        { id: 1501, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Column_XXL },
+        { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
+        { id: 1504, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
+    ];
+
+    static sand2_Sfx = [
+        { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
+        { id: 2503, attenuation: 5, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
+        { id: 2504, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Brooklyn_Shared_Spots_GarbageFlies_SimpleLoop3D },
+        { id: 2505, attenuation: 25, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingWarm_SimpleLoop3D },
+        { id: 2506, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+        { id: 2507, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+        { id: 2508, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+    ];
 
     // unused, add later for non-AI conditions
     // static breakableDefensePropsNoAI = [
@@ -4467,20 +4832,32 @@ class GameHandler {
      *  - "1 survivor": Only one survivor remains, triggers alpha infected selection (currently disabled)
      *  - "1 infected": Only one infected remains, resets survivors and infected for next round.
      *  - "2+ infected": Multiple infected and survivors remain, recycles team counts for next round.
+     *  - TODO: Increase zombie count by 50% until we get either 1 survivor or 0 survivors
      *  -  Used by GameHandler.HandleEoRSpawns to determine next round setup.
      * @todo Mark last man standing as the alpha infected for next round
      */
     static endOfRoundCondition: caseOptions;
 
     // spawn systems
-    static survivorSlotsToBackfill: number = 12;
+    /**
+     * Number of AI slots available = MAX_PLAYER_COUNT minus current human player count.
+     * Automatically reflects joins and leaves via RebuildPlayerLists().
+     */
+    static get aiSlotsToBackfill(): number {
+        return Math.max(0, MAX_PLAYER_COUNT - GameHandler.allHumanPlayers.length);
+    }
     static survivorsNextRound: number = 0;
     static infectedNextRound: number = 0;
     static isSpawnCheckRunning: boolean = false;
     static skipAlphaSelection: boolean = false;
     static preserveAlpha: boolean = false;
     static nextRoundFinalFive: boolean = false;
+    static vehicleSpawnedThisRound: boolean = false;
     static shouldShowLoadoutSelection: boolean = true;
+    /** Accumulates 25 % per round that 2+ survivors remain; resets when LMS or 0-survivors triggers. */
+    static infectedSpawnMultiplier: number = 1.0;
+    /** True once the parachute spawner pool has been unlocked (first time 2+ survivors survive). */
+    static parachuteSpawnersEnabled: boolean = false;
 
     // Recent infected increment events (for detecting accidental double-increments)
     // Each entry: { t: timestamp_ms, source: string, playerID?: number }
@@ -4489,6 +4866,16 @@ class GameHandler {
     static lastAlphaPlayerID?: number;
     static nextRoundForcedAlphaPlayerID?: number;
 
+    // Human arrays are authoritative and updated on every join/leave/team-change event.
+    // AI arrays contain only currently-alive slot players; infected bot deaths during the
+    // round do NOT trigger a rebuild (the count stays stable until respawn fires).
+    static allPlayers: mod.Player[] = [];
+    static allHumanPlayers: mod.Player[] = [];
+    static humanSurvivors: mod.Player[] = [];
+    static humanInfected: mod.Player[] = [];
+    static aiSurvivors: mod.Player[] = [];
+    static aiInfected: mod.Player[] = [];
+
     static WaitForAllDeploys(timeoutSeconds: number): Promise<boolean> {
         console.log(`WaitForAllDeploys | waiting up to ${timeoutSeconds}s for PlayerProfile._deployedPlayers to include all players (Human and AI)`);
         const timeoutMs = timeoutSeconds * 1000;
@@ -4496,34 +4883,25 @@ class GameHandler {
 
         return new Promise<boolean>(async (resolve) => {
             while (true) {
-                // timeout
                 if (Date.now() - start > timeoutMs) {
                     console.log('WaitForAllDeploys | timeout elapsed');
                     break;
                 }
 
-                // If spawn queue is still processing, wait a bit
-                if (AISpawnHandler.awaitingSpawnQueue.length > 0 || AISpawnHandler.isProcessingSpawnQueue) {
-                    await mod.Wait(0.25);
-                    continue;
-                }
-
-                // If spawnsInUse is not empty, we're still waiting for bots to spawn and match
-                if (AISpawnHandler.spawnsInUse.size > 0) {
-                    console.log(`WaitForAllDeploys | Waiting for ${AISpawnHandler.spawnsInUse.size} bot(s) to spawn from spawners: [${Array.from(AISpawnHandler.spawnsInUse.keys()).join(', ')}]`);
+                // If bots are still pending spawn from spawners, wait until they resolve
+                const pendingSpawns = InfectedBotSlot.pendingBySpawnerID.size + SurvivorBotSlot.pendingBySpawnerID.size;
+                if (pendingSpawns > 0) {
+                    console.log(`WaitForAllDeploys | Waiting for ${pendingSpawns} bot(s) to spawn from spawners: [${[...InfectedBotSlot.pendingBySpawnerID.keys(), ...SurvivorBotSlot.pendingBySpawnerID.keys()].join(', ')}]`);
                     await mod.Wait(0.25);
                     continue;
                 }
 
                 // Build list of required human player IDs
-                // Treat a human with ObjID -1 as "still processing"; don't consider them ready yet
                 let requiredHumans = PlayerProfile._allPlayerProfiles
                     .filter(pp => !pp.isAI)
                     .map(pp => mod.GetObjId(pp.player));
                 const humansWithInvalidObjId = requiredHumans.filter(id => id === -1).length;
                 if (humansWithInvalidObjId > 0) {
-                    // Wait briefly for engine to finish assigning ObjIDs during PreGame
-                    console.log(`WaitForAllDeploys | ${humansWithInvalidObjId} human(s) have ObjID -1; waiting for engine to assign ObjIDs`);
                     await mod.Wait(0.25);
                     // Re-evaluate on next loop
                     continue;
@@ -4589,10 +4967,13 @@ class GameHandler {
     }
 
     static SpawnVehicle() {
-        // spawns the Vector vehicle at the specified vehicle spawner set in Godot
-        const vehicle = mod.GetVehicleSpawner(202);
-        mod.SetVehicleSpawnerVehicleType(vehicle, mod.VehicleList.Vector);
-        mod.ForceVehicleSpawnerSpawn(vehicle);
+        // Pick a random spawner location and vehicle type each time final five triggers
+        const spawnerID = VEHICLE_SPAWNER_IDS[Math.floor(Math.random() * VEHICLE_SPAWNER_IDS.length)];
+        const vehicleType = VEHICLE_TYPES[Math.floor(Math.random() * VEHICLE_TYPES.length)];
+        const spawner = mod.GetVehicleSpawner(spawnerID);
+        mod.SetVehicleSpawnerVehicleType(spawner, vehicleType);
+        mod.ForceVehicleSpawnerSpawn(spawner);
+        console.log(`SpawnVehicle | spawnerID=${spawnerID} vehicleType=${mod.VehicleList[vehicleType]}`);
     }
 
     static SpawnFX(mapSelection: MapNames | undefined) {
@@ -4604,12 +4985,13 @@ class GameHandler {
         })
         this.spawnedFXProps = [];
         let propsToSpawn: any[] = [];
+        let vfxToActivate: any[] = [];
         switch (mapSelection) {
             case MapNames.SAND:
                 propsToSpawn = this.sandFXProps;
                 break;
             case MapNames.SAND2:
-                propsToSpawn = this.sand2FXProps;
+                vfxToActivate = this.sand2_Vfx;
                 break;
             default:
                 return;
@@ -4617,13 +4999,34 @@ class GameHandler {
         propsToSpawn.forEach(fxAsset => {
             const asset = GameHandler.SpawnObjectFromGodot(fxAsset as ObjectTransform);
             this.spawnedFXProps.push(asset);
-            mod.EnableVFX(asset, true)
+        });
+        if (vfxToActivate.length > 0) {
+            for (const vfxEntry of vfxToActivate) {
+                mod.EnableVFX(mod.GetVFX(vfxEntry.id), true);
+            }
+        }
+    }
+
+    static EnableSFX(mapSelection: MapNames | undefined) {
+        let sfxToPlay: any[] = [];
+        switch (mapSelection) {
+            case MapNames.SAND2:
+                sfxToPlay = this.sand2_Sfx;
+                break;
+            default:
+                return;
+        }
+        sfxToPlay.forEach(sfxID => {
+            const sfx = mod.GetSFX(sfxID.id);
+            const sfxPos = mod.GetObjectPosition(sfx);
+            if (sfxID.object) {
+                mod.PlaySound(sfx, 1, sfxPos, sfxID.attenuation);
+            }
         });
     }
 
     static SpawnRoundMapContent(mapSelection: MapNames | undefined) {
         const shouldSpawnDefenses = mapSelection === MapNames.SAND;
-        const shouldSpawnVehicle = mapSelection === MapNames.SAND2;
 
         if (shouldSpawnDefenses) {
             this.SpawnDefenses();
@@ -4631,11 +5034,8 @@ class GameHandler {
             this.ClearSpawnedDefenses();
         }
 
-        if (shouldSpawnVehicle) {
-            this.SpawnVehicle();
-        }
-
         this.SpawnFX(mapSelection);
+        this.EnableSFX(mapSelection);
     }
 
     static async SuspendWinChecksFor(seconds: number) {
@@ -4646,34 +5046,62 @@ class GameHandler {
         console.log(`SuspendWinChecksFor: resumed win checks`);
     }
 
-    static GetAllPlayersOnTeam(team: mod.Team): mod.Player[] {
-        const allPlayers = mod.AllPlayers();
-        const n = mod.CountOf(allPlayers);
-        const teamID = mod.GetObjId(team);
-        let teamMembers = [];
-        for (let i = 0; i < n; i++) {
-            let player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            let playerTeamID = mod.GetObjId(mod.GetTeam(player));
-            if (playerTeamID === teamID) {
-                teamMembers.push(player);
-            }
+    /**
+     * Rebuilds all cached player list arrays from authoritative sources.
+     * - Human arrays are built from PlayerProfile._allPlayerProfiles (isAI=false).
+     * - AI arrays are built from alive InfectedBotSlot / SurvivorBotSlot entries.
+     * Call this after any join, leave, or team-change event for human players, and
+     * after AI bot spawns or survivor-bot conversions to infected.
+     * Do NOT call on infected-bot death during the round - the slot will respawn and
+     * HandleSpawned will trigger the next rebuild.
+     */
+    static RebuildPlayerLists(): void {
+        const allHuman: mod.Player[] = [];
+        const humanSurv: mod.Player[] = [];
+        const humanInf: mod.Player[] = [];
+
+        for (const pp of PlayerProfile._allPlayerProfiles) {
+            if (pp.isAI) continue;
+            if (!Helpers.HasValidObjId(pp.player)) continue;
+            allHuman.push(pp.player);
+            if (pp.isInfectedTeam) humanInf.push(pp.player);
+            else humanSurv.push(pp.player);
         }
-        return teamMembers;
+
+        GameHandler.allHumanPlayers = allHuman;
+        GameHandler.humanSurvivors = humanSurv;
+        GameHandler.humanInfected = humanInf;
+
+        // AI arrays: only currently-alive slot players
+        const aiSurv: mod.Player[] = [];
+        const aiInf: mod.Player[] = [];
+
+        for (const slot of SurvivorBotSlot.slots) {
+            if (slot.state === BotSlotState.Alive && slot.player) aiSurv.push(slot.player);
+        }
+        for (const slot of InfectedBotSlot.slots) {
+            if (slot.state === BotSlotState.Alive && slot.player) aiInf.push(slot.player);
+        }
+
+        GameHandler.aiSurvivors = aiSurv;
+        GameHandler.aiInfected = aiInf;
+        GameHandler.allPlayers = [...allHuman, ...aiSurv, ...aiInf];
+
+        console.log(`RebuildPlayerLists | human:${allHuman.length} hSurv:${humanSurv.length} hInf:${humanInf.length} aiSurv:${aiSurv.length} aiInf:${aiInf.length}`);
+    }
+
+    static GetAllPlayersOnTeam(team: mod.Team): mod.Player[] {
+        if (mod.GetObjId(team) === mod.GetObjId(INFECTED_TEAM)) {
+            return [...GameHandler.humanInfected, ...GameHandler.aiInfected];
+        }
+        return [...GameHandler.humanSurvivors, ...GameHandler.aiSurvivors];
     }
 
     static GetHumanPlayersOnTeam(team: mod.Team): mod.Player[] {
-        const allPlayers = mod.AllPlayers();
-        const n = mod.CountOf(allPlayers);
-        const teamID = mod.GetObjId(team);
-        let teamMembers = [];
-        for (let i = 0; i < n; i++) {
-            let player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            let playerTeamID = mod.GetObjId(mod.GetTeam(player));
-            if (playerTeamID === teamID && !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
-                teamMembers.push(player);
-            }
+        if (mod.GetObjId(team) === mod.GetObjId(INFECTED_TEAM)) {
+            return GameHandler.humanInfected;
         }
-        return teamMembers;
+        return GameHandler.humanSurvivors;
     }
 
     static RecalculateCounts() {
@@ -4701,7 +5129,7 @@ class GameHandler {
         GameHandler.aliveInfectedCount = infected;
         GameHandler.totalPlayers = total;
         GameHandler.humanPlayers = humans;
-        console.log(`RecalculateCounts -> Survivors: ${survivors} | Infected: ${infected} | Total: ${total} | Humans: ${humans}`);
+        console.log(`RecalculateCounts -> AliveSurvivors: ${survivors} | AliveInfected: ${infected} | TrackedInfected: ${GameHandler.infectedCount} | Total: ${total} | Humans: ${humans}`);
     }
 
     static async RoundStartCountdown() {
@@ -4784,6 +5212,9 @@ class GameHandler {
             }
         }
 
+        // Always refresh live counts before evaluating round-end conditions.
+        GameHandler.RecalculateCounts();
+
         // Skip win checks immediately after a round starts to avoid race conditions
         if (GameHandler.suspendWinChecks) {
             console.log('CheckWinCondition skipped because suspendWinChecks is active.');
@@ -4811,14 +5242,9 @@ class GameHandler {
                     ShowLastManStandingIcon(lastManStanding);
                     InitializePlayerEquipment(lastManStanding, lmsProfile);
                     lmsProfile.loadoutDisplayBottom?.Show();
+                    lmsProfile.UpdateLastManStandingBuffWidgets();
                     if (!mod.GetSoldierState(lastManStanding, mod.SoldierStateBool.IsAISoldier)) {
                         StartLastManStandingReloadLoop(lmsProfile);
-                    }
-                }
-                for (let playerProfile of PlayerProfile._allPlayerProfiles) {
-                    if (playerProfile.isInfectedTeam) {
-                        InfectedIconDisplay(playerProfile.player);
-                        continue;
                     }
                 }
             } else if (GameHandler.survivorsCount === 5 && GameHandler.gameState === GameState.GameRoundIsRunning) {
@@ -4826,6 +5252,10 @@ class GameHandler {
                 const finalFiveMessage = MakeMessage(mod.stringkeys.final_five);
                 GameHandler.DisplayGameStateNotification(finalFiveMessage);
                 Helpers.PlaySoundFX(SFX_FINAL_FIVE, 1);
+                if (CURRENT_MAP === MapNames.SAND2 && !GameHandler.vehicleSpawnedThisRound) {
+                    GameHandler.vehicleSpawnedThisRound = true;
+                    GameHandler.SpawnVehicle();
+                }
                 mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.ProgressMidLosing, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
                 mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.PlayerCountEnemyLow, mod.VoiceOverFlags.Echo, INFECTED_TEAM);
                 for (let playerProfile of PlayerProfile._allPlayerProfiles) {
@@ -4841,15 +5271,24 @@ class GameHandler {
 
         // infected wiped out all survivors. basically round 1 again
         if (GameHandler.survivorsCount <= 0 || survivorPlayers.length <= 0) {
+            if (GameHandler.currentRound >= GAME_ROUND_LIMIT) {
+                // GameHandler.StopLastManStandingMusic();
+                GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.game_over));
+                mod.EndGameMode(SURVIVOR_TEAM);
+                GameHandler.gameState = GameState.GameOver;
+                return;
+            }
             // GameHandler.StopLastManStandingMusic();
             GameHandler.gameState = GameState.EndOfRound;
             GameHandler.endOfRoundCondition = '0 survivors';
-            GameHandler.survivorsNextRound = GameHandler.survivorSlotsToBackfill;
+            GameHandler.survivorsNextRound = GameHandler.aiSlotsToBackfill;
             GameHandler.infectedNextRound = 0;
             GameHandler.skipAlphaSelection = false;
             GameHandler.preserveAlpha = false;
             GameHandler.nextRoundFinalFive = false;
             GameHandler.nextRoundForcedAlphaPlayerID = undefined;
+            GameHandler.infectedSpawnMultiplier = 1.0;
+            GameHandler.parachuteSpawnersEnabled = false;
             console.log('End of Round Condition: 0 survivors - resetting survivors and infected next round.');
             return;
         }
@@ -4881,24 +5320,48 @@ class GameHandler {
             if (GameHandler.infectedCount >= 2 && GameHandler.survivorsCount >= 2) {
                 GameHandler.endOfRoundCondition = '2+ infected';
                 GameHandler.survivorsNextRound = this.GetNumberOfBotsToSpawn(SURVIVOR_TEAM, GameHandler.survivorsCount);
-                // use the actual alive infected count (humans + AI) to calculate bots needed for next round
-                GameHandler.infectedNextRound = this.GetNumberOfBotsToSpawn(INFECTED_TEAM, GameHandler.infectedCount);
+                // Stack the infected spawn multiplier (+25%) each round that 2+ survivors survive.
+                // Resets only when LMS or 0-survivors condition triggers.
+                GameHandler.infectedSpawnMultiplier *= 1.25;
+                // Scale the infected count by the accumulated multiplier and derive bot slots needed.
+                const baseInfectedCount = Math.max(MAX_PLAYER_COUNT - GameHandler.survivorsCount, GameHandler.infectedCount);
+                const scaledInfectedCount = Math.round(baseInfectedCount * GameHandler.infectedSpawnMultiplier);
+                GameHandler.infectedNextRound = this.GetNumberOfBotsToSpawn(INFECTED_TEAM, scaledInfectedCount);
+                // Enable the parachute spawner pool going into the next round.
+                GameHandler.parachuteSpawnersEnabled = true;
                 GameHandler.skipAlphaSelection = true;
                 GameHandler.preserveAlpha = true;
                 GameHandler.nextRoundFinalFive = GameHandler.survivorsCount > 0 && GameHandler.survivorsCount <= 5;
                 GameHandler.survivorsRoundsWon++;
-                console.log('End of Round Condition: 2+ infected - skipping alpha selection next round.');
+                console.log(`End of Round Condition: 2+ infected - multiplier now x${GameHandler.infectedSpawnMultiplier.toFixed(2)}, spawning ${GameHandler.infectedNextRound} infected next round (parachute pool enabled).`);
 
+            }
+            else if (GameHandler.infectedCount >= 2 && GameHandler.survivorsCount === 1) {
+                // Time expired with 1 survivor (LMS) and 2+ infected. The LMS will be converted
+                // to alpha next round so treat this as a full '1 infected' reset, but preserve
+                // nextRoundForcedAlphaPlayerID (already set above) so the LMS is the forced alpha.
+                GameHandler.endOfRoundCondition = '1 infected';
+                GameHandler.survivorsNextRound = GameHandler.aiSlotsToBackfill;
+                GameHandler.infectedNextRound = 0;
+                GameHandler.skipAlphaSelection = false;
+                GameHandler.preserveAlpha = false;
+                GameHandler.nextRoundFinalFive = false;
+                GameHandler.survivorsRoundsWon++;
+                GameHandler.infectedSpawnMultiplier = 1.0;
+                GameHandler.parachuteSpawnersEnabled = false;
+                console.log('End of Round Condition: 2+ infected + 1 survivor (LMS) - full reset; LMS preserved as forced alpha.');
             }
             else if (GameHandler.infectedCount === 1) {
                 GameHandler.endOfRoundCondition = '1 infected';
-                GameHandler.survivorsNextRound = GameHandler.survivorSlotsToBackfill;
+                GameHandler.survivorsNextRound = GameHandler.aiSlotsToBackfill;
                 GameHandler.infectedNextRound = 0;
                 GameHandler.skipAlphaSelection = false;
                 GameHandler.preserveAlpha = false;
                 GameHandler.nextRoundFinalFive = false;
                 GameHandler.nextRoundForcedAlphaPlayerID = undefined;
                 GameHandler.survivorsRoundsWon++;
+                GameHandler.infectedSpawnMultiplier = 1.0;
+                GameHandler.parachuteSpawnersEnabled = false;
                 console.log('End of Round Condition: 1 infected - resetting survivors and infected next round.');
             }
             return
@@ -4917,11 +5380,9 @@ class GameHandler {
     }
 
     static async ClearTemporaryArrays() {
-        AISpawnHandler.awaitingSpawnQueue = [];
-        AISpawnHandler.spawnsInUse.clear();
-        if (AISpawnHandler.infectedSpawnIndex >= INFECTED_AI_SPAWNERS.length) {
-            AISpawnHandler.infectedSpawnIndex = 0;
-        }
+        AISpawnHandler.spawnerLock.clear();
+        InfectedBotSlot.ResetAll();
+        SurvivorBotSlot.ResetAll();
     }
 
     static async DisplayGameStateNotification(message: mod.Message, durationSeconds: number = 4) {
@@ -4997,10 +5458,11 @@ class GameHandler {
                 mod.SetTeam(pp, mod.GetTeam(1));
             }
         }
+        GameHandler.RebuildPlayerLists();
     }
 
     /**
-     * Loops through all PlayerProfiles in .GetAvailablePlayers() and restricts inputs as specified
+     * Loops through all PlayerProfiles in ._allPlayerProfiles and restricts inputs as specified
      * @param enabled 
      */
     static RestrictAllInputsAllPlayers(enabled: boolean) {
@@ -5046,7 +5508,7 @@ class GameHandler {
      * Undeploys human infected players at the end of the round
      */
     static async UndeployAllHumanPlayers() {
-        console.log('Undeploying all human players.');
+        console.log('Undeploying all human infected players.');
         let allPlayers = mod.AllPlayers();
         const pcount = mod.CountOf(allPlayers);
         for (let i = 0; i < pcount; i++) {
@@ -5125,27 +5587,80 @@ class GameHandler {
         console.log(`Current GameHandler Counts | Survivors: ${GameHandler.survivorsCount} | Infected: ${GameHandler.infectedCount}`);
     }
 
-    static async HandleEoRSpawns(expr: caseOptions) {
+    static async HandleEoRSpawns(expr: caseOptions | undefined) {
+        const humanSurvivors = GameHandler.GetHumanPlayersOnTeam(SURVIVOR_TEAM).length;
+        const humanInfected = GameHandler.GetHumanPlayersOnTeam(INFECTED_TEAM).length;
+        const humanTotal = humanSurvivors + humanInfected;
+
+        let survivorsToSpawn = Math.max(0, GameHandler.survivorsNextRound);
+        let infectedToSpawn = Math.max(0, GameHandler.infectedNextRound);
+
+        // First round bootstrap: ensure pregame has survivor bots to select alpha from.
+        if (GameHandler.currentRound === 1 && survivorsToSpawn === 0 && infectedToSpawn === 0 && humanTotal < MAX_PLAYER_COUNT) {
+            survivorsToSpawn = Math.max(0, GameHandler.aiSlotsToBackfill);
+            GameHandler.skipAlphaSelection = false;
+            GameHandler.preserveAlpha = false;
+            GameHandler.endOfRoundCondition = '0 survivors';
+            console.log(`HandleEoRSpawns | Bootstrap recovery applied. Spawning ${survivorsToSpawn} survivors and ${infectedToSpawn} infected.`);
+        }
+
+        // Recover from stale recycled plan where counts were reset to 0 before expr update.
+        if (expr === '2+ infected' && survivorsToSpawn === 0 && infectedToSpawn === 0 && humanTotal < MAX_PLAYER_COUNT) {
+            survivorsToSpawn = Math.max(0, GameHandler.aiSlotsToBackfill - humanSurvivors);
+            GameHandler.skipAlphaSelection = false;
+            GameHandler.preserveAlpha = false;
+            GameHandler.nextRoundForcedAlphaPlayerID = undefined;
+            console.log(`HandleEoRSpawns | Recovered invalid 2+ infected plan (0/0). Fallback survivors=${survivorsToSpawn}, infected=${infectedToSpawn}.`);
+        }
+
+        // Never start a round with no survivors unless lobby is fully human and deliberately full.
+        if ((humanSurvivors + survivorsToSpawn) <= 0 && humanTotal < MAX_PLAYER_COUNT) {
+            survivorsToSpawn = Math.max(1, GameHandler.aiSlotsToBackfill - humanSurvivors);
+            GameHandler.skipAlphaSelection = false;
+            GameHandler.preserveAlpha = false;
+            console.log(`HandleEoRSpawns | Guarded against empty survivor team. survivorsToSpawn=${survivorsToSpawn}`);
+        }
+
+        // If no infected are planned, alpha selection must be enabled for round start.
+        if (GameHandler.skipAlphaSelection && (humanInfected + infectedToSpawn) <= 0) {
+            GameHandler.skipAlphaSelection = false;
+            GameHandler.preserveAlpha = false;
+            console.log(`HandleEoRSpawns | Disabled skipAlphaSelection because next round has no infected.`);
+        }
+
+        GameHandler.survivorsNextRound = survivorsToSpawn;
+        GameHandler.infectedNextRound = infectedToSpawn;
+        console.log(`HandleEoRSpawns | expr=${expr ?? 'undefined'} | humans(survivor=${humanSurvivors}, infected=${humanInfected}) | plan(survivors=${survivorsToSpawn}, infected=${infectedToSpawn}) | skipAlpha=${GameHandler.skipAlphaSelection}`);
 
         switch (expr) {
             case '0 survivors':
-                AISpawnHandler.InitializeStartingSurvivorSpawns(GameHandler.survivorsNextRound); // value of slotsToBackfill
-                AISpawnHandler.InitializeStartingInfectedSpawns(Math.max(0, GameHandler.infectedNextRound)); // clamp infected number
+                AISpawnHandler.InitializeStartingSurvivorSpawns(survivorsToSpawn);
+                AISpawnHandler.InitializeStartingInfectedSpawns(infectedToSpawn);
                 GameHandler.MoveAllHumanPlayersToSurvivorTeam();
-                console.log(`'EoR' | 0 survivors | Initial Round Conditions | Spawning ${GameHandler.survivorsNextRound} Survivors and ${GameHandler.infectedNextRound} Infected next round`);
-                break
+                GameHandler.infectedCount = infectedToSpawn;
+                console.log(`'EoR' | 0 survivors | Initial Round Conditions | Spawning ${survivorsToSpawn} Survivors and ${infectedToSpawn} Infected next round`);
+                break;
             case '1 infected':
-                AISpawnHandler.InitializeStartingSurvivorSpawns(GameHandler.survivorsNextRound); // reset survivors
-                AISpawnHandler.InitializeStartingInfectedSpawns(Math.max(0, GameHandler.infectedNextRound)); // clamp infected number
+                AISpawnHandler.InitializeStartingSurvivorSpawns(survivorsToSpawn);
+                AISpawnHandler.InitializeStartingInfectedSpawns(infectedToSpawn);
                 GameHandler.MoveAllHumanPlayersToSurvivorTeam();
-                console.log(`'EoR' | 1 infected | Resetting Survivors and Infected to Initial Round Conditions | Spawning ${Math.max(0, GameHandler.survivorsNextRound)} Survivors and ${Math.max(0, GameHandler.infectedNextRound)} Infected next round`);
-                break
+                GameHandler.infectedCount = infectedToSpawn;
+                console.log(`'EoR' | 1 infected | Resetting Survivors and Infected to Initial Round Conditions | Spawning ${survivorsToSpawn} Survivors and ${infectedToSpawn} Infected next round`);
+                break;
             case '2+ infected':
-                AISpawnHandler.InitializeStartingSurvivorSpawns(Math.max(0, GameHandler.survivorsNextRound));
-                AISpawnHandler.InitializeStartingInfectedSpawns(Math.max(0, GameHandler.infectedNextRound));
-                GameHandler.infectedCount = Math.max(0, GameHandler.infectedNextRound);
-                console.log(`'EoR' | 2+ infected | Recycling Team Counts | Spawning ${GameHandler.survivorsNextRound} Survivors and ${GameHandler.infectedNextRound} Infected next round`);
-                break
+                AISpawnHandler.InitializeStartingSurvivorSpawns(survivorsToSpawn);
+                AISpawnHandler.InitializeStartingInfectedSpawns(infectedToSpawn);
+                GameHandler.infectedCount = Math.max(0, humanInfected + infectedToSpawn);
+                console.log(`'EoR' | 2+ infected | Recycling Team Counts | Spawning ${survivorsToSpawn} Survivors and ${infectedToSpawn} Infected next round`);
+                break;
+            default:
+                AISpawnHandler.InitializeStartingSurvivorSpawns(survivorsToSpawn);
+                AISpawnHandler.InitializeStartingInfectedSpawns(infectedToSpawn);
+                GameHandler.MoveAllHumanPlayersToSurvivorTeam();
+                GameHandler.infectedCount = infectedToSpawn;
+                GameHandler.endOfRoundCondition = '0 survivors';
+                console.log(`'EoR' | default | Recovery spawn plan | Spawning ${survivorsToSpawn} Survivors and ${infectedToSpawn} Infected next round`);
+                break;
         }
     }
 
@@ -5173,6 +5688,15 @@ class GameHandler {
         await this.UndeployAllHumanPlayers();
         await this.KillAllBotsEndRound();
 
+        // Eject any occupants and queue deferred damage to force full vehicle removal
+        if (SPAWNED_ACTIVE_VEHICLE) {
+            const vehicleRef = SPAWNED_ACTIVE_VEHICLE;
+            SPAWNED_ACTIVE_VEHICLE = undefined;
+            try { mod.ForcePlayerExitVehicle(vehicleRef); } catch (e) { }
+            CleanupVehicleWithDamage(vehicleRef, 5);
+        }
+        GameHandler.vehicleSpawnedThisRound = false;
+
         GameHandler.isSpawnCheckRunning = false;
         GameHandler.currentRound++;
         GameHandler.roundTimeRemaining = ROUND_DURATION;
@@ -5196,6 +5720,7 @@ class GameHandler {
 
         GameHandler.infectedCount = 0;
         GameHandler.aliveInfectedCount = 0;
+        GameHandler.RebuildPlayerLists();
 
         return;
     }
@@ -5295,6 +5820,10 @@ class GameHandler {
             const finalFiveMessage = MakeMessage(mod.stringkeys.final_five_upgraded);
             GameHandler.DisplayGameStateNotification(finalFiveMessage);
             Helpers.PlaySoundFX(SFX_FINAL_FIVE, 1);
+            if (CURRENT_MAP === MapNames.SAND2) {
+                GameHandler.vehicleSpawnedThisRound = true;
+                GameHandler.SpawnVehicle();
+            }
             for (let playerProfile of PlayerProfile._allPlayerProfiles) {
                 playerProfile.ShowAlphaFeedback(finalFiveMessage);
                 if (playerProfile.isInfectedTeam) continue;
@@ -5358,15 +5887,18 @@ class GameHandler {
             }
             GameHandler.CheckWinCondition();
             await GameHandler.EndRoundCleanup();
+            if (GameHandler.gameState === GameState.GameOver) {
+                console.log('Game Over. Stopping game loop.');
+                break;
+            }
             await mod.Wait(1);
             await GameHandler.PreGameSetup();
-
-            while (GameHandler.gameState !== GameState.GameRoundIsRunning) {
-                await mod.Wait(1);
-                if (GameHandler.gameState === GameState.GameOver) {
-                    break
-                }
-            }
+            // while (GameHandler.gameState !== GameState.GameRoundIsRunning) {
+            //     await mod.Wait(1);
+            //     if (GameHandler.gameState === GameState.GameOver) {
+            //         break
+            //     }
+            // }
         }
     }
 }
@@ -5381,641 +5913,628 @@ enum TeamNameString {
     Both = "both"
 }
 
-type BotOptions = {
-    playerName?: mod.Any;
-    moveSpeed?: mod.MoveSpeed;
-    speedMultiplier?: number;
-    health?: number;
-    stance?: mod.Stance;
-    spawnerObjID: number;
-    player?: mod.Player;
-    playerID?: number;
-    assignedTeamObj?: mod.Team;
-    teamName: string;
-    soldierClass?: mod.SoldierClass;
-    spawnerObject?: mod.Spawner;
-    isInitialSpawn: boolean;
-    isInfectedTeam: boolean;
-    isAlphaInfected?: boolean;
-    playerStats: PlayerStats;
-    callbacks?: BotEventCallbacks;
-};
+// Lifecycle states for each bot slot.
+enum BotSlotState {
+    Idle = 'IDLE',
+    PendingSpawn = 'PENDING_SPAWN',
+    Alive = 'ALIVE',
+    DeadAwaitingRespawn = 'DEAD_AWAITING_RESPAWN',
+}
 
-type BotEventCallbacks = {
-    onSpawnCallback: (player: mod.Player, botProfile: BotProfile) => void | Promise<void>;
-    onDeathCallback: (player: mod.Player, botProfile: BotProfile) => void | Promise<void>;
-    onHit: (player: mod.Player, botProfile: BotProfile) => void | Promise<void>;
-};
-
+// Slim identity stub kept for PlayerProfile._botProfile compatibility (alpha flag, logging).
 class BotProfile {
     playerName: string;
-    moveSpeed: mod.MoveSpeed;
-    speedMultiplier: number;
-    health: number;
-    stance: mod.Stance;
-    spawnerObject?: mod.Spawner;
-    spawnerObjID: number;
-    _player?: mod.Player;
-    _playerObjID?: number;
-    _playerProfile?: PlayerProfile;
-    assignedTeamObj: mod.Team;
-    soldierClass: mod.SoldierClass;
-    teamName: string;
-    isInfectedTeam: boolean;
     isAlphaInfected: boolean;
-    isInitialSpawn: boolean;
-    playerStats: PlayerStats;
+    isInfectedTeam?: boolean; // used by LogAlphaState
 
-    static _allAI: Map<number, BotProfile> = new Map(); // keyed by player ObjID
-    static _botInstances: BotProfile[] = []
-    static _usedNames: Set<string> = new Set();
-
-    // Resolve a unique infected bot name using BOT_NAME_MAP; do not append to existing player names.
-    static ResolveInfectedName(spawnerObjID: number): string {
-        const fallbackName = "infected_bot_name";
-        // Prefer the mapped name for this spawner
-        let candidate = BOT_NAME_MAP.get(spawnerObjID) ?? fallbackName;
-        for (const name in BotProfile._usedNames) {
-            console.log(`BotProfile ResolveInfectedName | Used Bot Names: ${name}`);
-        }
-        if (!BotProfile._usedNames.has(candidate)) {
-            BotProfile._usedNames.add(candidate);
-            return candidate;
-        }
-        // Try to find the next unused entry in BOT_NAME_MAP
-        for (const [id, name] of BOT_NAME_MAP.entries()) {
-            if (!BotProfile._usedNames.has(name)) {
-                BotProfile._usedNames.add(name);
-                return name;
-            }
-        }
-        return `${fallbackName}_${spawnerObjID}`;
-    }
-
-    constructor(public botCallbacks: BotEventCallbacks, options: BotOptions, initialStats: PlayerStats = INITIAL_STATS) {
-        this.playerName = options.playerName;
-        this.moveSpeed = options.moveSpeed ?? mod.MoveSpeed.Run;
-        this.speedMultiplier = options.speedMultiplier ?? 1;
-        this.health = options.health ?? 50;
-        this.stance = options.stance ?? mod.Stance.Stand;
-        this.spawnerObjID = options.spawnerObjID;
-        this.spawnerObject = options.spawnerObject;
-        this.assignedTeamObj = options.assignedTeamObj ?? SURVIVOR_TEAM;
-        this.teamName = options.teamName ?? "survivors";
-        this.soldierClass = options.soldierClass ?? mod.SoldierClass.Engineer;
-        this.isInfectedTeam = options.isInfectedTeam;
-        this.isAlphaInfected = options.isAlphaInfected ?? false;
-        this.isInitialSpawn = options.isInitialSpawn;
-        this.playerStats = options.playerStats ?? { ...initialStats };
-
-        BotProfile._botInstances.push(this);
-        if (typeof this.playerName === 'string') {
-            BotProfile._usedNames.add(this.playerName);
-            for (const name in BotProfile._usedNames) {
-                console.log(`BotProfile Constructor | Used Bot Names: ${name}`);
-            }
-        }
-    }
-
-    static GetBySpawner(spawnerObjID: number): BotProfile | undefined {
-        // Primary lookup by spawnerObjID to select the correct pending BotProfile
-        const botProfile = BotProfile._botInstances.find(bp => bp.spawnerObjID === spawnerObjID);
-        return botProfile;
-    }
-
-    static GenerateBotParams(options?: any): BotProfile {
-        // generate a new BotProfile from a set of properties that are used to assign bots to spawn points in a queue
-        // For infected, reuse existing name if provided (respawning bot), otherwise resolve from BOT_NAME_MAP.
-        // For survivors, use provided name as-is.
-        const resolvedName = (options.teamName === TeamNameString.Infected)
-            ? (options.playerName || BotProfile.ResolveInfectedName(options.spawnerObjID))
-            : options.playerName;
-
-        let botParams: BotOptions = {
-            playerName: resolvedName,
-            moveSpeed: (options.teamName === TeamNameString.Infected) ? mod.MoveSpeed.Sprint : mod.MoveSpeed.InvestigateRun,
-            speedMultiplier: 1,
-            health: options.health,
-            stance: mod.Stance.Stand,
-            spawnerObjID: options.spawnerObjID,
-            spawnerObject: options.spawnerObject,
-            assignedTeamObj: (options.teamName === TeamNameString.Infected) ? INFECTED_TEAM : SURVIVOR_TEAM,
-            soldierClass: (options.teamName === TeamNameString.Infected) ? mod.SoldierClass.Recon : mod.SoldierClass.Assault,
-            teamName: options.teamName,
-            isInfectedTeam: options.isInfectedTeam,
-            isAlphaInfected: options.isAlphaInfected ?? false,
-            isInitialSpawn: options.isInitialSpawn,
-            playerStats: options.playerStats ?? { ...INITIAL_STATS }
-        };
-        const botCallbacks = options.callbacks ?? ((options.teamName === TeamNameString.Infected) ? infectedBotCallbacks : survivorBotCallbacks);
-        return new BotProfile(botCallbacks, botParams);
-    }
-
-    UpdatePlayerScoreboard(player: mod.Player) {
-        return;
-    }
-
-    async InitBehavior(player: mod.Player, playerProfile: PlayerProfile) {
-        await mod.Wait(0.5);
-        this._player = player;
-        this._playerProfile = playerProfile;
-        mod.AIEnableShooting(player, true);
-        mod.SetPlayerMaxHealth(player, playerProfile.isAlphaInfected ? 300 : this.health);
-        mod.AISetMoveSpeed(player, this.moveSpeed);
-        mod.AISetStance(player, this.stance);
-        mod.SetPlayerMovementSpeedMultiplier(player, playerProfile.isAlphaInfected ? 1.3 : this.speedMultiplier);
-        await this.botCallbacks.onSpawnCallback(player, this);
-    }
-
-    async botWasKilled(player: mod.Player) {
-        await this.botCallbacks.onDeathCallback(player, this);
-    }
-
-    async onHit(player: mod.Player) {
-        console.log('hit');
-        await this.botCallbacks.onHit(player, this);
-    }
-
-    static async OnAIDied(player: mod.Player, playerProfile: PlayerProfile, botProfile: BotProfile) {
-        console.log(`OnAIDied | Player(${mod.GetObjId(player)}) switching sides:${(!playerProfile.isInfectedTeam) ? true : false}`);
-
-        // Remove stale cache entries so the next spawn can't reuse survivor callbacks
-        const prevObjId = mod.GetObjId(player);
-        BotProfile._allAI.delete(prevObjId);
-        const existingIdx = BotProfile._botInstances.indexOf(botProfile);
-        if (existingIdx !== -1) {
-            BotProfile._botInstances.splice(existingIdx, 1);
-            if (typeof botProfile.playerName === 'string') {
-                BotProfile._usedNames.delete(botProfile.playerName);
-            }
-        }
-
-        // When a survivor AI dies (e.g., killed by an infected human), convert to infected and 
-        // increment the stable per-round infectedCount once here. 
-        // Guard with botProfile flag to avoid double-increments when downstream callbacks run.
-        if (!playerProfile.isInfectedTeam) {
-            playerProfile.isInfectedTeam = true;
-        }
-        if (!botProfile.isInfectedTeam && (GameHandler.gameState === GameState.GameRoundIsRunning || GameHandler.gameState === GameState.GameStartCountdown)) {
-            botProfile.isInfectedTeam = true; // mark so survivorBotCallbacks.onDeathCallback won't re-increment
-            botProfile.isInitialSpawn = false; // this life is ending; next infected spawn will mark fresh
-            playerProfile.isInitialSpawn = false;
-            playerProfile.isDead = true;
-            GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
-        }
-        botProfile.botWasKilled(playerProfile.player);
-
-        if (!playerProfile._botProfile)
-            console.log('OnAIDied "CRITICAL ERROR" | BotProfile was not found on the PlayerProfile');
+    constructor(name: string, isAlpha: boolean = false, isInfected?: boolean) {
+        this.playerName = name;
+        this.isAlphaInfected = isAlpha;
+        this.isInfectedTeam = isInfected;
     }
 }
 
-const survivorBotCallbacks: BotEventCallbacks = {
-    onSpawnCallback: async (eventPlayer: mod.Player, botProfile: BotProfile) => {
-        SurvivorBotLogic(eventPlayer);
-        AISpawnHandler.AssignAIEquipment(eventPlayer, TeamNameString.Survivors);
-        ScoreboardUI.GlobalUpdate(TeamNameString.Survivors);
-    },
-    onDeathCallback: async (player: mod.Player, existingBotProfile: BotProfile) => {
-        const playerObjId = mod.GetObjId(player);
-        console.log(`survivorBotCallbacks | onDeathCallback | Bot(${playerObjId}) as Survivor(${existingBotProfile.playerName}) died!`);
-        if (GameHandler.gameState === GameState.EndOfRound) {
-            console.log('a bot was spawned during cleanup. Returning.');
-            return;
+/** Per-slot tick state owned by an InfectedBotSlot. Cleared on every respawn. */
+interface InfectedBotTickState {
+    target?: mod.Player;
+    lastMoveIssuedAt: number;
+    lastMovePos?: mod.Vector;
+    nextTickAt: number;
+    lastMoveSpeed?: mod.MoveSpeed;
+    shootingEnabled?: boolean;
+    targetingEnabled?: boolean;
+    trackedVehicle?: mod.Vehicle;
+    leapInProgress?: boolean;
+    inAreaTrigger?: boolean;
+    lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
+}
+
+/** One slot per spawner in INFECTED_AI_SPAWNERS (plus PARACHUTE_INFECTED_SPAWNERS when enabled). Persists across deaths. */
+class InfectedBotSlot {
+    slotIndex: number;
+    assignedSpawnerID: number;
+    name: string;
+    isAlpha: boolean = false;
+    /** True when this slot was drawn from PARACHUTE_INFECTED_SPAWNERS; spawns with AIParachuteBehavior on round start. */
+    isParachuteSpawner: boolean = false;
+    state: BotSlotState = BotSlotState.Idle;
+    player?: mod.Player;
+    playerObjID?: number;
+    pendingSpawnerID?: number;
+    pendingSpawnStartedAt?: number;
+    respawnDueAt?: number;
+    spawnToken: number = 0;
+    tick: InfectedBotTickState = { lastMoveIssuedAt: 0, nextTickAt: 0 };
+
+    static slots: InfectedBotSlot[] = [];
+    static byObjID: Map<number, InfectedBotSlot> = new Map();
+    static pendingBySpawnerID: Map<number, InfectedBotSlot> = new Map();
+    /** Tracks dead bots by their last ObjID until the spawner unspawns the body (OnPlayerLeaveGame). */
+    static deadByObjID: Map<number, InfectedBotSlot> = new Map();
+
+    constructor(index: number, name: string, assignedSpawnerID: number, isParachuteSpawner: boolean = false) {
+        this.slotIndex = index;
+        this.name = name;
+        this.assignedSpawnerID = assignedSpawnerID;
+        this.isParachuteSpawner = isParachuteSpawner;
+    }
+
+    static InitSlots(): void {
+        InfectedBotSlot.slots = [];
+        InfectedBotSlot.byObjID.clear();
+        InfectedBotSlot.pendingBySpawnerID.clear();
+        InfectedBotSlot.deadByObjID.clear();
+        for (let i = 0; i < INFECTED_AI_SPAWNERS.length; i++) {
+            const id = INFECTED_AI_SPAWNERS[i];
+            const name = BOT_NAME_MAP.get(id) ?? `infected_bot_${id}`;
+            InfectedBotSlot.slots.push(new InfectedBotSlot(i, name, id, false));
         }
-        // handle survivor count updates when killed to become alpha, or during the round when infected  
-        if (GameHandler.gameState === GameState.GameRoundIsRunning || GameHandler.gameState === GameState.GameStartCountdown) {
-            if (GameHandler.gameState === GameState.GameRoundIsRunning && !GameHandler.suspendWinChecks) {
-                // only play sounds if win checks are not suspended (e.g., briefly after countdown/alpha selection)
-                Helpers.PlaySoundFX(SFX_SURVIVOR_LOST, 1, SURVIVOR_TEAM);
-                Helpers.PlaySoundFX(SFX_POSITIVE, 1, INFECTED_TEAM);
+        if (GameHandler.parachuteSpawnersEnabled) {
+            const baseLen = INFECTED_AI_SPAWNERS.length;
+            for (let i = 0; i < PARACHUTE_INFECTED_SPAWNERS.length; i++) {
+                const id = PARACHUTE_INFECTED_SPAWNERS[i];
+                const name = BOT_NAME_MAP.get(id) ?? `infected_bot_${id}`;
+                InfectedBotSlot.slots.push(new InfectedBotSlot(baseLen + i, name, id, true));
             }
-            // increment persistent infectedCount only if we haven't already marked this bot as infected
-            if (!existingBotProfile.isInfectedTeam) {
-                existingBotProfile.isInfectedTeam = true;
-                GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
-                console.log(`survivorBotCallbacks | survivor converted to infected -> infectedCount: ${GameHandler.infectedCount}`);
-                const pp = PlayerProfile.Get(player);
-                if (pp) {
-                    pp.isInfectedTeam = true;
+            console.log(`InfectedBotSlot.InitSlots | Parachute pool enabled: added ${PARACHUTE_INFECTED_SPAWNERS.length} parachute slot(s). Total slots: ${InfectedBotSlot.slots.length}`);
+        }
+    }
+
+    static GetByObjID(objID: number): InfectedBotSlot | undefined {
+        return InfectedBotSlot.byObjID.get(objID);
+    }
+
+    static GetAliveCount(): number {
+        return InfectedBotSlot.slots.filter(s => s.state === BotSlotState.Alive).length;
+    }
+
+    static ResetAll(): void {
+        InfectedBotSlot.byObjID.clear();
+        InfectedBotSlot.pendingBySpawnerID.clear();
+        InfectedBotSlot.deadByObjID.clear();
+        for (const slot of InfectedBotSlot.slots) {
+            slot.state = BotSlotState.Idle;
+            slot.player = undefined;
+            slot.playerObjID = undefined;
+            slot.pendingSpawnerID = undefined;
+            slot.pendingSpawnStartedAt = undefined;
+            slot.respawnDueAt = undefined;
+            slot.spawnToken = 0;
+            slot.isAlpha = false;
+            slot.resetTick();
+        }
+    }
+
+    resetTick(): void {
+        this.tick = { lastMoveIssuedAt: 0, nextTickAt: 0 };
+    }
+
+    /** Queues a respawn after INFECTED_RESPAWN_TIME. Called once OnPlayerLeaveGame confirms the body is gone. */
+    startRespawnTimer(): void {
+        const respawnDelay = GameHandler.survivorsCount <= 1
+            ? INFECTED_RESPAWN_TIME_LAST_MAN
+            : INFECTED_RESPAWN_TIME;
+        this.respawnDueAt = (Date.now() / 1000) + respawnDelay;
+        console.log(`InfectedBotSlot[${this.slotIndex}] | Respawn in ${respawnDelay}s`);
+        (async () => {
+            await mod.Wait(respawnDelay);
+            if (GameHandler.gameState !== GameState.GameRoundIsRunning) {
+                if (this.state === BotSlotState.DeadAwaitingRespawn) {
+                    this.state = BotSlotState.Idle;
+                    this.respawnDueAt = undefined;
                 }
+                return;
             }
-            GameHandler.RecalculateCounts();
-            GameHandler.DisplayUpdatedSurvivorCountNotification();
-            if (GameHandler.survivorsCount === 5) {
-                GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.final_five));
+            if (this.state !== BotSlotState.DeadAwaitingRespawn) return;
+            this.Respawn();
+        })();
+    }
+
+    HandleSpawned(player: mod.Player, playerObjID: number, spawnerObjID: number): void {
+        // Detect ObjID reuse: if another slot already claims this ObjID it has been orphaned
+        // by the engine recycling the ID for this new bot. Evict it so it can respawn.
+        const collidingSlot = InfectedBotSlot.byObjID.get(playerObjID);
+        if (collidingSlot && collidingSlot !== this) {
+            console.log(`InfectedBotSlot[${this.slotIndex}] | ObjID(${playerObjID}) reuse: evicting orphaned slot[${collidingSlot.slotIndex}]`);
+            InfectedBotSlot.byObjID.delete(playerObjID);
+            collidingSlot.player = undefined;
+            collidingSlot.playerObjID = undefined;
+            collidingSlot.resetTick();
+            if (GameHandler.gameState === GameState.GameRoundIsRunning) {
+                collidingSlot.state = BotSlotState.DeadAwaitingRespawn;
+                collidingSlot.startRespawnTimer();
+            } else {
+                collidingSlot.state = BotSlotState.Idle;
             }
-            GameHandler.CheckWinCondition();
         }
 
-        let spawnerObjID = AISpawnHandler.GetSequentialInfectedSpawnerID(); // get the next value in a shuffled spawn array for infected
-        const fallbackName = "infected_bot_name";
-        if (!spawnerObjID)
-            return;
+        InfectedBotSlot.pendingBySpawnerID.delete(spawnerObjID);
+        AISpawnHandler.spawnerLock.delete(spawnerObjID);
+        this.pendingSpawnerID = undefined;
+        this.pendingSpawnStartedAt = undefined;
+        this.respawnDueAt = undefined;
+        this.player = player;
+        this.playerObjID = playerObjID;
+        this.state = BotSlotState.Alive;
+        this.resetTick();
+        this.tick.nextTickAt = (Date.now() / 1000) + AI_BOT_TICK_SECONDS * 2;
+        InfectedBotSlot.byObjID.set(playerObjID, this);
+        console.log(`InfectedBotSlot[${this.slotIndex}] | Spawned Player(${playerObjID}) on spawner(${spawnerObjID}) state=${this.state} alpha=${this.isAlpha}`);
 
-        existingBotProfile.playerStats && existingBotProfile.playerStats.deaths++ && existingBotProfile.UpdatePlayerScoreboard(player);
-        let botNameStringkey = BOT_NAME_MAP.get(spawnerObjID);
-        const spawnerObj = mod.GetSpawner(spawnerObjID);
-        let options: BotOptions = {
-            playerName: botNameStringkey ? botNameStringkey : fallbackName,
-            teamName: "infected",
-            health: 110,
-            speedMultiplier: 1,
-            spawnerObjID: spawnerObjID,
-            spawnerObject: spawnerObj,
-            isInitialSpawn: true, // becomes true since this is the first time they spawn as infected
-            isInfectedTeam: true,
-            isAlphaInfected: existingBotProfile.isAlphaInfected,
-            playerStats: existingBotProfile.playerStats ?? INITIAL_STATS
+        const pp = PlayerProfile.Get(player, spawnerObjID);
+        if (pp) {
+            pp.isInfectedTeam = true;
+            pp.isAlphaInfected = this.isAlpha;
+            pp.isDead = false;
+            pp.playerID = playerObjID;
+            pp.player = player;
+            pp._botProfile = new BotProfile(this.name, this.isAlpha, true);
+            PlayerProfile._allPlayers.set(playerObjID, pp);
+            PlayerProfile._deployedPlayers.set(playerObjID, pp);
         }
 
-        let newBotProfile = BotProfile.GenerateBotParams(options);
-        AISpawnHandler.AddToSpawnQueue(newBotProfile);
-    },
-    onHit: async () => {
-    },
-};
+        mod.AIIdleBehavior(player);
 
-const infectedBotCallbacks: BotEventCallbacks = {
-    onSpawnCallback: async (eventPlayer: mod.Player, botProfile: BotProfile) => {
-        LogAlphaState('infectedBotCallbacks.onSpawnCallback | before indicator', eventPlayer, botProfile._playerProfile, botProfile);
-        if (botProfile.isInitialSpawn) {
-            GameHandler.RecalculateCounts();
-            ScoreboardUI.GlobalUpdate(TeamNameString.Both);
-            botProfile.isInitialSpawn = false;
+        // Increment the spawn token so any still-pending async block from a prior spawn of
+        // this slot detects it is stale and aborts, preventing double-initialization races.
+        this.spawnToken++;
+        const token = this.spawnToken;
+
+        (async () => {
+            await mod.Wait(0.5);
+            // stripping all the extra AI flags here and just using per-tick logic. 
+            // might be causing problems sending too many commands at once
+            if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
+            mod.SetPlayerMaxHealth(player, this.isAlpha ? 300 : 50);
+            if (this.isParachuteSpawner) {
+                // Parachute drop: let the bot glide in before switching to normal pursuit behavior.
+                mod.AIParachuteBehavior(player);
+                await mod.Wait(5);
+                if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
+            }
+            // mod.AISetMoveSpeed(player, this.isAlpha ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run);
+            await AISpawnHandler.AssignAIEquipment(player, TeamNameString.Infected);
+            if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
+            ShowAlphaInfectedIndicator(player);
+            ShowAlphaInfectedDebugIndicator(player);
+            if (this.isAlpha) {
+                InitLeapSystem(player);
+            }
+        })();
+        GameHandler.RebuildPlayerLists();
+    }
+
+    HandleDeath(): void {
+        const prevObjID = this.playerObjID;
+        if (prevObjID !== undefined) {
+            InfectedBotSlot.byObjID.delete(prevObjID);
         }
-        AISpawnHandler.AssignAIEquipment(eventPlayer, TeamNameString.Infected);
+        this.player = undefined;
+        this.playerObjID = undefined;
+        this.pendingSpawnerID = undefined;
+        this.pendingSpawnStartedAt = undefined;
+        this.resetTick();
 
-        ShowAlphaInfectedIndicator(eventPlayer);
-        ShowAlphaInfectedDebugIndicator(eventPlayer);
-        InfectedIconDisplay(eventPlayer);
-    },
-    onDeathCallback: async (player: mod.Player, existingBotProfile: BotProfile) => {
         if (GameHandler.gameState !== GameState.GameRoundIsRunning) {
+            this.state = BotSlotState.Idle;
+            this.respawnDueAt = undefined;
             return;
         }
 
-        // get the next value in a shuffled spawn array for infected
-        let spawnerObjID = AISpawnHandler.GetSequentialInfectedSpawnerID();
-        if (!spawnerObjID)
-            spawnerObjID = AISpawnHandler.GetRandomSpawnerID(TeamNameString.Infected);
-        const spawnerObj = mod.GetSpawner(spawnerObjID);
-        if (existingBotProfile.playerStats) {
-            existingBotProfile.playerStats.deaths++;
-            existingBotProfile.UpdatePlayerScoreboard(player);
+        this.state = BotSlotState.DeadAwaitingRespawn;
+        if (prevObjID !== undefined) {
+            InfectedBotSlot.deadByObjID.set(prevObjID, this);
+            // Watchdog fallback: if OnPlayerLeaveGame never fires (engine edge case),
+            // CheckStuckInfectedSlots will call Respawn() once this timeout expires.
+            this.respawnDueAt = (Date.now() / 1000) + INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS;
+            console.log(`InfectedBotSlot[${this.slotIndex}] | Died Player(${prevObjID}) -> awaiting body cleanup (OnPlayerLeaveGame) before respawn`);
+        } else {
+            // No ObjID tracked: can't wait for LeaveGame. Start timer immediately.
+            console.log(`InfectedBotSlot[${this.slotIndex}] | Died (no ObjID) -> starting respawn timer immediately`);
+            this.startRespawnTimer();
         }
-        let options: BotOptions = {
-            playerName: existingBotProfile.playerName,
-            teamName: TeamNameString.Infected,
-            spawnerObjID: spawnerObjID,
-            spawnerObject: spawnerObj,
-            health: 110,
-            speedMultiplier: 0.9,
-            isInitialSpawn: false,
-            isInfectedTeam: true,
-            isAlphaInfected: existingBotProfile.isAlphaInfected,
-            playerStats: existingBotProfile.playerStats ?? INITIAL_STATS
+    }
+
+    Respawn(): void {
+        if (this.state === BotSlotState.PendingSpawn) {
+            // Another caller (watchdog or async block) already initiated this spawn. Do not double-spawn.
+            console.log(`InfectedBotSlot[${this.slotIndex}] | Respawn() skipped slot already PendingSpawn on spawner(${this.pendingSpawnerID ?? this.assignedSpawnerID})`);
+            return;
         }
-        let newBotProfile = BotProfile.GenerateBotParams(options);
-        AISpawnHandler.AddToSpawnQueue(newBotProfile);
-    },
-    onHit: async () => { } // unused
-};
+        // Clear any dead-body tracking so OnPlayerLeaveGame won't start a redundant timer
+        // after the watchdog or another path already triggered Respawn().
+        for (const [id, s] of InfectedBotSlot.deadByObjID) {
+            if (s === this) { InfectedBotSlot.deadByObjID.delete(id); break; }
+        }
+        this.respawnDueAt = undefined;
+        const spawnerID = this.assignedSpawnerID;
+        if (AISpawnHandler.spawnerLock.has(spawnerID)) {
+            // this slot exclusively owns its spawner, soclear and proceed.
+            console.log(`InfectedBotSlot[${this.slotIndex}] | Cleared stale lock on assigned spawner(${spawnerID})`);
+            AISpawnHandler.spawnerLock.delete(spawnerID);
+            if (InfectedBotSlot.pendingBySpawnerID.get(spawnerID) === this) {
+                InfectedBotSlot.pendingBySpawnerID.delete(spawnerID);
+            }
+        }
+        const spawnerObj = mod.GetSpawner(spawnerID);
+        this.state = BotSlotState.PendingSpawn;
+        this.pendingSpawnerID = spawnerID;
+        this.pendingSpawnStartedAt = Date.now() / 1000;
+        AISpawnHandler.spawnerLock.add(spawnerID);
+        InfectedBotSlot.pendingBySpawnerID.set(spawnerID, this);
+        console.log(`InfectedBotSlot[${this.slotIndex}] | Respawn requested on spawner(${spawnerID})`);
+        const botName = MakeMessage(this.name);
+        mod.SpawnAIFromAISpawner(spawnerObj, mod.SoldierClass.Recon, botName, INFECTED_TEAM);
+    }
+}
+
+/** One slot per spawner in SURVIVOR_AI_SPAWNERS. Spawned once per round; converts to infected on death. */
+class SurvivorBotSlot {
+    slotIndex: number;
+    spawnerID: number;
+    name: string;
+    state: BotSlotState = BotSlotState.Idle;
+    player?: mod.Player;
+    playerObjID?: number;
+
+    static slots: SurvivorBotSlot[] = [];
+    static byObjID: Map<number, SurvivorBotSlot> = new Map();
+    static pendingBySpawnerID: Map<number, SurvivorBotSlot> = new Map();
+
+    constructor(index: number, spawnerID: number, name: string) {
+        this.slotIndex = index;
+        this.spawnerID = spawnerID;
+        this.name = name;
+    }
+
+    static InitSlots(): void {
+        SurvivorBotSlot.slots = [];
+        SurvivorBotSlot.byObjID.clear();
+        SurvivorBotSlot.pendingBySpawnerID.clear();
+        for (let i = 0; i < SURVIVOR_AI_SPAWNERS.length; i++) {
+            const id = SURVIVOR_AI_SPAWNERS[i];
+            const name = BOT_NAME_MAP.get(id) ?? `survivor_bot_${id}`;
+            SurvivorBotSlot.slots.push(new SurvivorBotSlot(i, id, name));
+        }
+    }
+
+    static GetByObjID(objID: number): SurvivorBotSlot | undefined {
+        return SurvivorBotSlot.byObjID.get(objID);
+    }
+
+    static ResetAll(): void {
+        SurvivorBotSlot.byObjID.clear();
+        SurvivorBotSlot.pendingBySpawnerID.clear();
+        for (const slot of SurvivorBotSlot.slots) {
+            slot.state = BotSlotState.Idle;
+            slot.player = undefined;
+            slot.playerObjID = undefined;
+        }
+    }
+
+    HandleSpawned(player: mod.Player, playerObjID: number, spawnerObjID: number): void {
+        SurvivorBotSlot.pendingBySpawnerID.delete(spawnerObjID);
+        AISpawnHandler.spawnerLock.delete(spawnerObjID);
+        this.player = player;
+        this.playerObjID = playerObjID;
+        this.state = BotSlotState.Alive;
+        SurvivorBotSlot.byObjID.set(playerObjID, this);
+
+        const pp = PlayerProfile.Get(player, spawnerObjID);
+        if (pp) {
+            pp.isInfectedTeam = false;
+            pp.isAlphaInfected = false;
+            pp.isDead = false;
+            pp.playerID = playerObjID;
+            pp.player = player;
+            pp._botProfile = new BotProfile(this.name, false, false);
+            PlayerProfile._allPlayers.set(playerObjID, pp);
+            PlayerProfile._deployedPlayers.set(playerObjID, pp);
+        }
+
+        (async () => {
+            await mod.Wait(0.5);
+            if (!PlayerIsAliveAndValid(player)) return;
+            mod.AIEnableShooting(player, true);
+            mod.SetPlayerMaxHealth(player, 50);
+            mod.AISetMoveSpeed(player, mod.MoveSpeed.InvestigateRun);
+            mod.AISetStance(player, mod.Stance.Stand);
+            await AISpawnHandler.AssignAIEquipment(player, TeamNameString.Survivors);
+            this.RunBehavior(player);
+        })();
+        GameHandler.RebuildPlayerLists();
+    }
+
+    RunBehavior(player: mod.Player): void {
+        (async () => {
+            while (GameHandler.gameState !== GameState.GameRoundIsRunning) {
+                await mod.Wait(0.5);
+                if (GameHandler.gameState === GameState.EndOfRound) return;
+            }
+            if (!PlayerIsAliveAndValid(player)) return;
+            const randIndex = Math.floor(Math.random() * RESUPPLY_INTERACT_POINTS.length);
+            const randSupplyPoint = RESUPPLY_INTERACT_POINTS[randIndex];
+            const resupplyPos = RESUPPLY_WORLD_LOCATION.get(randSupplyPoint);
+            if (resupplyPos) {
+                mod.AIDefendPositionBehavior(player, resupplyPos, AI_MIN_DEF_RANGE, AI_LEASH_RANGE);
+            } else {
+                mod.AIBattlefieldBehavior(player);
+            }
+        })();
+    }
+
+    HandleDeath(wasConvertedToInfected: boolean = false, isAlpha: boolean = false): void {
+        const prevObjID = this.playerObjID;
+        if (prevObjID !== undefined) {
+            SurvivorBotSlot.byObjID.delete(prevObjID);
+        }
+        this.state = BotSlotState.Idle;
+        this.player = undefined;
+        this.playerObjID = undefined;
+        GameHandler.RebuildPlayerLists();
+
+        if (!wasConvertedToInfected) return;
+        if (GameHandler.gameState !== GameState.GameStartCountdown &&
+            GameHandler.gameState !== GameState.GameRoundIsRunning) return;
+
+        // Claim a free infected slot and queue its respawn as infected.
+        const freeSlot = InfectedBotSlot.slots.find(s => s.state === BotSlotState.Idle);
+        if (!freeSlot) {
+            console.log(`SurvivorBotSlot[${this.slotIndex}] | HandleDeath: no free infected slot`);
+            return;
+        }
+        freeSlot.name = this.name;
+        freeSlot.isAlpha = isAlpha;
+        freeSlot.state = BotSlotState.DeadAwaitingRespawn;
+
+        const respawnDelay = GameHandler.survivorsCount <= 1
+            ? INFECTED_RESPAWN_TIME_LAST_MAN
+            : INFECTED_RESPAWN_TIME;
+        freeSlot.respawnDueAt = (Date.now() / 1000) + respawnDelay;
+        console.log(`SurvivorBotSlot[${this.slotIndex}] | Converted -> InfectedBotSlot[${freeSlot.slotIndex}] respawn in ${respawnDelay}s alpha=${isAlpha}`);
+
+        (async () => {
+            await mod.Wait(respawnDelay);
+            if (freeSlot.state === BotSlotState.DeadAwaitingRespawn &&
+                GameHandler.gameState === GameState.GameRoundIsRunning) {
+                freeSlot.Respawn();
+            } else if (freeSlot.state === BotSlotState.DeadAwaitingRespawn) {
+                // Round ended before respawn fired release the slot.
+                freeSlot.state = BotSlotState.Idle;
+                freeSlot.respawnDueAt = undefined;
+            }
+        })();
+    }
+
+    Spawn(): void {
+        if (this.state !== BotSlotState.Idle) return;
+        if (AISpawnHandler.spawnerLock.has(this.spawnerID)) {
+            console.log(`SurvivorBotSlot[${this.slotIndex}] | Spawn: spawner ${this.spawnerID} is locked, skipping`);
+            return;
+        }
+        const spawnerObj = mod.GetSpawner(this.spawnerID);
+        this.state = BotSlotState.PendingSpawn;
+        AISpawnHandler.spawnerLock.add(this.spawnerID);
+        SurvivorBotSlot.pendingBySpawnerID.set(this.spawnerID, this);
+        const botName = MakeMessage(this.name);
+        mod.SpawnAIFromAISpawner(spawnerObj, mod.SoldierClass.Assault, botName, SURVIVOR_TEAM);
+        // could setting this on the spawnerobj every time a bot spawns, be the cause of bot decay issues?
+        // mod.SetUnspawnDelayInSeconds(spawnerObj, 2);
+    }
+}
 
 class AISpawnHandler {
-    /**
-     * Map tracking BotProfiles awaiting spawn, keyed by spawnerObjID.
-     * Used for direct O(1) lookup when OnBotSpawnFromSpawner is called.
-     * @type {Map<number, BotProfile>}
-     * 
-     * @usage
-     * - When ProcessBotSpawnQueue spawns a bot: spawnsInUse.set(botProfile.spawnerObjID, botProfile)
-     * - When OnBotSpawnFromSpawner matches spawn: const botProfile = spawnsInUse.get(spawnerObjID)
-     * - After successful match: spawnsInUse.delete(spawnerObjID)
-     * 
-     * @remarks
-     * This Map provides fast lookups for linking newly spawned AI with their awaiting BotProfiles.
-     * Replaces the previous Array<number> approach which required separate BotProfile lookups.
-     */
-    static spawnsInUse = new Map<number, BotProfile>();
-    static awaitingSpawnQueue = new Array<BotProfile>();
-    static shuffledInfectedSpawns = new Array<number>();
-    static infectedSpawnIndex: number = 0;
-    static isProcessingSpawnQueue: boolean = false;
+    /** Prevents two concurrent spawns from using the same spawner ID. */
+    static spawnerLock: Set<number> = new Set();
     static startingInfectedChosen: boolean = false;
     static startingSurvivorsChosen: boolean = false;
 
-    /**
-     * Initializes the starting survivor spawn profiles and adds them to the spawn queue.
-     * 
-     * This method generates bot profiles for initial survivor spawns based on predefined spawner locations.
-     * It ensures that starting survivors are only initialized once by checking the `startingSurvivorsChosen` flag.
-     * Each survivor bot is configured with specific attributes including name, team, health, speed, and spawn location.
-     * 
-     * @param amountToSpawnOverride - Optional override for the number of survivors to spawn. 
-     *                                 If not provided, defaults to `GameHandler.survivorSlotsToBackfill`.
-     * 
-     * @remarks
-     * - This method will return early if starting survivors have already been chosen.
-     * - Each bot is assigned a name from `BOT_NAME_MAP` based on their spawner object ID, 
-     *   or falls back to "survivor_bot_name" if no mapping exists.
-     * - All spawned survivors start with 50 health, 0.8 speed multiplier, and initial stats.
-     * - The `startingSurvivorsChosen` flag is set to true after processing to prevent duplicate initialization.
-     * 
-     * @returns void
-     */
     static InitializeStartingSurvivorSpawns(amountToSpawnOverride?: number): void {
-
-        if (AISpawnHandler.startingSurvivorsChosen) {
-            return;
-        }
-        let amountToSpawn = amountToSpawnOverride ? amountToSpawnOverride : GameHandler.survivorSlotsToBackfill;
-        const generatedSpawnArray = Helpers.GenerateArray(amountToSpawn, SURVIVOR_AI_SPAWNERS[0]);
-        for (let i = 0; i < amountToSpawn; i++) {
-            const fallbackName = "survivor_bot_name";
-            const spawnerObjID = generatedSpawnArray[i];
-            const spawnerObj = mod.GetSpawner(spawnerObjID);
-            let botNameStringkey = BOT_NAME_MAP.get(spawnerObjID);
-            let botName = botNameStringkey ? botNameStringkey : fallbackName
-            let options: BotOptions = {
-                playerName: botName,
-                teamName: "survivors",
-                health: 50,
-                speedMultiplier: 0.8,
-                spawnerObjID: spawnerObjID,
-                spawnerObject: spawnerObj,
-                isInfectedTeam: false,
-                isInitialSpawn: true,
-                playerStats: INITIAL_STATS
+        if (AISpawnHandler.startingSurvivorsChosen) return;
+        if (SurvivorBotSlot.slots.length === 0) SurvivorBotSlot.InitSlots();
+        const amount = amountToSpawnOverride ?? GameHandler.aiSlotsToBackfill;
+        let spawned = 0;
+        for (const slot of SurvivorBotSlot.slots) {
+            if (spawned >= amount) break;
+            if (slot.state === BotSlotState.Idle) {
+                slot.Spawn();
+                spawned++;
             }
-            let newBotProfile = BotProfile.GenerateBotParams(options)
-            AISpawnHandler.AddToSpawnQueue(newBotProfile);
-            AISpawnHandler.startingSurvivorsChosen = true;
         }
+        AISpawnHandler.startingSurvivorsChosen = true;
     }
 
-    static InitializeStartingInfectedSpawns(amountToSpawn: number) {
-        if (AISpawnHandler.startingInfectedChosen) {
-            return;
-        }
-        const generatedSpawnArray = Helpers.GenerateArray(amountToSpawn, INFECTED_AI_SPAWNERS[0]);
-        for (let i = 0; i < amountToSpawn; i++) {
-            const fallbackName = "infected_bot_name";
-            const spawnerObjID = generatedSpawnArray[i];
-            const spawnerObj = mod.GetSpawner(spawnerObjID);
-            let botNameStringkey = BOT_NAME_MAP.get(spawnerObjID);
-            let botName = botNameStringkey ? botNameStringkey : fallbackName
-            let options: BotOptions = {
-                playerName: botName,
-                teamName: TeamNameString.Infected,
-                spawnerObjID: spawnerObjID,
-                spawnerObject: spawnerObj,
-                health: 110,
-                speedMultiplier: 0.9,
-                isInitialSpawn: true,
-                isInfectedTeam: true,
-                playerStats: INITIAL_STATS
+    static InitializeStartingInfectedSpawns(amountToSpawn: number): void {
+        if (AISpawnHandler.startingInfectedChosen) return;
+        // Always re-init slots each round so parachute pool changes (enabled/disabled) take effect.
+        InfectedBotSlot.InitSlots();
+        let spawned = 0;
+        for (const slot of InfectedBotSlot.slots) {
+            if (spawned >= amountToSpawn) break;
+            if (slot.state === BotSlotState.Idle) {
+                slot.Respawn();
+                spawned++;
             }
-            let newBotProfile = BotProfile.GenerateBotParams(options)
-            AISpawnHandler.AddToSpawnQueue(newBotProfile);
-            AISpawnHandler.startingInfectedChosen = true;
         }
-    }
-    static GetSequentialInfectedSpawnerID() {
-        let tempArray: Array<number> = [...AISpawnHandler.shuffledInfectedSpawns];
-        let spawnerObjID = tempArray.shift();
-
-        if (!spawnerObjID) {
-            let shuffledArray = Helpers.ShuffleArray([...INFECTED_AI_SPAWNERS]);
-            AISpawnHandler.shuffledInfectedSpawns = shuffledArray;
-            spawnerObjID = shuffledArray.shift();
-            AISpawnHandler.shuffledInfectedSpawns = shuffledArray;
-            return spawnerObjID;
-        }
-        AISpawnHandler.shuffledInfectedSpawns = tempArray;
-
-        return spawnerObjID;
+        AISpawnHandler.startingInfectedChosen = true;
     }
 
-    static GetRandomSpawnerID(teamName: string): number {
-        const spawnMin = (teamName === TeamNameString.Survivors) ? SURVIVOR_AI_SPAWNERS[0] : INFECTED_AI_SPAWNERS[0];
-        const spawnMax = (teamName === TeamNameString.Survivors) ? SURVIVOR_AI_SPAWNERS[SURVIVOR_AI_SPAWNERS.length - 1] : INFECTED_AI_SPAWNERS[INFECTED_AI_SPAWNERS.length - 1];
-        let spawnerObjID = Helpers.GetRandomSpawnFromRange(spawnMin, spawnMax);
-
-        return spawnerObjID;
-    }
-
-    static SpawnIndividualBot(botProfile: BotProfile) {
-        if (!botProfile.spawnerObject || !botProfile.assignedTeamObj || !botProfile.playerName) {
-            console.log(`SpawnIndividualBot | "CRITICAL ERROR" | One or more of the required props was missing! botProfile.spawnerObject, botProfile.assignedTeamObj, botProfile.playerName`);
-            return;
-        }
-        const botName = MakeMessage(botProfile.playerName);
-        mod.SpawnAIFromAISpawner(botProfile.spawnerObject, botProfile.soldierClass, botName, botProfile.assignedTeamObj);
-        mod.SetUnspawnDelayInSeconds(botProfile.spawnerObject, 2);
-    }
-
-    static async ProcessBotSpawnQueue() {
-        let availableSurvivorSpawns: number[] = [];
-        let availableInfectedSpawns: number[] = [];
-
-        if (AISpawnHandler.isProcessingSpawnQueue) {
-            return;
-        }
-        if (!AISpawnHandler.awaitingSpawnQueue.length) {
-            if (GameHandler.gameState === GameState.PreGame) {
-            }
-            return;
-        }
-        AISpawnHandler.isProcessingSpawnQueue = true;
-
-        // verify spawns are open and separate them by team
-        for (let i = 0; i < ALL_SPAWNS.length; i++) {
-            if (!AISpawnHandler.spawnsInUse.has(ALL_SPAWNS[i])) {
-                (i <= SURVIVOR_AI_SPAWNERS.length) ? availableSurvivorSpawns.push(ALL_SPAWNS[i]) : availableInfectedSpawns.push(ALL_SPAWNS[i]);
-            } else {
-            }
-        }
-        while (true) {
-            if (
-                GameHandler.gameState === GameState.PreGame ||
-                GameHandler.gameState === GameState.GameStartCountdown ||
-                GameHandler.gameState === GameState.GameRoundIsRunning
-            ) {
-                break;
-            }
-            await mod.Wait(3);
-        }
-        // begin spawning bots
-        for (let i = 0; AISpawnHandler.awaitingSpawnQueue.length; i++) {
-            const botAtIndex = AISpawnHandler.awaitingSpawnQueue.shift();
-            if (botAtIndex && botAtIndex.spawnerObjID) {
-                AISpawnHandler.spawnsInUse.set(botAtIndex.spawnerObjID, botAtIndex);
-                AISpawnHandler.SpawnIndividualBot(botAtIndex);
-            }
-        }
-        AISpawnHandler.isProcessingSpawnQueue = false;
+    /** No-op kept for call-site compatibility. Slots self-manage spawning. */
+    static async ProcessBotSpawnQueue(): Promise<void> {
         return;
     }
 
-    static async OnGoingSpawnerCheck() {
-        if (GameHandler.isSpawnCheckRunning) {
-            return;
-        }
+    static async OnGoingSpawnerCheck(): Promise<void> {
+        if (GameHandler.isSpawnCheckRunning) return;
         GameHandler.isSpawnCheckRunning = true;
         while (true) {
             if (GameHandler.gameState !== GameState.GameRoundIsRunning) {
                 GameHandler.isSpawnCheckRunning = false;
                 return;
             }
-            await mod.Wait(GameHandler.survivorsCount === 1 ? INFECTED_RESPAWN_TIME : INFECTED_RESPAWN_TIME_LAST_MAN);
-            AISpawnHandler.ProcessBotSpawnQueue();
+            await mod.Wait(AI_BOT_TICK_SECONDS * 2);
+            AISpawnHandler.CheckStuckInfectedSlots();
+            AISpawnHandler.EnsureInfectedPoolIntegrity();
         }
     }
 
-    static async AssignAIEquipment(player: mod.Player, teamString: string) {
-        if (!PlayerIsAliveAndValid(player)) return
+    static CheckStuckInfectedSlots(): void {
+        const now = Date.now() / 1000;
+        for (const slot of InfectedBotSlot.slots) {
+            if (slot.state === BotSlotState.PendingSpawn) {
+                const spawnerID = slot.pendingSpawnerID;
+                const pendingFor = slot.pendingSpawnStartedAt ? (now - slot.pendingSpawnStartedAt) : 0;
+                const hasPendingMapEntry = spawnerID !== undefined && InfectedBotSlot.pendingBySpawnerID.get(spawnerID) === slot;
+                if (spawnerID === undefined || !hasPendingMapEntry || pendingFor > INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS) {
+                    if (spawnerID !== undefined) {
+                        AISpawnHandler.spawnerLock.delete(spawnerID);
+                        if (InfectedBotSlot.pendingBySpawnerID.get(spawnerID) === slot) {
+                            InfectedBotSlot.pendingBySpawnerID.delete(spawnerID);
+                        }
+                    }
+                    console.log(`CheckStuckInfectedSlots | Recovering slot[${slot.slotIndex}] pending spawn. spawner=${spawnerID ?? -1} pendingFor=${pendingFor.toFixed(2)}s`);
+                    slot.state = BotSlotState.DeadAwaitingRespawn;
+                    slot.pendingSpawnerID = undefined;
+                    slot.pendingSpawnStartedAt = undefined;
+                    slot.Respawn();
+                    continue;
+                }
+            }
 
-        try {
-            mod.RemoveEquipment(player, mod.InventorySlots.PrimaryWeapon);
-            mod.RemoveEquipment(player, mod.InventorySlots.SecondaryWeapon);
-            mod.RemoveEquipment(player, mod.InventorySlots.Throwable);
-            mod.RemoveEquipment(player, mod.InventorySlots.ClassGadget);
-        } catch (e) {
-            console.log(`AssignAIEquipment | removal error for Player(${mod.GetObjId(player)}): ${e}`);
+            if (slot.state === BotSlotState.DeadAwaitingRespawn &&
+                slot.respawnDueAt !== undefined &&
+                now >= slot.respawnDueAt &&
+                !slot.player &&
+                slot.playerObjID === undefined) {
+                console.log(`CheckStuckInfectedSlots | Forcing overdue respawn for slot[${slot.slotIndex}]`);
+                slot.Respawn();
+            }
+        }
+    }
+
+    static EnsureInfectedPoolIntegrity(): void {
+        const humanInfected = GameHandler.GetHumanPlayersOnTeam(INFECTED_TEAM).length;
+        const expectedBotPool = Math.max(
+            0,
+            // Use InfectedBotSlot.slots.length so the parachute pool is included in the cap when active.
+            Math.min(InfectedBotSlot.slots.length, (GameHandler.infectedCount ?? 0) - humanInfected)
+        );
+        const activeOrPendingBotSlots = InfectedBotSlot.slots.filter(s => s.state !== BotSlotState.Idle).length;
+
+        if (activeOrPendingBotSlots >= expectedBotPool) {
+            return;
         }
 
+        let slotsNeeded = expectedBotPool - activeOrPendingBotSlots;
+        for (const slot of InfectedBotSlot.slots) {
+            if (slotsNeeded <= 0) break;
+            if (slot.state !== BotSlotState.Idle) continue;
+
+            slot.isAlpha = false;
+            slot.state = BotSlotState.DeadAwaitingRespawn;
+            slot.respawnDueAt = Date.now() / 1000;
+            console.log(`EnsureInfectedPoolIntegrity | Added slot[${slot.slotIndex}] back to pool. expected=${expectedBotPool} activeOrPending=${activeOrPendingBotSlots}`);
+            slot.Respawn();
+            slotsNeeded--;
+        }
+    }
+
+    static RemoveEquipmentSafe(player: mod.Player, slot: mod.InventorySlots): void {
+        try {
+            mod.RemoveEquipment(player, slot);
+        } catch (e) {
+            // const errorText = String(e);
+            // if (errorText.includes('NoWeaponOnSlot')) {
+            //     return;
+            // }
+            console.log(`AssignAIEquipment | RemoveEquipment failed for Player(${mod.GetObjId(player)}) slot(${slot}) error: ${e}`);
+        }
+    }
+
+    static async AssignAIEquipment(player: mod.Player, teamString: string): Promise<void> {
+        if (!PlayerIsAliveAndValid(player)) return;
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.PrimaryWeapon);
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.SecondaryWeapon);
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.GadgetOne);
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.GadgetTwo);
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.ClassGadget);
+        AISpawnHandler.RemoveEquipmentSafe(player, mod.InventorySlots.Throwable);
         const playerProfile = PlayerProfile.Get(player);
         if (playerProfile) {
             playerProfile.isInfectedTeam = teamString === TeamNameString.Infected;
-            InitializePlayerEquipment(player, playerProfile);
+            await InitializePlayerEquipment(player, playerProfile);
+            if (playerProfile.isInfectedTeam && PlayerIsAliveAndValid(player)) {
+                try {
+                    mod.ForceSwitchInventory(player, mod.InventorySlots.MeleeWeapon);
+                } catch { }
+            }
         }
     }
-    /**
-     * Handles bot spawn events from a spawner object and matches newly spawned AI with awaiting BotProfiles.
-     * 
-     * This method is called when an AI soldier spawns from a spawner in the game.
-     * It retrieves the corresponding BotProfile from spawnsInUse by spawnerObjID and 
-     * establishes the link between the spawned AI (Player) and its BotProfile/PlayerProfile.
-     * 
-     * @param eventPlayer - The player object representing the spawned bot
-     * @param spawnerObjID - The object ID of the spawner that created this bot; used as lookup key in spawnsInUse
-     * 
-     * @returns A promise that resolves when spawn handling is complete
-     * 
-     * @flow
-     * 1. Get ObjID: Retry logic (15 attempts, 0.15s intervals) to retrieve player ObjID
-     * 2. Lookup BotProfile: Direct retrieval from spawnsInUse Map using spawnerObjID as key
-     *    - Primary: spawnsInUse.get(spawnerObjID) - O(1) direct lookup
-     *    - Fallback: BotProfile.GetBySpawner(spawnerObjID) if not in awaiting queue
-     * 3. Retrieve/Create PlayerProfile: PlayerProfile.Get() establishes player record
-     * 4. Sync State: Update PlayerProfile from BotProfile (team, initialSpawn, spawnerObjID)
-     * 5. Link Profiles: Set bidirectional references between BotProfile and PlayerProfile
-     * 6. Initialize: Call botProfile.InitBehavior() with synced profile data
-     * 
-     * @remarks
-     * - Skips processing if the player is not an AI soldier or if round has ended
-     * - spawnsInUse is a Map<number, BotProfile> that tracks BotProfiles awaiting spawn
-     * - BotProfile is the authoritative source of truth for team, callbacks, and spawn state
-     * - Successfully matched bots are removed from spawnsInUse via .delete(spawnerObjID)
-     * - Fallback lookup handles unexpected spawns or edge cases where timing issues occur
-     * - All profile synchronization flows from BotProfile -> PlayerProfile (one-way)
-     * 
-     * @see AISpawnHandler.ProcessBotSpawnQueue - Populates spawnsInUse with BotProfiles to spawn
-     * @see BotProfile.GetBySpawner - Legacy lookup method used as fallback
-     */
-    static async OnBotSpawnFromSpawner(eventPlayer: mod.Player, spawnerObjID: number) {
 
+    static async OnBotSpawnFromSpawner(eventPlayer: mod.Player, spawnerObjID: number): Promise<void> {
         if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
             GameHandler.gameState === GameState.EndOfRound) {
             return;
         }
 
-        // Retry logic for game engine timing - ObjID assignment may be delayed
-        let playerObjID = await Helpers.GetObjIdWithRetry(eventPlayer, 4, 0.15);
+        const infectedSlot = InfectedBotSlot.pendingBySpawnerID.get(spawnerObjID);
+        const survivorSlot = SurvivorBotSlot.pendingBySpawnerID.get(spawnerObjID);
+
+        const playerObjID = mod.GetObjId(eventPlayer);
         if (playerObjID === -1) {
-            return;
-        }
-
-        // === RETRIEVE AUTHORITATIVE BOT PROFILE FROM SPAWNS AWAITING SPAWN ===
-        // Look up the BotProfile by spawnerObjID from spawnsInUse to match newly spawned AI
-        let botProfile = AISpawnHandler.spawnsInUse.get(spawnerObjID);
-
-        if (botProfile) {
-            // Successfully matched BotProfile with spawned AI - remove from spawnsInUse
-            AISpawnHandler.spawnsInUse.delete(spawnerObjID);
-        } else {
-            if (!botProfile) {
-                console.log(`OnBotSpawnFromSpawner "CRITICAL ERROR" | BotProfile not found for Player(${playerObjID}) at spawnerObjID(${spawnerObjID})`);
+            // Player is dead/invalid -- release the spawner lock and clean up the slot.
+            AISpawnHandler.spawnerLock.delete(spawnerObjID);
+            if (infectedSlot) {
+                InfectedBotSlot.pendingBySpawnerID.delete(spawnerObjID);
+                infectedSlot.state = BotSlotState.DeadAwaitingRespawn;
+                infectedSlot.pendingSpawnerID = undefined;
+                infectedSlot.pendingSpawnStartedAt = undefined;
+                console.log(`OnBotSpawnFromSpawner | ObjID -1 for infected slot [${infectedSlot.name}] on spawner(${spawnerObjID}), requeueing spawn`);
+                infectedSlot.Respawn();
                 return;
             }
-        }
-
-        // botProfile is now guaranteed to be defined (either from spawnsInUse or fallback lookup)
-        const resolvedBotProfile = botProfile;
-
-        // === GET OR CREATE PLAYER PROFILE ===
-        const playerProfile = PlayerProfile.Get(eventPlayer, spawnerObjID);
-
-        if (!playerProfile) {
-            console.log(`OnBotSpawnFromSpawner "CRITICAL ERROR" | PlayerProfile creation failed for Player(${playerObjID})`);
+            if (survivorSlot) {
+                SurvivorBotSlot.pendingBySpawnerID.delete(spawnerObjID);
+                survivorSlot.state = BotSlotState.Idle;
+            }
+            console.log(`OnBotSpawnFromSpawner | ObjID -1 for spawner(${spawnerObjID}), skipping`);
             return;
         }
 
-        // === SYNC FROM BOT PROFILE (authoritative source of truth) ===
-
-        // 1. Team flag: sync from BotProfile -> PlayerProfile
-        if (playerProfile.isInfectedTeam !== resolvedBotProfile.isInfectedTeam) {
-            playerProfile.isInfectedTeam = resolvedBotProfile.isInfectedTeam;
+        if (infectedSlot) {
+            infectedSlot.HandleSpawned(eventPlayer, playerObjID, spawnerObjID);
+            return;
         }
 
-        // 2. Initial spawn flag: sync from BotProfile -> PlayerProfile (BotProfile is source of truth for spawn lifecycle)
-        if (playerProfile.isInitialSpawn !== resolvedBotProfile.isInitialSpawn) {
-            playerProfile.isInitialSpawn = resolvedBotProfile.isInitialSpawn;
+        if (survivorSlot) {
+            survivorSlot.HandleSpawned(eventPlayer, playerObjID, spawnerObjID);
+            return;
         }
 
-        // 3. Ensure spawnerObjID is set on PlayerProfile for reference
-        if (playerProfile.spawnerObjID !== spawnerObjID) {
-            playerProfile.spawnerObjID = spawnerObjID;
-        }
-
-        // 4. Alpha infected flag: sync from BotProfile -> PlayerProfile
-        if (playerProfile.isAlphaInfected !== resolvedBotProfile.isAlphaInfected) {
-            playerProfile.isAlphaInfected = resolvedBotProfile.isAlphaInfected;
-        }
-        LogAlphaState('OnBotSpawnFromSpawner | post-sync', eventPlayer, playerProfile, resolvedBotProfile);
-
-        // Update player references in BotProfile
-        resolvedBotProfile._playerObjID = playerObjID;
-        resolvedBotProfile._player = eventPlayer;
-        resolvedBotProfile._playerProfile = playerProfile;
-
-        // Update player references and flags
-        playerProfile.playerID = playerObjID;
-        playerProfile.player = eventPlayer;
-        playerProfile._botProfile = resolvedBotProfile;
-        playerProfile.isDead = false;
-
-        // Update PlayerProfile in maps
-        PlayerProfile._allPlayers.set(playerObjID, playerProfile);
-
-        // Track deployed PlayerProfile during active gameplay
-        PlayerProfile._deployedPlayers.set(playerObjID, playerProfile);
-
-
-        // Cache the bot in _allAI by playerObjID
-        BotProfile._allAI.set(playerObjID, resolvedBotProfile);
-
-        // Initialize behavior using the synced, authoritative bot profile
-        resolvedBotProfile.InitBehavior(eventPlayer, playerProfile);
-        return;
-    }
-
-    static AddToSpawnQueue(botProfile: BotProfile) {
-        AISpawnHandler.awaitingSpawnQueue.push(botProfile);
-        return;
+        console.log(`OnBotSpawnFromSpawner "CRITICAL ERROR" | No slot found for spawnerObjID(${spawnerObjID}), Player(${playerObjID})`);
     }
 }
+
 //////////////////////////////////////////////////////////////////
 ///////------------------- BOT LOGIC  ------------------//////////
 //////////////////////////////////////////////////////////////////
@@ -6027,182 +6546,210 @@ function PlayerIsAliveAndValid(eventPlayer: mod.Player): boolean {
 }
 
 
-async function SurvivorBotLogic(survivorBot: mod.Player) {
-    while (GameHandler.gameState !== GameState.GameRoundIsRunning) {
-        await mod.Wait(0.5);
-        if (GameHandler.gameState === GameState.EndOfRound) {
-            return;
+/** Returns the closest alive survivor to `bot`. If none found, returned player will be invalid*/
+function pickClosestAliveSurvivorFor(bot: mod.Player): mod.Player | undefined {
+    const botPos = mod.GetSoldierState(bot, mod.SoldierStateVector.GetPosition);
+    const closestSurvivor = mod.ClosestPlayerTo(botPos, SURVIVOR_TEAM);
+    return closestSurvivor;
+}
+
+/** Trigger the charge-leap for an alpha infected bot. Manages its own async flow; the tick is skipped while leaping. */
+async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Promise<void> {
+    if (slot.tick.leapInProgress) return;
+    slot.tick.leapInProgress = true;
+    try {
+        mod.AISetStance(bot, mod.Stance.Crouch);
+        await mod.Wait(LEAP_CROUCH_HOLD_SECONDS + 0.15);
+        if (!PlayerIsAliveAndValid(bot)) return;
+        mod.AIForceFire(bot, 1.5);
+        await mod.Wait(2.5); // allow leap flight and landing to complete
+    } finally {
+        slot.tick.leapInProgress = false;
+        if (PlayerIsAliveAndValid(bot)) {
+            mod.AISetStance(bot, mod.Stance.Stand);
         }
-    }
-
-    let survivorBotAliveandValid = PlayerIsAliveAndValid(survivorBot);
-
-    const pickRandomResupply = (): mod.Vector | undefined => {
-        const randIndex = Math.floor(Math.random() * RESUPPLY_INTERACT_POINTS.length);
-        const randSupplyPoint = RESUPPLY_INTERACT_POINTS[randIndex];
-        return RESUPPLY_WORLD_LOCATION.get(randSupplyPoint);
-    }
-    if (survivorBotAliveandValid && survivorBot !== undefined) {
-        survivorBotAliveandValid = PlayerIsAliveAndValid(survivorBot);
-        mod.AIDefendPositionBehavior(survivorBot, pickRandomResupply()!, AI_MIN_DEF_RANGE, AI_LEASH_RANGE);
     }
 }
 
-/** Check whether a player is riding in the tracked vehicle. */
-function IsPlayerInTrackedVehicle(player: mod.Player): boolean {
-    if (!SPAWNED_ACTIVE_VEHICLE) return false;
-    if (!mod.IsVehicleOccupied(SPAWNED_ACTIVE_VEHICLE)) return false;
-    const riders = mod.GetAllPlayersInVehicle(SPAWNED_ACTIVE_VEHICLE);
-    const count = mod.CountOf(riders);
-    for (let i = 0; i < count; i++) {
-        if (mod.GetObjId(mod.ValueInArray(riders, i) as mod.Player) === mod.GetObjId(player)) {
-            return true;
-        }
-    }
-    return false;
-}
+/**
+ * Tick the chase/attack AI for one infected bot slot.
+ * When the target is in a vehicle that vehicle is tracked directly as the movement destination
+ * and attacking is disabled until the bot is within AI_VEHICLE_MELEE_DISTANCE, allowing a
+ * full-speed sprint approach. Alpha bots trigger a leap attack when outside melee range.
+ */
+function InfectedBotLogicTick(slot: InfectedBotSlot): void {
+    const infectedBot = slot.player!;
 
-function InfectedBotLogicTick(infectedBot: mod.Player, tickState: {
-    infectedBotInitialized?: boolean,
-    infectedBotTarget?: mod.Player,
-    nextInfectedBotTickAt?: number,
-    infectedBotLastMoveIssuedAt?: number,
-    infectedBotLastMovePos?: mod.Vector,
-}) {
-
-    // Gate: only run during active round with a valid, alive bot
     if (GameHandler.gameState !== GameState.GameRoundIsRunning) return;
     if (!PlayerIsAliveAndValid(infectedBot)) return;
 
-    // One-time setup on first tick after spawn
-    if (!tickState.infectedBotInitialized) {
-        mod.AIEnableTargeting(infectedBot, false);
-        mod.RemoveEquipment(infectedBot, mod.InventorySlots.ClassGadget);
-        tickState.infectedBotInitialized = true;
-        tickState.infectedBotLastMoveIssuedAt = 0;
-        tickState.infectedBotLastMovePos = undefined;
-    }
-
     const now = Date.now() / 1000;
-    const botPlayerProfile = PlayerProfile.Get(infectedBot);
+    const tick = slot.tick;
 
-    const getAssignedSpeedMultiplier = (): number => {
-        return botPlayerProfile?._botProfile?.speedMultiplier ?? 1;
-    };
-
-    // Pick the closest alive survivor
-    const pickClosestAliveSurvivor = (): mod.Player | undefined => {
-        const all = mod.AllPlayers();
-        const n = mod.CountOf(all);
-        let best: mod.Player | undefined = undefined;
-        let bestDist = Number.MAX_VALUE;
-        const botPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
-        for (let i = 0; i < n; i++) {
-            const survivorPlayer = mod.ValueInArray(all, i) as mod.Player;
-            if (!PlayerIsAliveAndValid(survivorPlayer)) continue;
-            if (mod.GetObjId(mod.GetTeam(survivorPlayer)) !== mod.GetObjId(SURVIVOR_TEAM)) continue;
-            const survPos = mod.GetSoldierState(survivorPlayer, mod.SoldierStateVector.GetPosition);
-            const d = mod.DistanceBetween(botPos, survPos);
-            if (d < bestDist) {
-                bestDist = d;
-                best = survivorPlayer;
-            }
-        }
-        return best;
-    };
-
-    // Re-evaluate target: pick closest survivor, or fall back to HQ march.
-    // If the current target is in the tracked vehicle, keep them (stickiness)
-    // to avoid oscillating when the vehicle moves fast.
-    let target = tickState.infectedBotTarget;
-    const currentTargetInVehicle = target ? IsPlayerInTrackedVehicle(target) : false;
-
+    // Re-evaluate target each tick
+    let target = tick.target;
     if (!target || !PlayerIsAliveAndValid(target)) {
-        target = pickClosestAliveSurvivor();
-        tickState.infectedBotTarget = target;
-    } else if (!currentTargetInVehicle) {
-        // Only re-evaluate closest when the current target is NOT in the vehicle
-        const closest = pickClosestAliveSurvivor();
+        target = pickClosestAliveSurvivorFor(infectedBot);
+        tick.target = target;
+        tick.lastMoveIssuedAt = 0;
+        tick.lastMovePos = undefined;
+        tick.trackedVehicle = undefined;
+    } else {
+        const closest = pickClosestAliveSurvivorFor(infectedBot);
         if (closest && mod.GetObjId(closest) !== mod.GetObjId(target)) {
             target = closest;
-            tickState.infectedBotTarget = target;
-            tickState.infectedBotLastMoveIssuedAt = 0;
-            tickState.infectedBotLastMovePos = undefined;
+            tick.target = target;
+            tick.lastMoveIssuedAt = 0;
+            tick.lastMovePos = undefined;
+            tick.trackedVehicle = undefined;
         }
     }
 
     if (!target) {
-        if (botPlayerProfile) {
-            botPlayerProfile.currentTarget = undefined;
-        }
-        if (botPlayerProfile?.infectedAreaSpeedBoostActive && botPlayerProfile._botProfile) {
-            botPlayerProfile._botProfile.speedMultiplier = 2;
-            mod.SetPlayerMovementSpeedMultiplier(infectedBot, 2);
-        }
-        // couldn't find target for whatever reason, wander around
-        mod.AIBattlefieldBehavior(infectedBot);
-        tickState.infectedBotLastMovePos = undefined;
+        mod.AIIdleBehavior(infectedBot);
+        tick.lastMovePos = undefined;
+        tick.trackedVehicle = undefined;
         return;
     }
 
-    if (botPlayerProfile) {
-        botPlayerProfile.currentTarget = target;
-    }
-
-    mod.AISetTarget(infectedBot, target);
-
-    // Resolve target position: if target is in the tracked vehicle, use the
-    // vehicle position from GetVehicleState so the bot chases the vehicle
-    // rather than the (possibly jittery) soldier position.
-    const targetInVehicle = IsPlayerInTrackedVehicle(target);
+    const targetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
-    const targetPos = targetInVehicle && SPAWNED_ACTIVE_VEHICLE
-        ? mod.GetVehicleState(SPAWNED_ACTIVE_VEHICLE, mod.VehicleStateVector.VehiclePosition)
-        : mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
-    if (botPlayerProfile?.infectedAreaSpeedBoostActive && botPlayerProfile._botProfile) {
-        botPlayerProfile._botProfile.speedMultiplier = targetInVehicle ? 4 : 2;
-    }
-    const dist = mod.DistanceBetween(infectedBotPos, targetPos);
-    mod.SetPlayerMovementSpeedMultiplier(infectedBot, getAssignedSpeedMultiplier());
 
-    // When the target is in the vehicle, focus the bot on the vehicle body
-    // so it attacks the vehicle itself rather than pathing to the driver door.
-    if (targetInVehicle && SPAWNED_ACTIVE_VEHICLE) {
-        mod.AISetFocusPoint(infectedBot, targetPos, true);
-    }
+    // Always sprint never slow down. Slowing for a melee swing causes the bot to
+    // fall behind a moving target, and it may then attempt to attack out of weapon range.
+    mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
 
-    // Use a wider attack radius for vehicle targets so the bot can swing
-    // while still sprinting alongside the vehicle instead of decelerating
-    // to reach the driver-side door.
-    const meleeRange = targetInVehicle ? AI_VEHICLE_MELEE_DISTANCE : AI_INFECTED_MELEE_DISTANCE;
+    // --- Vehicle chase path ---
+    if (targetInVehicle) {
+        // Acquire or re-use the tracked vehicle reference
+        if (!tick.trackedVehicle) {
+            const v = mod.GetVehicleFromPlayer(target);
+            if (v) tick.trackedVehicle = v;
+        }
 
-    if (dist <= meleeRange) {
-        // In melee range -- attack while continuing to sprint toward vehicle
-        mod.AIEnableTargeting(infectedBot, true);
-        mod.AIEnableShooting(infectedBot, true);
-        mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
-        mod.AIMoveToBehavior(infectedBot, targetPos);
-        mod.AIForceFire(infectedBot, 0.5);
-        tickState.infectedBotLastMoveIssuedAt = now;
-        tickState.infectedBotLastMovePos = targetPos;
+        const veh = tick.trackedVehicle;
+        if (veh) {
+            const vehiclePos = mod.GetVehicleState(veh, mod.VehicleStateVector.VehiclePosition);
+            const dist = mod.DistanceBetween(infectedBotPos, vehiclePos);
+
+            // Reissue move every tick the vehicle's position changes every frame and
+            // a stale destination causes the bot to run to where the vehicle was.
+            const timeSinceLastMove = now - tick.lastMoveIssuedAt;
+            if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
+                mod.AIMoveToBehavior(infectedBot, vehiclePos);
+                tick.lastMoveIssuedAt = now;
+                tick.lastMovePos = vehiclePos;
+            }
+
+            if (dist <= AI_VEHICLE_MELEE_DISTANCE) {
+                // Use explicit ForceFire with a cooldown instead of always-on targeting.
+                // Auto-targeting in melee range triggers animations that lock the bot in place;
+                // if the vehicle then accelerates away the engine kills the bot mid-animation.
+                const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
+                if (timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
+                    if (tick.shootingEnabled !== true) {
+                        mod.AIEnableShooting(infectedBot, true);
+                        tick.shootingEnabled = true;
+                    }
+                    if (tick.targetingEnabled !== true) {
+                        mod.AIEnableTargeting(infectedBot, true);
+                        tick.targetingEnabled = true;
+                    }
+                    mod.AIForceFire(infectedBot, 0.3);
+                    tick.lastSwingAt = now;
+                } else {
+                    if (tick.shootingEnabled !== false) {
+                        mod.AIEnableShooting(infectedBot, false);
+                        tick.shootingEnabled = false;
+                    }
+                    if (tick.targetingEnabled !== false) {
+                        mod.AIEnableTargeting(infectedBot, false);
+                        tick.targetingEnabled = false;
+                    }
+                }
+            } else {
+                // Outside melee range: keep all attacking disabled, focus on chasing.
+                if (tick.shootingEnabled !== false) {
+                    mod.AIEnableShooting(infectedBot, false);
+                    tick.shootingEnabled = false;
+                }
+                if (tick.targetingEnabled !== false) {
+                    mod.AIEnableTargeting(infectedBot, false);
+                    tick.targetingEnabled = false;
+                }
+                if (slot.isAlpha) {
+                    TriggerAIChargeLeap(slot, infectedBot);
+                }
+            }
+            return;
+        }
+        // Vehicle ref lost (destroyed); fall through to on-foot path with cleared ref
+        tick.trackedVehicle = undefined;
     } else {
-        // Out of melee range -- sprint toward target with throttled move commands
-        // to prevent stutter-stepping when the target is in a fast vehicle.
-        mod.AIEnableTargeting(infectedBot, true);
-        mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
+        // Target dismounted; discard stale vehicle reference
+        tick.trackedVehicle = undefined;
+    }
 
-        const reissueCooldown = targetInVehicle
-            ? AI_VEHICLE_MOVE_REISSUE_SECONDS
-            : AI_DEFAULT_MOVE_REISSUE_SECONDS;
+    // --- Normal (on-foot) path ---
+    const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+    const dist = mod.DistanceBetween(infectedBotPos, targetPos);
 
-        const timeSinceLastMove = now - (tickState.infectedBotLastMoveIssuedAt ?? 0);
-        const shouldReissueMove = timeSinceLastMove >= reissueCooldown
-            || !tickState.infectedBotLastMovePos;
-
-        if (shouldReissueMove) {
+    if (dist <= AI_INFECTED_MELEE_DISTANCE) {
+        // Issue move very frequently when in melee range so the bot tracks
+        // target movement between ticks rather than chasing a stale position.
+        const timeSinceLastMove = now - tick.lastMoveIssuedAt;
+        if (timeSinceLastMove >= AI_MELEE_CLOSE_REISSUE_SECONDS || !tick.lastMovePos) {
+            mod.AIValidatedMoveToBehavior(infectedBot, targetPos);
+            tick.lastMoveIssuedAt = now;
+            tick.lastMovePos = targetPos;
+        }
+        // Use explicit ForceFire with cooldown instead of always-on targeting.
+        // Always-on targeting in melee range can trigger a Takedown animation that locks
+        // the bot; if the target then moves the engine kills the bot mid-animation.
+        // The backstab check still guards the rear hemisphere.
+        const targetFacing = mod.GetSoldierState(target, mod.SoldierStateVector.GetFacingDirection);
+        const dirToBot = mod.Normalize(mod.Subtract(infectedBotPos, targetPos));
+        const behindDot = mod.DotProduct(targetFacing, dirToBot);
+        const allowAttacking = behindDot >= AI_MELEE_BACKSTAB_DOT_THRESHOLD;
+        const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
+        if (allowAttacking && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
+            if (tick.shootingEnabled !== true) {
+                mod.AIEnableShooting(infectedBot, true);
+                tick.shootingEnabled = true;
+            }
+            if (tick.targetingEnabled !== true) {
+                mod.AIEnableTargeting(infectedBot, true);
+                tick.targetingEnabled = true;
+            }
+            mod.AIForceFire(infectedBot, 0.4);
+            tick.lastSwingAt = now;
+        } else {
+            if (tick.shootingEnabled !== false) {
+                mod.AIEnableShooting(infectedBot, false);
+                tick.shootingEnabled = false;
+            }
+            if (tick.targetingEnabled !== false) {
+                mod.AIEnableTargeting(infectedBot, false);
+                tick.targetingEnabled = false;
+            }
+        }
+    } else {
+        // Outside melee range: sprint with attacking fully disabled.
+        // Keeping attacks off during the approach prevents mid-sprint melee animations
+        // that interrupt momentum and expose the bot to a stale-target kill.
+        if (tick.shootingEnabled !== false) {
+            mod.AIEnableShooting(infectedBot, false);
+            tick.shootingEnabled = false;
+        }
+        if (tick.targetingEnabled !== false) {
+            mod.AIEnableTargeting(infectedBot, false);
+            tick.targetingEnabled = false;
+        }
+        const timeSinceLastMove = now - tick.lastMoveIssuedAt;
+        if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
             mod.AIMoveToBehavior(infectedBot, targetPos);
-            tickState.infectedBotLastMoveIssuedAt = now;
-            tickState.infectedBotLastMovePos = targetPos;
+            tick.lastMoveIssuedAt = now;
+            tick.lastMovePos = targetPos;
         }
     }
 }
@@ -6231,17 +6778,9 @@ function ConfigureResupplyForMap(mapIdentifier: MapNames) {
     });
 }
 
-function GetVector3Distance(a: Vector3, b: Vector3): number {
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    const dz = a.z - b.z;
-
-    return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
-}
-
 function CompareHQPositions(requestedHQPos: Vector3, threshold: number = CURRENT_MAP_HQ_POSITION_THRESHOLD): MapNames | undefined {
     for (const [identifier, hqInfo] of HQPOSITIONS.entries()) {
-        if (GetVector3Distance(requestedHQPos, hqInfo.position) <= threshold) {
+        if (Helpers.GetVector3Distance(requestedHQPos, hqInfo.position) <= threshold) {
             return identifier;
         }
     }
@@ -6256,12 +6795,16 @@ function CompareResupplyPositions(mapIdentifier: MapNames, threshold: number = C
 
     for (const [interactPointId, expectedPosition] of mapConfig.positionsByInteractPoint.entries()) {
         const interactPoint = mod.GetInteractPoint(interactPointId);
-        if (mod.GetObjId(interactPoint) !== interactPointId) {
+        const polledObjId = mod.GetObjId(interactPoint);
+        if (polledObjId !== interactPointId) {
+            console.log(`CompareResupplyPositions | ObjId mismatch for ${mapIdentifier} POINT_${interactPointId}: expected=${interactPointId} got=${polledObjId}`);
             return false;
         }
 
         const polledPosition = Helpers.VectorToVector3(mod.GetObjectPosition(interactPoint));
-        if (GetVector3Distance(polledPosition, expectedPosition) > threshold) {
+        const dist = Helpers.GetVector3Distance(polledPosition, expectedPosition);
+        if (dist > threshold) {
+            console.log(`CompareResupplyPositions | Position mismatch for ${mapIdentifier} POINT_${interactPointId}: dist=${dist.toFixed(3)} threshold=${threshold} polled=(${polledPosition.x.toFixed(3)},${polledPosition.y.toFixed(3)},${polledPosition.z.toFixed(3)}) expected=(${expectedPosition.x.toFixed(3)},${expectedPosition.y.toFixed(3)},${expectedPosition.z.toFixed(3)})`);
             return false;
         }
     }
@@ -6494,14 +7037,16 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     }
 
     // conditional stats for humans
-    if (isInfected) {
-        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.2 : 1);
-        mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 2 : 50);
-        mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 500 : 250);
-    } else {
-        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isLastManStanding ? 1.1 : 1);
-        mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isLastManStanding ? 70 : 100);
-        mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isLastManStanding ? 240 : 60);
+    if (!isAI) {
+        if (isInfected) {
+            mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.2 : 1);
+            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 0.5 : 0.7);
+            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 500 : 250);
+        } else {
+            mod.SetPlayerMovementSpeedMultiplier(eventPlayer, 1);
+            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isLastManStanding ? 0.3 : 1);
+            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isLastManStanding ? 240 : 60);
+        }
     }
 }
 
@@ -6806,10 +7351,6 @@ async function TeleportPlayerOnInteract(eventPlayer: mod.Player, eventInteractPo
     // }
 }
 
-function InfectedIconDisplay(player: mod.Player) {
-    EnsureInfectedWorldIcon(player);
-}
-
 async function ShowLastManStandingIcon(player: mod.Player) {
     EnsureLastManStandingWorldIcon(player);
 }
@@ -6995,31 +7536,6 @@ function GetIconPosition(player: mod.Player, heightOffset = 2): mod.Vector {
     );
 }
 
-function EnsureInfectedWorldIcon(player: mod.Player) {
-    const playerObjId = mod.GetObjId(player);
-    if (playerObjId < 0) return;
-
-    const shouldShow = DEBUG
-        && GameHandler.gameState === GameState.GameRoundIsRunning
-        && GameHandler.survivorsCount <= 1
-        && SafeIsAlive(player)
-        && mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM);
-
-    if (!shouldShow) {
-        CleanupWorldIcon(INFECTED_WORLD_ICON_OBJECTS, playerObjId, 'EnsureInfectedWorldIcon');
-        return;
-    }
-
-    if (INFECTED_WORLD_ICON_OBJECTS.has(playerObjId)) return;
-
-    const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, GetIconPosition(player), ZERO_VEC);
-    mod.SetWorldIconOwner(icon, SURVIVOR_TEAM);
-    mod.SetWorldIconImage(icon, mod.WorldIconImages.Skull);
-    mod.SetWorldIconColor(icon, UI.battlefieldRedBg);
-    mod.EnableWorldIconImage(icon, true);
-    INFECTED_WORLD_ICON_OBJECTS.set(playerObjId, icon);
-}
-
 function EnsureLastManStandingWorldIcon(player: mod.Player) {
     const playerObjId = mod.GetObjId(player);
     if (playerObjId < 0) return;
@@ -7051,7 +7567,6 @@ function UpdatePlayerIndicatorsAndIcons(player: mod.Player) {
     const playerObjId = mod.GetObjId(player);
     if (playerObjId < 0) return;
 
-    EnsureInfectedWorldIcon(player);
     EnsureLastManStandingWorldIcon(player);
     ShowAlphaInfectedDebugIndicator(player);
 
@@ -7070,6 +7585,9 @@ function UpdatePlayerIndicatorsAndIcons(player: mod.Player) {
 function CleanupPlayerOngoingVisuals(playerObjId: number) {
     CleanupWorldIcon(INFECTED_WORLD_ICON_OBJECTS, playerObjId, 'CleanupPlayerOngoingVisuals');
     CleanupWorldIcon(LMS_WORLD_ICON_OBJECTS, playerObjId, 'CleanupPlayerOngoingVisuals');
+    const playerProfile = PlayerProfile._allPlayers.get(playerObjId);
+    playerProfile?.DeletePlayerAreaNotificationWidget();
+    playerProfile?.DeleteLastManStandingBuffWidgets();
     const moveVfxToken = ALPHA_DEBUG_INDICATOR_TOKENS.get(playerObjId);
     if (moveVfxToken) {
         moveVfxToken.cancel = true;
@@ -7216,7 +7734,6 @@ const LeapTestHarness = {
         // Use the first survivor spawner closest to the vehicle position.
         const survSpawnerID = SURVIVOR_AI_SPAWNERS[0];
         this.survivorSpawner = mod.GetSpawner(survSpawnerID);
-        mod.SetUnspawnDelayInSeconds(this.survivorSpawner, 1);
         mod.SpawnAIFromAISpawner(
             this.survivorSpawner,
             mod.SoldierClass.Assault,
@@ -7229,7 +7746,6 @@ const LeapTestHarness = {
         // Use the first infected spawner.
         const infSpawnerID = INFECTED_AI_SPAWNERS[0];
         this.infectedSpawner = mod.GetSpawner(infSpawnerID);
-        mod.SetUnspawnDelayInSeconds(this.infectedSpawner, 999);
         mod.SpawnAIFromAISpawner(
             this.infectedSpawner,
             mod.SoldierClass.Recon,
@@ -7264,7 +7780,7 @@ const LeapTestHarness = {
                 for (let attempt = 0; attempt < 8; attempt++) {
                     mod.ForcePlayerToSeat(player, this.activeVehicle, 0);
                     await mod.Wait(0.15);
-                    if (IsPlayerInTrackedVehicle(player)) {
+                    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) {
                         seated = true;
                         break;
                     }
@@ -7594,7 +8110,7 @@ function createLeapUI(player: mod.Player, playerObjId: number) {
         bgColor: [0.06, 0.06, 0.06],
         bgAlpha: 0.8,
         bgFill: mod.UIBgFill.Blur,
-        visible: true,
+        visible: false,
         playerId: player,
         children: [{
             type: "Text",
@@ -7690,8 +8206,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
     // --- Animation loop: each pass recomputes the arc and fires ONE fresh geometry probe ---
     // Doing the collision check per-iteration (instead of once at startup) ensures the
-    // indicator and trail truncation are always consistent with the player's current
-    // position and facing direction, fixing stale-cache issues for all three VFX bugs.
+    // indicator and trail truncation are always consistent with the player's current position
     while (isValid()) {
         // Recompute arc from the player's live position and facing direction
         const liveTrack = computeLeapTrack(player);
@@ -7747,11 +8262,12 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
             blockedSfxCooldown--;
             if (blockedSfxCooldown <= 0) {
                 // Brief horizontal pulse to draw attention to the blocked indicator
-                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.RightVector(), 0.2)));
-                await mod.Wait(0.08);
+                // disabling pulse, maybe causing latency issues
+                // mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.RightVector(), 0.2)));
+                // await mod.Wait(0.08);
                 Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
-                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.LeftVector(), 0.2)));
-                await mod.Wait(0.08);
+                // mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.LeftVector(), 0.2)));
+                // await mod.Wait(0.08);
                 if (!isValid()) break;
                 mod.SetWorldIconPosition(state.blockedWarnIcon, destPos);
                 blockedSfxCooldown = BLOCKED_WARN_PASSES;
@@ -7850,22 +8366,17 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     const effectiveLandingPos = stepPositions[stepPositions.length - 1];
     if (mod.DistanceBetween(startPos, effectiveLandingPos) < LEAP_MIN_DISTANCE) {
         Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
-        if (state.statusWidget) {
-            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
-            mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
-        }
+        // if (state.statusWidget) {
+        //     mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
+        //     mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
+        // }
         setLeapCamera(player, state, mod.Cameras.FirstPerson);
         state.isLeaping = false;
         state.crouchStartTime = 0;
         return;
     }
 
-    // Play launch sound and switch to third-person
-    const leapSfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.SFX_Projectiles_Flybys_Large_Cannon_Shell_120mm_FlyBy_Close_OneShot3D,
-        startPos, ZERO_VEC
-    );
-    mod.PlaySound(leapSfx, 1);
+
     setLeapCamera(player, state, mod.Cameras.ThirdPerson);
 
     // --- Inline geometry collision check (3 raycasts) ---
@@ -8005,6 +8516,13 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.RuntimeSpawn_Common.FX_Grenade_Incendiary_Trail,
         travelSteps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
     ) as mod.VFX;
+        // Ready the launch sound and switch to third-person
+    const leapSfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.SFX_Projectiles_Flybys_Large_Cannon_Shell_120mm_FlyBy_Close_OneShot3D,
+        finalDest, ZERO_VEC
+    );
+    // enable trail vfx and play projectile flyby sound at destination
+    mod.PlaySound(leapSfx, 1);
     mod.EnableVFX(trailVfx, true);
     // Teleport along the rescaled arc, then snap to exact landing position
     for (let i = 0; i < travelSteps.length - 1; i++) {
@@ -8043,7 +8561,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
             mod.EnableVFX(hitVfx, true);
             state.hitVfx = hitVfx;
         }
-        
+
         // Concussion ringing plays only for the leaping player (2D - no world position needed)
         // SFX_Soldier_Damage_Explosion_Ring_SimpleLoop2D
         const ragdollOrigin = travelSteps[travelSteps.length - 1];
@@ -8184,7 +8702,7 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
         // AIEnableTargeting(false) before InitLeapSystem runs, which silently blocks
         // any AISetTarget call made while that flag is still down.
         mod.AIEnableTargeting(player, true);
-        mod.AISetMoveSpeed(player, mod.MoveSpeed.Walk);
+        // mod.AISetMoveSpeed(player, mod.MoveSpeed.Walk);
 
         // Chase and charge-leap the vehicle driver until the seat is vacated or the AI dies.
         while (targetVehicle) {
@@ -8394,7 +8912,7 @@ function TickLeap(player: mod.Player): void {
             mod.MoveVFX(state.chargeVfx, chargeVfxPos, ZERO_VEC);
         }
         if (state.chargingSfx) {
-            mod.MoveVFX(state.chargingSfx as mod.VFX, playerPos, ZERO_VEC);
+            mod.MoveObject(state.chargingSfx, playerPos, ZERO_VEC);
         }
     } else {
         // Not crouching, is leaping, or within slide-protection buffer -- clean up
@@ -8421,28 +8939,28 @@ function TickLeap(player: mod.Player): void {
     }
 
     // Update status UI
-    if (state.statusWidget && state.statusContainerWidget) {
-        if (state.isLeaping) {
-            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_leaping));
-            mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.4, 0.1));
-        } else if (isCrouching && isEngaged && !crouchReady) {
-            const chargeWhole = Math.floor(crouchHeld * 10);
-            const chargeTotal = Math.floor(LEAP_CROUCH_HOLD_SECONDS * 10);
-            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal));
-            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.8, 0.8, 0.2));
-        } else if (crouchReady) {
-            if (state.previewIsBlocked) {
-                mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
-                mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
-            } else {
-                mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_ready));
-                mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.2, 1, 0.3));
-            }
-        } else {
-            mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_idle));
-            mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.6, 0.6, 0.6));
-        }
-    }
+    // if (state.statusWidget && state.statusContainerWidget) {
+    //     if (state.isLeaping) {
+    //         mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_leaping));
+    //         mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.4, 0.1));
+    //     } else if (isCrouching && isEngaged && !crouchReady) {
+    //         const chargeWhole = Math.floor(crouchHeld * 10);
+    //         const chargeTotal = Math.floor(LEAP_CROUCH_HOLD_SECONDS * 10);
+    //         mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal));
+    //         mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.8, 0.8, 0.2));
+    //     } else if (crouchReady) {
+    //         if (state.previewIsBlocked) {
+    //             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_no_room));
+    //             mod.SetUITextColor(state.statusWidget, mod.CreateVector(1, 0.2, 0.2));
+    //         } else {
+    //             mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_ready));
+    //             mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.2, 1, 0.3));
+    //         }
+    //     } else {
+    //         mod.SetUITextLabel(state.statusWidget, mod.Message(mod.stringkeys.leap_status_idle));
+    //         mod.SetUITextColor(state.statusWidget, mod.CreateVector(0.6, 0.6, 0.6));
+    //     }
+    // }
 
     // Leap activation: crouch held long enough + fire
     if (state.isLeaping) return;
@@ -8495,38 +9013,18 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 
 // planned to use custom ladder logic for the AI infected, but never finished it
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
-    if (!mod.IsPlayerValid(eventPlayer) || !ENABLE_AI_LADDER_LOGIC) {
-        if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(SURVIVOR_TEAM)) {
-            console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
-            mod.AIIdleBehavior(eventPlayer);
-        }
-        return;
+    if (!mod.IsPlayerValid(eventPlayer)) return;
+    // Fall back to idle for both teams to clear any stale move target.
+    const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
+    if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
+        console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
+    } else {
+        console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
     }
-    // if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
-    //     const objId = mod.GetObjId(eventPlayer);
-    //     console.log(`OnAIMoveToFailed | Infected Bot(${objId}) switching to ladder logic`);
-    //     const playerProfile = PlayerProfile.Get(eventPlayer);
-
-    //     // Flag the tick-driven logic to pause while ladder logic owns this bot
-    //     const tickState = PLAYER_ONGOING_TICK_STATE.get(objId);
-    //     if (tickState) {
-    //         tickState.infectedBotLadderActive = true;
-    //     }
-
-    //     await AIUseLadderLogic(eventPlayer, playerProfile);
-
-    //     // Resume tick-driven logic after ladder attempt completes
-    //     if (tickState) {
-    //         tickState.infectedBotLadderActive = false;
-    //     }
-    //     if (PlayerIsAliveAndValid(eventPlayer) && GameHandler.gameState === GameState.GameRoundIsRunning) {
-    //         console.log(`OnAIMoveToFailed | Resuming tick-driven InfectedBotLogicTick for Bot(${objId})`);
-    //     }
-    // }
+    mod.AIIdleBehavior(eventPlayer);
 }
 
 export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner) {
-    mod.AIEnableShooting(eventPlayer, false);
     if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
         GameHandler.gameState === GameState.EndOfRound) {
         if (!LEAP_TEST_MODE) return;
@@ -8538,10 +9036,8 @@ export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mo
         }
         return;
     }
-
-    if (Helpers.HasValidObjId(eventPlayer)) {
-        AISpawnHandler.OnBotSpawnFromSpawner(eventPlayer, mod.GetObjId(eventSpawner));
-    }
+    mod.SetUnspawnDelayInSeconds(eventSpawner, 1);
+    AISpawnHandler.OnBotSpawnFromSpawner(eventPlayer, mod.GetObjId(eventSpawner));
 }
 
 export function OnPlayerInteract(eventPlayer: mod.Player, eventObject: mod.Object) {
@@ -8615,7 +9111,6 @@ export async function OnPlayerJoinGame(eventPlayer: mod.Player) {
         if (PlayerProfile.isValidPlayer(eventPlayer)) {
             console.log(`Human Player(${mod.GetObjId(eventPlayer)}) joined the game!`);
             const playerProfile = PlayerProfile.Get(eventPlayer);
-            GameHandler.survivorSlotsToBackfill--; // Each Human player that joins, remove one AI from the spawn pool
             mod.EnablePlayerDeploy(eventPlayer, false);
             if (playerProfile) {
                 playerProfile.survived = 0;
@@ -8650,27 +9145,75 @@ export async function OnPlayerJoinGame(eventPlayer: mod.Player) {
             }
 
             GameHandler.RecalculateCounts();
+            GameHandler.RebuildPlayerLists();
         }
 
     }
 }
 
 export async function OnPlayerLeaveGame(playerObjID: number) {
+    // Check if this is a dead infected bot's body being cleaned up by the spawner unspawn timer.
+    // HandleDeath registers the ObjID here so we start the respawn only after the spawner is free.
+    const deadInfectedSlot = InfectedBotSlot.deadByObjID.get(playerObjID);
+    if (deadInfectedSlot) {
+        InfectedBotSlot.deadByObjID.delete(playerObjID);
+        console.log(`OnPlayerLeaveGame | Infected body cleaned up Player(${playerObjID}) [${deadInfectedSlot.name}] -> starting respawn timer`);
+        if (deadInfectedSlot.state === BotSlotState.DeadAwaitingRespawn &&
+            GameHandler.gameState === GameState.GameRoundIsRunning) {
+            deadInfectedSlot.startRespawnTimer();
+        } else if (deadInfectedSlot.state === BotSlotState.DeadAwaitingRespawn) {
+            // Round ended before body cleanup; release the slot.
+            deadInfectedSlot.state = BotSlotState.Idle;
+            deadInfectedSlot.respawnDueAt = undefined;
+        }
+        return;
+    }
+
     const pp = PlayerProfile._allPlayers.get(playerObjID);
 
+    const activeInfectedSlot = InfectedBotSlot.GetByObjID(playerObjID);
+    if (activeInfectedSlot && activeInfectedSlot.state === BotSlotState.Alive) {
+        // Only suppress if the bot is genuinely still alive. If it isn't, OnPlayerDied
+        // failed to fire (engine edge case) and this leave event is the death notification.
+        if (activeInfectedSlot.player && PlayerIsAliveAndValid(activeInfectedSlot.player)) {
+            console.log(`OnPlayerLeaveGame | Ignoring stale leave event for active infected slot Player(${playerObjID}) [${activeInfectedSlot.name}]`);
+            return;
+        }
+        console.log(`OnPlayerLeaveGame | Bot Player(${playerObjID}) [${activeInfectedSlot.name}] dead on leave; calling HandleDeath as fallback.`);
+        activeInfectedSlot.HandleDeath();
+        return;
+    }
+    const activeSurvivorSlot = SurvivorBotSlot.GetByObjID(playerObjID);
+    if (activeSurvivorSlot && activeSurvivorSlot.state === BotSlotState.Alive) {
+        if (activeSurvivorSlot.player && PlayerIsAliveAndValid(activeSurvivorSlot.player)) {
+            console.log(`OnPlayerLeaveGame | Ignoring stale leave event for active survivor slot Player(${playerObjID}) [${activeSurvivorSlot.name}]`);
+            return;
+        }
+        console.log(`OnPlayerLeaveGame | Survivor bot Player(${playerObjID}) [${activeSurvivorSlot.name}] dead on leave; calling HandleDeath as fallback.`);
+        activeSurvivorSlot.HandleDeath(false);
+        return;
+    }
+
     CleanupPlayerOngoingVisuals(playerObjID);
+    let shouldRefreshTeamCounts = false;
     if (pp) {
-        if (!pp.isAI && pp.isInfectedTeam) {
-            GameHandler.infectedCount = Math.max(0, GameHandler.infectedCount - 1);
-            console.log(`OnPlayerLeaveGame | Human infected left (${playerObjID}) -> infectedCount: ${GameHandler.infectedCount}`);
+        if (!pp.isAI) {
+            shouldRefreshTeamCounts = true;
+            if (pp.isInfectedTeam) {
+                GameHandler.infectedCount = Math.max(0, GameHandler.infectedCount - 1);
+                console.log(`OnPlayerLeaveGame | Human infected left (${playerObjID}) -> infectedCount: ${GameHandler.infectedCount}`);
+            }
         }
     }
-    GameHandler.RecalculateCounts();
-    ScoreboardUI.GlobalUpdate(TeamNameString.Both);
+    if (shouldRefreshTeamCounts) {
+        GameHandler.RecalculateCounts();
+        ScoreboardUI.GlobalUpdate(TeamNameString.Both);
+    }
 
     if (pp) {
         PlayerProfile.RemovePlayerProfile(playerObjID);
     }
+    GameHandler.RebuildPlayerLists();
 
 }
 
@@ -8692,7 +9235,10 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
         }
         PlayerProfile.CustomOnPlayerDeployed(eventPlayer);
         if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM)) {
-            InitLeapSystem(eventPlayer);
+            const pp = PlayerProfile.Get(eventPlayer);
+            if (pp?.isAlphaInfected) {
+                InitLeapSystem(eventPlayer);
+            }
         }
     } else {
         console.log(`OnPlayerDeployed "CRITICAL" | Player(${mod.GetObjId(eventPlayer)}) deployed without a valid ObjID!`);
@@ -8707,7 +9253,7 @@ export function OnPlayerUndeploy(playerObjId: number) {
     }
 }
 
-export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player) {
+export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, eventDeathType: mod.DeathType) {
     if (GameHandler.gameState === GameState.EndOfRound) {
         // ignore GH events and automatic team assignments
         console.log('Player was killed by GameHandler. Ignoring...');
@@ -8729,26 +9275,47 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         const playerProfile = PlayerProfile.Get(eventPlayer);
         playerProfile?.loadoutDisplayBottom?.Hide();
 
-
-        // This mess of a bot spawn system is fucked and needs a second look if DICE/Ripple/EA changes bots leaving the game after they die
+        // Slot-based bot death handling
         if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
-            let linkedBotProfile = playerProfile?._botProfile;
-            const spawnerObjID = playerProfile?.spawnerObjID;
-            if (spawnerObjID) {
-                let fetchedBotProfile = BotProfile.GetBySpawner(spawnerObjID);
-                if (fetchedBotProfile != linkedBotProfile) {
-                    linkedBotProfile = fetchedBotProfile;
-                }
-            }
-            console.log(`OnPlayerDied | Player(${playerObjID}) Died! | BotProfile: ${linkedBotProfile?.playerName} | Passing to BotProfile.OnAIDied()`);
-            if (playerProfile && linkedBotProfile) {
-                BotProfile.OnAIDied(eventPlayer, playerProfile, linkedBotProfile);
+            const infectedSlot = InfectedBotSlot.GetByObjID(playerObjID);
+            const deathType = mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Deserting) ? "Deserting" :
+                mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Fall) ? "Fall" :
+                    mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Redeploy) ? "Redeploy" :
+                        mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Melee) ? "Melee" :
+                            mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Weapon) ? "Weapon" :
+                        "Other";
+            if (infectedSlot) {
+                console.log(`OnPlayerDied | Infected Bot(${playerObjID}) [${infectedSlot.name}] died\nCause of Death: ${deathType}`);
+                infectedSlot.HandleDeath();
                 return;
             }
-            if (!linkedBotProfile) {
-                const error = (playerProfile == undefined) ? "PlayerProfile" : "BotProfile";
-                console.log(`OnPlayerDied "CRITICAL ERROR" | Could not get ${error}!`);
+            const survivorSlot = SurvivorBotSlot.GetByObjID(playerObjID);
+            if (survivorSlot) {
+                console.log(`OnPlayerDied | Survivor Bot(${playerObjID}) [${survivorSlot.name}] died`);
+                if (GameHandler.gameState === GameState.GameRoundIsRunning || GameHandler.gameState === GameState.GameStartCountdown) {
+                    if (GameHandler.gameState === GameState.GameRoundIsRunning && !GameHandler.suspendWinChecks) {
+                        Helpers.PlaySoundFX(SFX_SURVIVOR_LOST, 1, SURVIVOR_TEAM);
+                        Helpers.PlaySoundFX(SFX_POSITIVE, 1, INFECTED_TEAM);
+                    }
+                    GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
+                    if (playerProfile) {
+                        playerProfile.isInfectedTeam = true;
+                    }
+                    const isAlpha = playerProfile?.isAlphaInfected ?? false;
+                    survivorSlot.HandleDeath(true, isAlpha);
+                    GameHandler.RecalculateCounts();
+                    ScoreboardUI.GlobalUpdate(TeamNameString.Both);
+                    GameHandler.DisplayUpdatedSurvivorCountNotification();
+                    if (GameHandler.survivorsCount === 5) {
+                        GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.final_five));
+                    }
+                    GameHandler.CheckWinCondition();
+                } else {
+                    survivorSlot.HandleDeath(false);
+                }
+                return;
             }
+            console.log(`OnPlayerDied "CRITICAL ERROR" | AI Player(${playerObjID}) died but no slot found!`);
             return;
         }
 
@@ -8849,13 +9416,8 @@ export async function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlay
                 }
             }
         }
+        // AI bots don't track kill stats
         if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
-            let botProfile = playerProfile._botProfile;
-            if (botProfile && botProfile.playerStats) {
-                botProfile.playerStats.kills++;
-                botProfile.playerStats.score += POINTS_PER_INFECTED_KILL;
-                botProfile.UpdatePlayerScoreboard(eventPlayer);
-            }
             return;
         }
 
@@ -8888,28 +9450,17 @@ export async function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlay
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
-        if (survivorProfile?.playerAreaNotificationWidget) {
-            mod.DeleteUIWidget(survivorProfile.playerAreaNotificationWidget);
-            survivorProfile.playerAreaNotificationWidget = undefined;
-        }
-        if (survivorProfile) {
-            survivorProfile.playerAreaNotificationIsSpeedBoost = false;
+        if (survivorProfile && !survivorProfile.isAI) {
+            survivorProfile.showSurvivorRoadWarning = false;
+            survivorProfile.DeletePlayerAreaNotificationWidget();
         }
         return;
     }
     const playerProfile = PlayerProfile.Get(eventPlayer);
-    if (playerProfile) {
-        playerProfile.infectedAreaSpeedBoostActive = false;
-        playerProfile.infectedAreaSprintBoostWasActive = false;
-        if (playerProfile.playerAreaNotificationWidget && playerProfile.playerAreaNotificationIsSpeedBoost) {
-            mod.DeleteUIWidget(playerProfile.playerAreaNotificationWidget);
-            playerProfile.playerAreaNotificationWidget = undefined;
-            playerProfile.playerAreaNotificationIsSpeedBoost = false;
-        }
-    }
-    if (playerProfile?._botProfile) {
-        playerProfile._botProfile.speedMultiplier = 1;
+    if (playerProfile?.isAI) {
         mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.3 : 1);
+        const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
+        if (slot) slot.tick.inAreaTrigger = false;
     }
 }
 
@@ -8917,32 +9468,21 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
         if (survivorProfile && !survivorProfile.isAI) {
-            if (survivorProfile.playerAreaNotificationWidget) {
-                mod.DeleteUIWidget(survivorProfile.playerAreaNotificationWidget);
-                survivorProfile.playerAreaNotificationWidget = undefined;
-            }
-            survivorProfile.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(eventPlayer, survivorProfile.playerID);
-            survivorProfile.playerAreaNotificationIsSpeedBoost = false;
-            if (survivorProfile.playerAreaNotificationWidget) {
-                mod.SetUIWidgetDepth(survivorProfile.playerAreaNotificationWidget, mod.UIDepth.AboveGameUI);
-                mod.SetUIWidgetVisible(survivorProfile.playerAreaNotificationWidget, true);
-            }
+            survivorProfile.showSurvivorRoadWarning = true;
+            survivorProfile.UpdatePlayerAreaNotificationWidget();
         }
         return;
     }
 
     const pp = PlayerProfile.Get(eventPlayer);
-    if (pp) {
-        pp.infectedAreaSpeedBoostActive = true;
-    }
-    const botProfile = pp?._botProfile;
-    const targetInVehicle = pp?.currentTarget ? IsPlayerInTrackedVehicle(pp.currentTarget) : false;
-    const aiSpeedMultiplier = targetInVehicle ? 4 : 2;
-    if (botProfile) {
-        botProfile.speedMultiplier = aiSpeedMultiplier;
-    }
     if (pp?.isAI) {
+        const targetInVehicle = pp?.currentTarget
+            ? mod.GetSoldierState(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
+            : false;
+        const aiSpeedMultiplier = targetInVehicle ? 6 : 2;
         mod.SetPlayerMovementSpeedMultiplier(eventPlayer, aiSpeedMultiplier);
+        const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
+        if (slot) slot.tick.inAreaTrigger = true;
     }
 }
 
@@ -8950,6 +9490,9 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
     const playersInVehicle = mod.GetAllPlayersInVehicle(eventVehicle);
     console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
     const playerProfile = PlayerProfile.Get(eventPlayer);
+    if (playerProfile) {
+        playerProfile.invehicle = true;
+    }
     playerProfile?.loadoutDisplayBottom?.Hide();
     // attempting to use the mod APIs to fetch players
     for (let i = 0; i < mod.CountOf(playersInVehicle); i++) {
@@ -8964,12 +9507,26 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
 
 export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
     const playerProfile = PlayerProfile.Get(eventPlayer);
+    if (playerProfile) {
+        playerProfile.invehicle = false;
+    }
     playerProfile?.loadoutDisplayBottom?.Show();
+}
+
+async function CleanupVehicleWithDamage(vehicle: mod.Vehicle, delaySeconds: number) {
+    await mod.Wait(delaySeconds);
+    try {
+        mod.DealDamage(vehicle, 99999);
+    } catch {
+        try { mod.UnspawnObject(vehicle); } catch { }
+    }
 }
 
 export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     mod.SetVehicleMaxHealthMultiplier(eventVehicle, 0.5);
-    mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(202), 3);
+    for (const id of VEHICLE_SPAWNER_IDS) {
+        mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(id), 3);
+    }
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
 
     // Notify all players via the alpha feedback banner and attempt a VO on both teams.
@@ -8982,19 +9539,25 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
 }
 
 export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
-    mod.UnspawnObject(eventVehicle);
+    SPAWNED_ACTIVE_VEHICLE = undefined;
+    CleanupVehicleWithDamage(eventVehicle, 5);
 }
 
 export async function OngoingPlayer(eventPlayer: mod.Player) {
-    if (!Helpers.HasValidObjId(eventPlayer)) return;
-
     const playerObjId = mod.GetObjId(eventPlayer);
-    if (playerObjId < 0) return;
+    if (!Helpers.HasValidObjId(eventPlayer) || playerObjId < 0) return;
+    if (!IsPlayerDeployed(eventPlayer)) return;
 
     TickLeap(eventPlayer);
 
     // In test mode, skip all normal ongoing logic (icons, banned weapons, bot AI, etc.)
     if (LEAP_TEST_MODE) return;
+
+    // AI bots skip all human-specific logic and run a lean AI tick instead.
+    if (playerObjId > -1 && mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        OngoingAI(eventPlayer, playerObjId);
+        return;
+    }
 
     let tickState = PLAYER_ONGOING_TICK_STATE.get(playerObjId);
     if (!tickState) {
@@ -9004,7 +9567,18 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     const playerProfile = PlayerProfile.Get(eventPlayer);
     if (playerProfile && !playerProfile.isAI) {
+        const isInVehicle = mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle);
+        if (playerProfile.invehicle !== isInVehicle) {
+            playerProfile.invehicle = isInVehicle;
+            if (isInVehicle) {
+                playerProfile.loadoutDisplayBottom?.Hide();
+            } else if (GameHandler.gameState !== GameState.EndOfRound) {
+                playerProfile.loadoutDisplayBottom?.Show();
+            }
+        }
         playerProfile.UpdatePlayerAreaNotificationWidget();
+        playerProfile.UpdateLastManStandingBuffWidgets();
+        playerProfile.UpdateAlphaBuffWidgets();
         if (DEBUG_SHOW_ALL_UI_ELEMENTS) {
             playerProfile.DebugForceShowAllUIWidgets();
         }
@@ -9025,24 +9599,10 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     if (now >= tickState.nextBannedCheckAt) {
         tickState.nextBannedCheckAt = now + PLAYER_ONGOING_BANNED_CHECK_SECONDS;
-        if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)
-            && SafeIsAlive(eventPlayer)
+        if (SafeIsAlive(eventPlayer)
             && GameHandler.gameState === GameState.GameRoundIsRunning
             && now >= (tickState.bannedChecksEnabledAt ?? 0)) {
             CheckForBannedWeapons(eventPlayer);
-        }
-    }
-
-    // --- tick-driven Infected bot AI ---
-    if (now >= (tickState.nextInfectedBotTickAt ?? 0)) {
-        tickState.nextInfectedBotTickAt = now + PLAYER_ONGOING_INFECTED_BOT_TICK_SECONDS;
-        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)
-            && SafeIsAlive(eventPlayer)
-            && GameHandler.gameState === GameState.GameRoundIsRunning) {
-            const playerProfile = PlayerProfile.Get(eventPlayer);
-            if (playerProfile?.isInfectedTeam) {
-                InfectedBotLogicTick(eventPlayer, tickState);
-            }
         }
     }
 
@@ -9090,6 +9650,21 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     }
 }
 
+/**
+ * Lean AI tick: called from OngoingPlayer for AI soldiers only.
+ * Only infected bots run InfectedBotLogicTick; survivor bots use self-managing AIDefendPositionBehavior.
+ */
+function OngoingAI(player: mod.Player, playerObjId: number): void {
+    const slot = InfectedBotSlot.GetByObjID(playerObjId);
+    if (!slot || slot.state !== BotSlotState.Alive) return;
+
+    const now = Date.now() / 1000;
+    if (now < slot.tick.nextTickAt) return;
+    slot.tick.nextTickAt = now + AI_BOT_TICK_SECONDS;
+
+    InfectedBotLogicTick(slot);
+}
+
 export async function OnGameModeStarted() {
     mod.EnableAllPlayerDeploy(false);
     mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
@@ -9100,6 +9675,20 @@ export async function OnGameModeStarted() {
         await LeapTestHarness.start();
         return;
     }
+
+    // Sweep any vehicles left in the world from a previous session and remove them after a delay.
+    (async () => {
+        const existingVehicles = mod.AllVehicles();
+        const count = mod.CountOf(existingVehicles);
+        if (count > 0) {
+            console.log(`OnGameModeStarted | Found ${count} pre-existing vehicle(s); scheduling removal in 10s.`);
+            await mod.Wait(10);
+            for (let i = 0; i < count; i++) {
+                const v = mod.ValueInArray(existingVehicles, i) as mod.Vehicle;
+                CleanupVehicleWithDamage(v, 0);
+            }
+        }
+    })();
 
     // Gate mode initialization until HQ position resolves to a known map identifier.
     const map = await WaitForCurrentMapGate(!SKIP_SESSION_START);
@@ -9120,6 +9709,10 @@ export async function OnGameModeStarted() {
     GameHandler.gameState = GameState.PreGame;
     mod.SetAIToHumanDamageModifier(GameHandler.humanPlayers >= 2 ? AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI : AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO);
     GameHandler.endOfRoundCondition = '0 survivors';
+    GameHandler.survivorsNextRound = GameHandler.aiSlotsToBackfill;
+    GameHandler.infectedNextRound = 0;
+    GameHandler.skipAlphaSelection = false;
+    GameHandler.preserveAlpha = false;
     GameHandler.InitializeScoreboardTimeAndColumns();
     await GameHandler.PreGameSetup();
 
