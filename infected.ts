@@ -23,10 +23,9 @@ const INFECTED_RESPAWN_TIME_LAST_MAN = 4;
 const INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS = 3;
 const PLAYER_REDEPLOY_TIME = 1;
 const SURVIVOR_AI_SPAWNERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33];
-// Spawner IDs reserved for the parachute drop pool — enabled after a round where 2+ survivors remain.
+const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
 // TODO: replace with actual map spawner IDs configured in the level editor.
-const PARACHUTE_INFECTED_SPAWNERS: number[] = [34, 35, 36, 37, 38];
+const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 1;
 // DotProduct(survivorFacing, normalizedDirSurvivorToBot) < this value means the bot is in the
@@ -84,13 +83,27 @@ const POINTS_ROUND_SURVIVED = 850;
 const HEALTH_RESTORE_ON_INFECTED = 50;
 const LMS_RELOAD_POLL_SECONDS = 0.1;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
-const INFECTED_HINT_ROTATION_SECONDS = 30;
+const INFECTED_HINT_ROTATION_SECONDS = 8;
 const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
 const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
 const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 10; // Useless, just a player-facing message. Game/AI need to run for nearly 2 minutes before things settle.
 
 const INFECTED_HINT_STRING_KEYS = [
     "infected_hint_alpha_leap",
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
+const INFECTED_ALPHA_HINT_STRING_KEYS = [
+    "infected_hint_vehicle_leap",
+    "infected_hint_leap_mechanic",
+    "infected_hint_alpha_leap",
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
+const LMS_HINT_STRING_KEYS = [
+    "lms_hint_you_are_last"
 ] as const;
 
 const LMS_BUFF_STRING_KEYS = [
@@ -334,6 +347,11 @@ function ResolveStringKeyMessage(key: string): mod.Message {
 function GetInfectedHintMessage(index: number): mod.Message {
     const normalizedIndex = ((index % INFECTED_HINT_STRING_KEYS.length) + INFECTED_HINT_STRING_KEYS.length) % INFECTED_HINT_STRING_KEYS.length;
     return ResolveStringKeyMessage(INFECTED_HINT_STRING_KEYS[normalizedIndex]);
+}
+
+function GetAlphaInfectedHintMessage(index: number): mod.Message {
+    const normalizedIndex = ((index % INFECTED_ALPHA_HINT_STRING_KEYS.length) + INFECTED_ALPHA_HINT_STRING_KEYS.length) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
+    return ResolveStringKeyMessage(INFECTED_ALPHA_HINT_STRING_KEYS[normalizedIndex]);
 }
 
 function GetLastManStandingBuffMessages(): mod.Message[] {
@@ -787,10 +805,10 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Magazine_45rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_45rnd_fast_mag", rarity: 30, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_75rnd_Drum, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_75rnd_drum", rarity: 30, compatibleNameKeys: ["rpkm"] },
         // Lights and lasers (sidearms)
-        { attachment: mod.WeaponAttachments.Bottom_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_red", rarity: 5, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Bottom_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_green", rarity: 10, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Bottom_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_50mw_green", rarity: 20, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 20, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_red", rarity: 5, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_green", rarity: 10, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_50mw_green", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
         // Rail attachments (Top / Right / Left) lasers, flashlights, and lights
         { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["db12", "m277"] },
         { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["db12", "m277"] },
@@ -1563,7 +1581,7 @@ class UI {
         message: mod.Message = mod.Message(mod.stringkeys.survivor_area_warning),
         showIcon: mod.UIImageType = mod.UIImageType.QuestionMark
     ): mod.UIWidget | undefined {
-        const containerWidth = 450;
+        const containerWidth = 500;
         const containerHeight = 40;
 
         const xOffset = -(1024 / 2 - containerWidth / 2); // -287: aligns left edge with the scoreboard
@@ -1571,7 +1589,7 @@ class UI {
             {
                 type: "Text",
                 name: `player_area_notification_text_${playerID}`,
-                position: [0, 0, 0],
+                position: [0, 0, 10],
                 size: [containerWidth, containerHeight],
                 anchor: mod.UIAnchor.Center,
                 textAnchor: mod.UIAnchor.Center,
@@ -1599,7 +1617,7 @@ class UI {
         return ParseUI({
             type: "Container",
             name: `player_area_notification_${playerID}`,
-            position: [xOffset, UI.areaTriggerNotificationY, 0],
+            position: [xOffset, UI.areaTriggerNotificationY, 5],
             size: [containerWidth, containerHeight],
             anchor: mod.UIAnchor.TopCenter,
             bgFill: mod.UIBgFill.Blur,
@@ -1644,7 +1662,7 @@ class UI {
     ): mod.UIWidget | undefined {
         const containerWidth = 450;
         const containerHeight = 24;
-        const iconSize = 45;
+        const iconSize = 30;
         const textOffset = 30;
         const xOffset = -(1024 / 2 - containerWidth / 2);
         const yOffset = UI.survivorNotificationY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
@@ -1665,7 +1683,7 @@ class UI {
                     position: [0, 0, 0],
                     size: [iconSize, iconSize, 0],
                     anchor: mod.UIAnchor.CenterLeft,
-                    imageType: mod.UIImageType.SelfHeal,
+                    imageType: mod.UIImageType.SpawnBeacon,
                     imageColor: UI.battlefieldYellow,
                     imageAlpha: 1,
                     bgAlpha: 0,
@@ -1708,7 +1726,7 @@ class UI {
     ): mod.UIWidget | undefined {
         const containerWidth = 450;
         const containerHeight = 24;
-        const iconSize = 45;
+        const iconSize = 30;
         const textOffset = 30;
         const xOffset = -(1024 / 2 - containerWidth / 2);
         const yOffset = UI.ammoFeedbackY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
@@ -1729,7 +1747,7 @@ class UI {
                     position: [0, 0, 0],
                     size: [iconSize, iconSize, 0],
                     anchor: mod.UIAnchor.CenterLeft,
-                    imageType: mod.UIImageType.SelfHeal,
+                    imageType: mod.UIImageType.SpawnBeacon,
                     imageColor: UI.battlefieldRedBg,
                     imageAlpha: 1,
                     bgAlpha: 0,
@@ -3897,15 +3915,21 @@ class PlayerProfile {
     UpdatePlayerAreaNotificationWidget() {
         if (this.isAI) return;
         const isInfected = this.isInfectedTeam || (mod.GetObjId(mod.GetTeam(this.player)) === mod.GetObjId(INFECTED_TEAM));
+        const isAlive = SafeIsAlive(this.player);
+        const isGameRoundActive = GameHandler.gameState === GameState.GameRoundIsRunning;
         const shouldShowSurvivorWarning = !isInfected
             && this.showSurvivorRoadWarning
-            && SafeIsAlive(this.player)
-            && GameHandler.gameState === GameState.GameRoundIsRunning;
+            && isAlive
+            && isGameRoundActive;
+        const shouldShowLMSHint = !isInfected
+            && this.isLastManStanding
+            && isAlive
+            && isGameRoundActive;
         const shouldShowHint = isInfected
-            && SafeIsAlive(this.player)
-            && GameHandler.gameState === GameState.GameRoundIsRunning;
+            && isAlive
+            && isGameRoundActive;
 
-        if (!shouldShowHint && !shouldShowSurvivorWarning) {
+        if (!shouldShowHint && !shouldShowSurvivorWarning && !shouldShowLMSHint) {
             this.DeletePlayerAreaNotificationWidget();
             return;
         }
@@ -3924,8 +3948,87 @@ class PlayerProfile {
             return;
         }
 
+        if (shouldShowLMSHint) {
+            const lmsHintMessage = ResolveStringKeyMessage(LMS_HINT_STRING_KEYS[0]);
+            if (!this.playerAreaNotificationWidget) {
+                this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                    this.player,
+                    this.playerID,
+                    lmsHintMessage,
+                );
+            }
+            if (this.playerAreaNotificationWidget) {
+                UI.UpdatePlayerAreaNotification(this, lmsHintMessage, mod.UIImageType.SpawnBeacon, mod.CreateVector(1,1,1));
+            }
+            return;
+        }
+
         const now = Date.now() / 1000;
 
+        // Alpha infected: show leap charge status when crouching, rotate alpha tips when idle
+        if (this.isAlphaInfected) {
+            const leapState = LEAP_STATES.get(mod.GetObjId(this.player));
+            if (leapState && leapState.chargeVfxState !== 'none') {
+                if (!this.playerAreaNotificationWidget) {
+                    this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                        this.player,
+                        this.playerID,
+                        MakeMessage(mod.stringkeys.leap_status_charging, 0, Math.floor(LEAP_CROUCH_HOLD_SECONDS)),
+                    );
+                }
+                // Reset the tip rotation timer so we get a full window after un-crouching
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+                if (this.playerAreaNotificationWidget) {
+                    if (leapState.chargeVfxState === 'charging') {
+                        const crouchHeld = leapState.crouchStartTime > 0 ? now - leapState.crouchStartTime : 0;
+                        const chargeWhole = Math.floor(crouchHeld * 10);
+                        const chargeTotal = Math.floor(LEAP_CROUCH_HOLD_SECONDS);
+                        UI.UpdatePlayerAreaNotification(
+                            this,
+                            MakeMessage(mod.stringkeys.leap_status_charging, chargeWhole, chargeTotal),
+                            mod.UIImageType.CrownOutline,
+                            UI.battlefieldYellowBg,
+                        );
+                    } else {
+                        if (leapState.previewIsBlocked) {
+                            UI.UpdatePlayerAreaNotification(
+                                this,
+                                MakeMessage(mod.stringkeys.leap_status_no_room),
+                                mod.UIImageType.CrownOutline,
+                                UI.battlefieldRedBg,
+                            );
+                        } else {
+                            UI.UpdatePlayerAreaNotification(
+                                this,
+                                MakeMessage(mod.stringkeys.leap_status_ready),
+                                mod.UIImageType.CrownSolid,
+                                mod.CreateVector(0.063, 0.25, 0.094),
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Not crouching: rotate alpha-specific tips
+            if (!this.playerAreaNotificationWidget) {
+                this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
+                    this.player,
+                    this.playerID,
+                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex),
+                );
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+            } else if (now >= this.nextPlayerAreaHintRotationAt) {
+                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
+                this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
+            }
+            if (this.playerAreaNotificationWidget) {
+                UI.UpdatePlayerAreaNotification(this, GetAlphaInfectedHintMessage(this.playerAreaHintIndex));
+            }
+            return;
+        }
+
+        // Non-alpha infected: rotate standard infected tips
         if (!this.playerAreaNotificationWidget) {
             this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
                 this.player,
@@ -3937,7 +4040,6 @@ class PlayerProfile {
             this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_HINT_STRING_KEYS.length;
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         }
-
         if (this.playerAreaNotificationWidget) {
             UI.UpdatePlayerAreaNotification(this, GetInfectedHintMessage(this.playerAreaHintIndex));
         }
@@ -4683,9 +4785,9 @@ class GameHandler {
 
     static sand2_Sfx = [
         { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
-        { id: 2503, attenuation: 7, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
-        { id: 2504, attenuation: 3, object: mod.RuntimeSpawn_Common.SFX_Levels_Brooklyn_Shared_Spots_GarbageFlies_SimpleLoop3D },
-        { id: 2505, attenuation: 10, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingWarm_SimpleLoop3D },
+        { id: 2503, attenuation: 5, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
+        { id: 2504, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Brooklyn_Shared_Spots_GarbageFlies_SimpleLoop3D },
+        { id: 2505, attenuation: 25, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingWarm_SimpleLoop3D },
         { id: 2506, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
         { id: 2507, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
         { id: 2508, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
@@ -8104,8 +8206,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
     // --- Animation loop: each pass recomputes the arc and fires ONE fresh geometry probe ---
     // Doing the collision check per-iteration (instead of once at startup) ensures the
-    // indicator and trail truncation are always consistent with the player's current
-    // position and facing direction, fixing stale-cache issues for all three VFX bugs.
+    // indicator and trail truncation are always consistent with the player's current position
     while (isValid()) {
         // Recompute arc from the player's live position and facing direction
         const liveTrack = computeLeapTrack(player);
@@ -8161,11 +8262,12 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
             blockedSfxCooldown--;
             if (blockedSfxCooldown <= 0) {
                 // Brief horizontal pulse to draw attention to the blocked indicator
-                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.RightVector(), 0.2)));
-                await mod.Wait(0.08);
+                // disabling pulse, maybe causing latency issues
+                // mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.RightVector(), 0.2)));
+                // await mod.Wait(0.08);
                 Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
-                mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.LeftVector(), 0.2)));
-                await mod.Wait(0.08);
+                // mod.SetWorldIconPosition(state.blockedWarnIcon, mod.Add(destPos, mod.Multiply(mod.LeftVector(), 0.2)));
+                // await mod.Wait(0.08);
                 if (!isValid()) break;
                 mod.SetWorldIconPosition(state.blockedWarnIcon, destPos);
                 blockedSfxCooldown = BLOCKED_WARN_PASSES;
@@ -8274,12 +8376,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         return;
     }
 
-    // Play launch sound and switch to third-person
-    const leapSfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.SFX_Projectiles_Flybys_Large_Cannon_Shell_120mm_FlyBy_Close_OneShot3D,
-        startPos, ZERO_VEC
-    );
-    mod.PlaySound(leapSfx, 1);
+
     setLeapCamera(player, state, mod.Cameras.ThirdPerson);
 
     // --- Inline geometry collision check (3 raycasts) ---
@@ -8419,6 +8516,13 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.RuntimeSpawn_Common.FX_Grenade_Incendiary_Trail,
         travelSteps[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
     ) as mod.VFX;
+        // Ready the launch sound and switch to third-person
+    const leapSfx = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.SFX_Projectiles_Flybys_Large_Cannon_Shell_120mm_FlyBy_Close_OneShot3D,
+        finalDest, ZERO_VEC
+    );
+    // enable trail vfx and play projectile flyby sound at destination
+    mod.PlaySound(leapSfx, 1);
     mod.EnableVFX(trailVfx, true);
     // Teleport along the rescaled arc, then snap to exact landing position
     for (let i = 0; i < travelSteps.length - 1; i++) {
@@ -8910,11 +9014,14 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 // planned to use custom ladder logic for the AI infected, but never finished it
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
     if (!mod.IsPlayerValid(eventPlayer)) return;
-    // Ladder logic was removed. For survivor bots, fall back to idle if pathing fails.
-    if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(SURVIVOR_TEAM)) {
+    // Fall back to idle for both teams to clear any stale move target.
+    const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
+    if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
         console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
-        mod.AIIdleBehavior(eventPlayer);
+    } else {
+        console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
     }
+    mod.AIIdleBehavior(eventPlayer);
 }
 
 export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner) {
