@@ -1481,13 +1481,9 @@ class UI {
     static battlefieldYellow = mod.CreateVector(0.961, 0.953, 0.51);
     static battlefieldYellowBg = mod.CreateVector(0.741, 0.729, 0.031);
     static infectedNightGreen = mod.CreateVector(0.01, 0.02, 0.01);
-    static blackColor = mod.CreateVector(0, 0, 0);
+    static blackColor = mod.CreateVector(0, 0, 0); // pure black
     static gradientAlpha: number = 0.04;
     static showingAlert: boolean = false;
-    // static deadSurvivors: number = 0;
-    // static deadInfected: number = 0;
-    // static xOffsetInfect = 15;
-    // static xOffsetSurv = 15;
 
     static notificationVerticalGap = 1;
     static areaTriggerNotificationY = 60 + UI.notificationVerticalGap;
@@ -1502,8 +1498,8 @@ class UI {
     static alphaSelectionHeight = 40;
     static gameStateNotificationY = 120 + UI.notificationVerticalGap; // 
 
-    static playerInfectionAlertPosition = mod.CreateVector(0, UI.alphaFeedbackY, 0);
-    static playerAlertInfectionSize = mod.CreateVector(320, 45, 0);
+    static playerInfectionAlertPosition = mod.CreateVector(0, 20 + this.gameStateNotificationY, 0);
+    static playerInfectionAlertSize = mod.CreateVector(320, 45, 0);
 
     static UpdateUI(widget: mod.UIWidget | undefined, message?: mod.Message, show?: boolean, size?: mod.Vector): void {
         widget && message && mod.SetUITextLabel(widget, message);
@@ -1588,7 +1584,7 @@ class UI {
 
     static CreateInfectedByAlert(playerProfile: PlayerProfile): mod.UIWidget {
         const componentName = "infected_by_alert_" + playerProfile.playerID;
-        mod.AddUIText(componentName, this.playerInfectionAlertPosition, this.playerAlertInfectionSize, mod.UIAnchor.TopCenter, MakeMessage(mod.stringkeys.infected_on_death, playerProfile.player), playerProfile.player);
+        mod.AddUIText(componentName, this.playerInfectionAlertPosition, this.playerInfectionAlertSize, mod.UIAnchor.TopCenter, MakeMessage(mod.stringkeys.infected_on_death, playerProfile.player), playerProfile.player);
         let widget = mod.FindUIWidgetWithName(componentName) as mod.UIWidget;
         mod.SetUITextColor(widget, UI.battlefieldWhite);
         mod.SetUITextSize(widget, 22);
@@ -1605,7 +1601,7 @@ class UI {
 
     static CreateYouInfectedAlert(playerProfile: PlayerProfile): mod.UIWidget {
         const componentName = "you_infected_alert_" + playerProfile.playerID;
-        mod.AddUIText(componentName, this.playerInfectionAlertPosition, this.playerAlertInfectionSize, mod.UIAnchor.TopCenter, MakeMessage(mod.stringkeys.infected_on_kill, playerProfile.player), playerProfile.player);
+        mod.AddUIText(componentName, this.playerInfectionAlertPosition, this.playerInfectionAlertSize, mod.UIAnchor.TopCenter, MakeMessage(mod.stringkeys.infected_on_kill, playerProfile.player), playerProfile.player);
         let widget = mod.FindUIWidgetWithName(componentName) as mod.UIWidget;
         mod.SetUITextColor(widget, UI.battlefieldWhite);
         mod.SetUITextSize(widget, 22);
@@ -9579,8 +9575,8 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     for (const playerProfile of PlayerProfile._allPlayerProfiles) {
         playerProfile.ShowAlphaFeedback(vehicleSpawnedMessage);
     }
-    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
-    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
+    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
 }
 
 export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
