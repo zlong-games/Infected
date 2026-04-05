@@ -8971,6 +8971,14 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     mod.SetVehicleMaxHealthMultiplier(eventVehicle, 0.5);
     mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(202), 3);
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
+
+    // Notify all players via the alpha feedback banner and attempt a VO on both teams.
+    const vehicleSpawnedMessage = ResolveStringKeyMessage("vehicle_spawned");
+    for (const playerProfile of PlayerProfile._allPlayerProfiles) {
+        playerProfile.ShowAlphaFeedback(vehicleSpawnedMessage);
+    }
+    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
 }
 
 export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
