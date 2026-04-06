@@ -5555,7 +5555,7 @@ class GameHandler {
     /**
      * Undeploys human infected players at the end of the round
      */
-    static async UndeployAllHumanPlayers() {
+    static async UndeployAllInfectedHumanPlayers() {
         console.log('Undeploying all human infected players.');
         let allPlayers = mod.AllPlayers();
         const pcount = mod.CountOf(allPlayers);
@@ -5732,7 +5732,7 @@ class GameHandler {
 
         await GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.round_over));
 
-        await this.UndeployAllHumanPlayers();
+        await this.UndeployAllInfectedHumanPlayers();
         await this.KillAllBotsEndRound();
 
         // Eject any occupants and queue deferred damage to force full vehicle removal
