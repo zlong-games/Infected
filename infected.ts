@@ -5160,7 +5160,7 @@ class GameHandler {
 
         for (let i = 0; i < n; i++) {
             const p = mod.ValueInArray(allPlayers, i) as mod.Player;
-            if (!mod.IsPlayerValid(p)) continue;
+            if (!PlayerIsAliveAndValid(p)) continue;
             total++;
             if (!mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier)) humans++;
             const isAlive = mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive);
@@ -5494,7 +5494,7 @@ class GameHandler {
             playerProfile && (playerProfile.isInfectedTeam = false);
             playerProfile && (playerProfile.isInitialSpawn = false);
             playerProfile && playerProfile.UpdateInfectedNightOverlay(false);
-            if (mod.IsPlayerValid(pp) && mod.GetSoldierState(pp, mod.SoldierStateBool.IsAlive)) {
+            if (PlayerIsAliveAndValid(pp)) {
                 mod.UndeployPlayer(pp);
                 mod.SetTeam(pp, mod.GetTeam(1));
                 continue;
@@ -5518,7 +5518,7 @@ class GameHandler {
         if (enabled) {
             PlayerProfile._allPlayerProfiles.forEach(playerProfile => {
                 const player = playerProfile.player;
-                if (mod.IsPlayerValid(player)) {
+                if (PlayerIsAliveAndValid(player)) {
                     try {
                         if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
                             mod.AIEnableTargeting(player, false);
@@ -5536,7 +5536,7 @@ class GameHandler {
         } else {
             PlayerProfile._allPlayerProfiles.forEach(playerProfile => {
                 const player = playerProfile.player;
-                if (mod.IsPlayerValid(player)) {
+                if (PlayerIsAliveAndValid(player)) {
                     try {
                         if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
                             mod.AIEnableTargeting(player, true);
@@ -5616,8 +5616,8 @@ class GameHandler {
         const pcount = mod.CountOf(allPlayers);
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
-                // mod.UndeployPlayer(player); // this forces bots to respawn. DO NOT USE THIS.
+            if (PlayerIsAliveAndValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                // mod.UndeployPlayer(player); // this forces bots to respawn. NEVER USE THIS.
                 if (PlayerProfile._deployedPlayers.has(mod.GetObjId(player))) {
                     PlayerProfile.RemoveFromDeployedPlayers(mod.GetObjId(player));
                 }
@@ -5625,14 +5625,6 @@ class GameHandler {
             }
 
         }
-
-        console.log('Verifying cleanup on bots...');
-        const survivors = GameHandler.GetAllPlayersOnTeam(SURVIVOR_TEAM).filter(player =>
-            PlayerIsAliveAndValid(player));
-        const infected = GameHandler.GetAllPlayersOnTeam(INFECTED_TEAM).filter(player =>
-            PlayerIsAliveAndValid(player));
-        console.log(`Current Alive Teams | Survivors: ${survivors.length} | Infected: ${infected.length}`);
-        console.log(`Current GameHandler Counts | Survivors: ${GameHandler.survivorsCount} | Infected: ${GameHandler.infectedCount}`);
     }
 
     static async HandleEoRSpawns(expr: caseOptions | undefined) {
@@ -5751,7 +5743,7 @@ class GameHandler {
         // If any human survivors remain alive and deployed, refresh their equipment to match the new round
         try {
             const survivorsAlive = GameHandler.GetAllPlayersOnTeam(SURVIVOR_TEAM)
-                .filter(p => mod.IsPlayerValid(p) && mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive) && !mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier));
+                .filter(p => PlayerIsAliveAndValid(p) && !mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier));
             for (const player of survivorsAlive) {
                 const pp = PlayerProfile.Get(player);
                 if (pp) {
@@ -6540,6 +6532,7 @@ class AISpawnHandler {
     }
 
     static async OnBotSpawnFromSpawner(eventPlayer: mod.Player, spawnerObjID: number): Promise<void> {
+        if (!PlayerIsAliveAndValid(eventPlayer)) return;
         if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
             GameHandler.gameState === GameState.EndOfRound) {
             return;
@@ -7593,7 +7586,7 @@ function CleanupPlayerOngoingVisuals(playerObjId: number) {
 
 
 function CheckForBannedWeapons(player: mod.Player) {
-    if (!mod.IsPlayerValid(player) || !PlayerProfile.isValidPlayer(player)) {
+    if (!PlayerIsAliveAndValid(player)) {
         return false;
     }
 
@@ -9018,7 +9011,7 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 // planned to use custom ladder logic for the AI infected, but never finished it
 // building out a fallback when bots' pathing fails. Which WILL happen. Fuck.
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
-    if (!mod.IsPlayerValid(eventPlayer)) return;
+    if (!PlayerIsAliveAndValid(eventPlayer)) return;
     const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
     if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
         console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
@@ -9056,6 +9049,7 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
 }
 
 export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner) {
+    await mod.Wait(0.2);
     if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
         GameHandler.gameState === GameState.EndOfRound) {
         if (!LEAP_TEST_MODE) return;
