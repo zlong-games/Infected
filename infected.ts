@@ -3964,6 +3964,12 @@ class PlayerProfile {
 
     UpdatePlayerAreaNotificationWidget() {
         if (this.isAI) return;
+        if (this.alphaFeedbackBeingShown) {
+            if (this.playerAreaNotificationWidget) {
+                mod.SetUIWidgetVisible(this.playerAreaNotificationWidget, false);
+            }
+            return;
+        }
         const isInfected = this.isInfectedTeam || (mod.GetObjId(mod.GetTeam(this.player)) === mod.GetObjId(INFECTED_TEAM));
         const isAlive = SafeIsAlive(this.player);
         const isGameRoundActive = GameHandler.gameState === GameState.GameRoundIsRunning;
@@ -4507,6 +4513,9 @@ class PlayerProfile {
         }
 
         this.alphaFeedbackBeingShown = true;
+        if (this.playerAreaNotificationWidget) {
+            mod.SetUIWidgetVisible(this.playerAreaNotificationWidget, false);
+        }
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[0], true);
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[1], true);
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[2], true);
@@ -4525,6 +4534,7 @@ class PlayerProfile {
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[0], false);
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[1], false);
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[2], false);
+        this.UpdatePlayerAreaNotificationWidget();
     }
     // also used for vehicle spawning
     CreateAlphaInfectedAlert(): mod.UIWidget {
@@ -9039,14 +9049,13 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 ///////---------------- GAME FUNCTIONS -----------------//////////
 //////////////////////////////////////////////////////////////////
 
-// planned to use custom ladder logic for the AI infected, but never finished it
 // building out a fallback when bots' pathing fails. Which WILL happen. Fuck.
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
     if (!PlayerIsAliveAndValid(eventPlayer)) return;
     const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
     if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
-        console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
-        mod.AIIdleBehavior(eventPlayer);
+        console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to battlefield behavior`);
+        mod.AIBattlefieldBehavior(eventPlayer);
     } else {
         const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
         if (!slot) {
@@ -9060,22 +9069,23 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
         slot.tick.moveFailCount = moveFailCount;
 
         if (moveFailCount === 1) {
-            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #1 - idle for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
-            mod.AIIdleBehavior(eventPlayer);
-            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
-            return;
-        }
-
-        if (moveFailCount === 2) {
-            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #2 - battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #1 - battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
             mod.AIBattlefieldBehavior(eventPlayer);
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
             return;
         }
 
-        console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
-        slot.tick.moveFailHoldUntil = undefined;
-        mod.Kill(eventPlayer);
+        if (moveFailCount >= 2) {
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #2 - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
+            mod.AIBattlefieldBehavior(eventPlayer);
+            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
+            return;
+        }
+         if (moveFailCount >= 15) {
+             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
+             slot.tick.moveFailHoldUntil = undefined;
+             mod.Kill(eventPlayer);
+         }
     }
 }
 
