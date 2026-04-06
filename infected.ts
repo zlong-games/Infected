@@ -40,6 +40,7 @@ const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicl
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.3;        // throttle for normal (on-foot) targets
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.3;         // reissue very frequently when within melee range
 const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
+const AI_MOVE_FAILURE_RECOVERY_SECONDS = 2.0;       // pause chase tick after move-fail recovery behavior
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.3; // lower values are easier
 const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 0.5;
 const MAX_PLAYER_COUNT = 12;
@@ -57,6 +58,7 @@ const SFX_MELEE_HIT_FALL_DMG: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.
 const SFX_MELEE_HIT_ARMR_BRK: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Damage_ArmorBreakSelf_OneShot2D;
 const SFX_FINAL_FIVE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Rodeo_TanksLockerUnlocking_OneShot2D;
 const SFX_ALPHA_SELECTED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Standoff_ZoneExit_OneShot2D;
+const SFX_ALPHA_LEAP_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_Decoy_WeaponFireVar01_OneShot3D; //now 3d cause couldn't find a good one
 
 const SFX_TICKDOWN_START: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Appear_OneShot2D;
 const SFX_TICKDOWN: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Tick_OneShot2D;
@@ -97,7 +99,6 @@ const INFECTED_HINT_STRING_KEYS = [
 const INFECTED_ALPHA_HINT_STRING_KEYS = [
     "infected_hint_vehicle_leap",
     "infected_hint_leap_mechanic",
-    "infected_hint_alpha_leap",
     "infected_hint_assault_ladder",
     "infected_hint_brains",
 ] as const;
@@ -114,6 +115,7 @@ const LMS_BUFF_STRING_KEYS = [
 ] as const;
 
 const ALPHA_BUFF_STRING_KEYS = [
+    "alpha_infected_area_notification",
     "alpha_buff_tankier",
     "alpha_buff_leap_attack",
     "alpha_buff_speed",
@@ -536,7 +538,7 @@ const BOT_NAME_MAP: Map<number, string> = new Map();
 Helpers.GenerateBotNameMap();
 
 const ALPHA_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
-const ALPHA_DEBUG_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
+const ALPHA_VFX_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
 const INFECTED_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 const LMS_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 
@@ -829,12 +831,12 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Bottom_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_red", rarity: 5, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
         { attachment: mod.WeaponAttachments.Bottom_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_5mw_green", rarity: 10, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
         { attachment: mod.WeaponAttachments.Bottom_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_50mw_green", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
-        { attachment: mod.WeaponAttachments.Bottom_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_laserlight_green", rarity: 20, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_flashlight", rarity: 10, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
+        { attachment: mod.WeaponAttachments.Bottom_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_bottom_laserlight_green", rarity: 10, compatibleNameKeys: ["m45a1", "m357", "es57", "p18", "g22"] },
         // Rail attachments (Top / Right / Left) lasers, flashlights, and lights
         // Top lasers (carbines and one shotgun)
         { attachment: mod.WeaponAttachments.Top_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_green", rarity: 10, compatibleNameKeys: ["db12", "m277", "m4a1"] },
-        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 15, compatibleNameKeys: ["db12", "m277", "m4a1"] },
+        { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 10, compatibleNameKeys: ["db12", "m277", "m4a1"] },
         { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 20, compatibleNameKeys: ["db12", "m277", "m4a1"] },
         // Right Lasers and lights
         { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
@@ -3815,7 +3817,6 @@ class PlayerProfile {
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, true);
             if (playerProfile.isAlphaInfected) {
                 ShowAlphaInfectedIndicator(player);
-                ShowAlphaInfectedDebugIndicator(player);
             }
         }
 
@@ -4497,14 +4498,14 @@ class PlayerProfile {
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[1], false);
         mod.SetUIWidgetVisible(this.chosenAsAlphaInfectedWidget[2], false);
     }
-
+    // also used for vehicle spawning
     CreateAlphaInfectedAlert(): mod.UIWidget {
         const widgetName: string = `alpha_infected_${this.playerID}`;
         let yOffset: number = UI.alphaSelectionY;
         mod.AddUIText(
             widgetName,
             mod.CreateVector(0, yOffset, 0),
-            mod.CreateVector(550, 40, 60), //above other below-scoreboard msgs
+            mod.CreateVector(550, 40, 100), //above other below-scoreboard msgs
             mod.UIAnchor.TopCenter,
             MakeMessage(mod.stringkeys.spawn_message, this.player),
             this.player
@@ -4518,6 +4519,7 @@ class PlayerProfile {
         mod.SetUIWidgetBgFill(widget, mod.UIBgFill.Solid);
         mod.SetUIWidgetBgColor(widget, UI.battlefieldRedBg);
         mod.SetUIWidgetBgAlpha(widget, 0.9);
+        mod.SetUIWidgetDepth(widget, mod.UIDepth.AboveGameUI);
         mod.SetUIWidgetVisible(widget, false);
 
         return widget;
@@ -4530,7 +4532,7 @@ class PlayerProfile {
         mod.AddUIContainer(
             widgetName,
             mod.CreateVector(horizontalOffset, yOffset, 0),
-            mod.CreateVector(200, 40, 0),
+            mod.CreateVector(200, 40, 100),
             mod.UIAnchor.TopCenter,
             this.player
         );
@@ -4542,6 +4544,7 @@ class PlayerProfile {
         mod.SetUIWidgetBgColor(widget, UI.battlefieldRedBg);
         mod.SetUIWidgetBgAlpha(widget, 0.9);
         mod.SetUIWidgetVisible(widget, false);
+        mod.SetUIWidgetDepth(widget, mod.UIDepth.AboveGameUI);
 
         return widget;
     }
@@ -5988,6 +5991,8 @@ interface InfectedBotTickState {
     leapInProgress?: boolean;
     inAreaTrigger?: boolean;
     lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
+    moveFailCount?: number;     // increments on move-fail callbacks; reset on respawn
+    moveFailHoldUntil?: number; // suppresses chase tick while failure recovery is active
 }
 
 /** One slot per spawner in INFECTED_AI_SPAWNERS (plus PARACHUTE_INFECTED_SPAWNERS when enabled). Persists across deaths. */
@@ -6157,7 +6162,6 @@ class InfectedBotSlot {
             await AISpawnHandler.AssignAIEquipment(player, TeamNameString.Infected);
             if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
             ShowAlphaInfectedIndicator(player);
-            ShowAlphaInfectedDebugIndicator(player);
             if (this.isAlpha) {
                 InitLeapSystem(player);
             }
@@ -6624,7 +6628,10 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     if (GameHandler.gameState !== GameState.GameRoundIsRunning) return;
     if (!PlayerIsAliveAndValid(infectedBot)) return;
 
+    // Hold off the chase tick while move-fail recovery is active.
     const now = Date.now() / 1000;
+    if (slot.tick.moveFailHoldUntil && now < slot.tick.moveFailHoldUntil) return;
+
     const tick = slot.tick;
 
     // Re-evaluate target each tick
@@ -7080,12 +7087,12 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     // conditional stats for humans
     if (!isAI) {
         if (isInfected) {
-            mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.2 : 1);
+            mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.1 : 1);
             mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 0.5 : 0.7);
-            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 500 : 250);
+            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 300 : 150);
         } else {
             mod.SetPlayerMovementSpeedMultiplier(eventPlayer, 1);
-            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isLastManStanding ? 0.3 : 1);
+            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isLastManStanding ? 0.5 : 1);
             mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isLastManStanding ? 240 : 60);
         }
     }
@@ -7104,6 +7111,17 @@ function RefreshHumanEquipment(eventPlayer: mod.Player, playerProfile: PlayerPro
         console.log(`RefreshHumanEquipment | removal error for Player(${mod.GetObjId(eventPlayer)}): ${e}`);
     }
     InitializePlayerEquipment(eventPlayer, playerProfile);
+
+    const isInfected = playerProfile.isInfectedTeam || (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM));
+    if (!isInfected) {
+        try {
+            // Survivors always keep their baseline melee knife as part of the mode kit.
+            mod.RemoveEquipment(eventPlayer, mod.InventorySlots.MeleeWeapon);
+            mod.AddEquipment(eventPlayer, mod.Gadgets.Melee_Combat_Knife);
+        } catch (e) {
+            console.log(`RefreshHumanEquipment | melee restore error for Player(${mod.GetObjId(eventPlayer)}): ${e}`);
+        }
+    }
 }
 
 async function SelectRandomAlphaInfected(deferActions: boolean = false) {
@@ -7367,12 +7385,13 @@ async function DisplayWorldIconResupply() {
         mod.SetWorldIconText(worldIcon, MakeMessage(mod.stringkeys.resupply));
         mod.EnableWorldIconText(worldIcon, true);
     }
-    await mod.Wait(ROUND_DURATION * 0.95);
-    for (let i = 0; i < RESUPPLY_WORLD_ICONS.length; i++) {
-        const worldIcon = mod.GetWorldIcon(RESUPPLY_WORLD_ICONS[i]);
-        mod.EnableWorldIconText(worldIcon, false);
-        mod.EnableWorldIconImage(worldIcon, false);
-    }
+    // disabling the removal of icons, not really any need.
+    // await mod.Wait(ROUND_DURATION * 0.95);
+    // for (let i = 0; i < RESUPPLY_WORLD_ICONS.length; i++) {
+    //     const worldIcon = mod.GetWorldIcon(RESUPPLY_WORLD_ICONS[i]);
+    //     mod.EnableWorldIconText(worldIcon, false);
+    //     mod.EnableWorldIconImage(worldIcon, false);
+    // }
 }
 
 async function TeleportPlayerOnInteract(eventPlayer: mod.Player, eventInteractPoint?: mod.Object) {
@@ -7399,25 +7418,20 @@ async function ShowLastManStandingIcon(player: mod.Player) {
 function ShowAlphaInfectedIndicator(player: mod.Player) {
     const playerProfile = PlayerProfile.Get(player);
     if (!playerProfile || !playerProfile.isAlphaInfected) {
-        LogAlphaState('ShowAlphaInfectedIndicator | skipped: not alpha', player, playerProfile);
         return;
     }
     if (GameHandler.gameState !== GameState.GameRoundIsRunning) {
-        LogAlphaState('ShowAlphaInfectedIndicator | skipped: invalid state', player, playerProfile);
         return;
     }
     if (mod.GetObjId(mod.GetTeam(player)) !== mod.GetObjId(INFECTED_TEAM)) {
-        LogAlphaState('ShowAlphaInfectedIndicator | skipped: not infected team', player, playerProfile);
         return;
     }
     if (!SafeIsAlive(player)) {
-        LogAlphaState('ShowAlphaInfectedIndicator | skipped: not alive', player, playerProfile);
         return;
     }
 
     const playerObjId = mod.GetObjId(player);
     if (playerObjId < 0) {
-        LogAlphaState('ShowAlphaInfectedIndicator | skipped: invalid objId', player, playerProfile);
         return;
     }
 
@@ -7427,18 +7441,27 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
         LogAlphaState('ShowAlphaInfectedIndicator | canceled previous token', player, playerProfile);
     }
     const verticalOffset = 1.4;
-    const forwardOffset = 0.3;
+    const illumVerticalOffset = 1;
+    const forwardOffset = -0.3;
     let playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     let facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-    let vfxPos = mod.CreateVector(
+    let flamePos = mod.CreateVector(
         mod.XComponentOf(playerPos) + (mod.XComponentOf(facingDir) * forwardOffset),
         mod.YComponentOf(playerPos) + verticalOffset + (mod.YComponentOf(facingDir) * forwardOffset),
         mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
     );
-    let alphaIndicatorVFX = mod.SpawnObject(ALPHA_INDICATOR_FLAME_VFX, vfxPos, ZERO_VEC);
-    mod.EnableVFX(alphaIndicatorVFX, true);
-    mod.SetVFXScale(alphaIndicatorVFX, 2);
-    mod.SetVFXColor(alphaIndicatorVFX, UI.battlefieldBlue);
+    let illumPos = mod.CreateVector(
+        mod.XComponentOf(playerPos),
+        mod.YComponentOf(playerPos) + illumVerticalOffset,
+        mod.ZComponentOf(playerPos)
+    );
+    const alphaIndicatorFlameVFX = mod.SpawnObject(ALPHA_INDICATOR_FLAME_VFX, flamePos, ZERO_VEC);
+    const alphaIndicatorIllumVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, flamePos, ZERO_VEC);
+    mod.EnableVFX(alphaIndicatorIllumVFX, true);
+    mod.EnableVFX(alphaIndicatorFlameVFX, true);
+    mod.SetVFXScale(alphaIndicatorFlameVFX, 2);
+    mod.SetVFXColor(alphaIndicatorFlameVFX, UI.battlefieldBlue); // meh? 
+    mod.SetVFXColor(alphaIndicatorIllumVFX, UI.battlefieldBlue); // meh? nah these don't work :c
     LogAlphaState('ShowAlphaInfectedIndicator | spawned indicator', player, playerProfile);
 
     const token = { cancel: false };
@@ -7455,12 +7478,18 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
             ) {
                 playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
                 facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-                vfxPos = mod.CreateVector(
+                flamePos = mod.CreateVector(
                     mod.XComponentOf(playerPos) + (mod.XComponentOf(facingDir) * forwardOffset),
                     mod.YComponentOf(playerPos) + verticalOffset + (mod.YComponentOf(facingDir) * forwardOffset),
                     mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
                 );
-                mod.MoveVFX(alphaIndicatorVFX, vfxPos, ZERO_VEC);
+                illumPos = mod.CreateVector(
+                    mod.XComponentOf(playerPos),
+                    mod.YComponentOf(playerPos) + illumVerticalOffset,
+                    mod.ZComponentOf(playerPos)
+                )
+                mod.MoveVFX(alphaIndicatorFlameVFX, flamePos, ZERO_VEC);
+                mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
                 await mod.Wait(0.05);
             }
         } finally {
@@ -7468,93 +7497,15 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
             if (trackedToken === token) {
                 ALPHA_INDICATOR_TOKENS.delete(playerObjId);
             }
-            mod.EnableVFX(alphaIndicatorVFX, false);
-            mod.UnspawnObject(alphaIndicatorVFX);
-            LogAlphaState('ShowAlphaInfectedIndicator | removed indicator', player, PlayerProfile.Get(player));
+            mod.EnableVFX(alphaIndicatorFlameVFX, false);
+            mod.EnableVFX(alphaIndicatorIllumVFX, false);
+            mod.UnspawnObject(alphaIndicatorFlameVFX);
+            mod.UnspawnObject(alphaIndicatorIllumVFX);
+            LogAlphaState('ShowAlphaInfectedIndicator | removed both VFX indicators', player, PlayerProfile.Get(player));
         }
     }
 
     updateAlphaIndicatorVFX();
-}
-
-function ShowAlphaInfectedDebugMoveIndicator(player: mod.Player) {
-    const playerObjId = mod.GetObjId(player);
-    if (playerObjId < 0) return;
-
-    const playerProfile = PlayerProfile.Get(player);
-    const shouldShow = DEBUG_ALPHA_DEBUG_MOVE_INDICATOR
-        && !!playerProfile
-        && playerProfile.isAlphaInfected
-        && GameHandler.gameState === GameState.GameRoundIsRunning
-        && SafeIsAlive(player)
-        && mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM);
-
-    if (!shouldShow) {
-        const previousToken = ALPHA_DEBUG_INDICATOR_TOKENS.get(playerObjId);
-        if (previousToken) {
-            previousToken.cancel = true;
-            ALPHA_DEBUG_INDICATOR_TOKENS.delete(playerObjId);
-        }
-        return;
-    }
-
-    if (ALPHA_DEBUG_INDICATOR_TOKENS.has(playerObjId)) {
-        return;
-    }
-
-    const verticalOffset = 1.4;
-    const forwardOffset = 0.1;
-    let playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
-    let facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-    let vfxPos = mod.CreateVector(
-        mod.XComponentOf(playerPos) + (mod.XComponentOf(facingDir) * forwardOffset),
-        mod.YComponentOf(playerPos) + verticalOffset - (mod.YComponentOf(facingDir) * forwardOffset),
-        mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
-    );
-
-    const alphaIndicatorMoveVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, vfxPos, ZERO_VEC);
-    mod.EnableVFX(alphaIndicatorMoveVFX, true);
-    LogAlphaState('ShowAlphaInfectedDebugMoveIndicator | spawned debug indicator', player, playerProfile);
-
-    const token = { cancel: false };
-    ALPHA_DEBUG_INDICATOR_TOKENS.set(playerObjId, token);
-
-    const updateAlphaDebugMoveVFX = async () => {
-        try {
-            while (
-                !token.cancel
-                && GameHandler.gameState === GameState.GameRoundIsRunning
-                && SafeIsAlive(player)
-                && mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM)
-                && PlayerProfile.Get(player)?.isAlphaInfected
-            ) {
-                playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
-                facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
-                vfxPos = mod.CreateVector(
-                    mod.XComponentOf(playerPos) + (mod.XComponentOf(facingDir) * forwardOffset),
-                    mod.YComponentOf(playerPos) + verticalOffset + (mod.YComponentOf(facingDir) * forwardOffset),
-                    mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
-                );
-                mod.MoveVFX(alphaIndicatorMoveVFX, vfxPos, ZERO_VEC);
-                await mod.Wait(0.05);
-            }
-        } finally {
-            const trackedToken = ALPHA_DEBUG_INDICATOR_TOKENS.get(playerObjId);
-            if (trackedToken === token) {
-                ALPHA_DEBUG_INDICATOR_TOKENS.delete(playerObjId);
-            }
-            mod.EnableVFX(alphaIndicatorMoveVFX, false);
-            mod.UnspawnObject(alphaIndicatorMoveVFX);
-            LogAlphaState('ShowAlphaInfectedDebugMoveIndicator | removed debug indicator', player, PlayerProfile.Get(player));
-        }
-    }
-
-    updateAlphaDebugMoveVFX();
-}
-
-function ShowAlphaInfectedDebugIndicator(player: mod.Player) {
-    if (!DEBUG_ALPHA_DEBUG_MOVE_INDICATOR) return;
-    ShowAlphaInfectedDebugMoveIndicator(player);
 }
 
 function CleanupWorldIcon(iconMap: Map<number, mod.Any>, playerObjId: number, context: string) {
@@ -7578,8 +7529,8 @@ function GetIconPosition(player: mod.Player, heightOffset = 2): mod.Vector {
 }
 
 function EnsureLastManStandingWorldIcon(player: mod.Player) {
-    const playerObjId = mod.GetObjId(player);
-    if (playerObjId < 0) return;
+    const lmsPlayerObjId = mod.GetObjId(player);
+    if (lmsPlayerObjId < 0) return;
 
     const playerProfile = PlayerProfile.Get(player);
     const shouldShow = !!playerProfile
@@ -7589,19 +7540,19 @@ function EnsureLastManStandingWorldIcon(player: mod.Player) {
         && mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(SURVIVOR_TEAM);
 
     if (!shouldShow) {
-        CleanupWorldIcon(LMS_WORLD_ICON_OBJECTS, playerObjId, 'EnsureLastManStandingWorldIcon');
+        CleanupWorldIcon(LMS_WORLD_ICON_OBJECTS, lmsPlayerObjId, 'EnsureLastManStandingWorldIcon');
         return;
     }
 
-    if (LMS_WORLD_ICON_OBJECTS.has(playerObjId)) return;
+    if (LMS_WORLD_ICON_OBJECTS.has(lmsPlayerObjId)) return;
 
     const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, GetIconPosition(player), ZERO_VEC);
     mod.SetWorldIconOwner(icon, INFECTED_TEAM);
     mod.SetWorldIconImage(icon, mod.WorldIconImages.Skull);
     mod.SetWorldIconColor(icon, UI.battlefieldWhite);
     mod.EnableWorldIconImage(icon, true);
-    LMS_WORLD_ICON_OBJECTS.set(playerObjId, icon);
-    console.log(`EnsureLastManStandingWorldIcon | Showing LMS icon for Player(${playerObjId})`);
+    LMS_WORLD_ICON_OBJECTS.set(lmsPlayerObjId, icon);
+    console.log(`EnsureLastManStandingWorldIcon | Showing LMS icon for Player(${lmsPlayerObjId})`);
 }
 
 function UpdatePlayerIndicatorsAndIcons(player: mod.Player) {
@@ -7609,7 +7560,7 @@ function UpdatePlayerIndicatorsAndIcons(player: mod.Player) {
     if (playerObjId < 0) return;
 
     EnsureLastManStandingWorldIcon(player);
-    ShowAlphaInfectedDebugIndicator(player);
+    ShowAlphaInfectedIndicator(player);
 
     const infectedIcon = INFECTED_WORLD_ICON_OBJECTS.get(playerObjId);
     if (infectedIcon) {
@@ -7629,10 +7580,10 @@ function CleanupPlayerOngoingVisuals(playerObjId: number) {
     const playerProfile = PlayerProfile._allPlayers.get(playerObjId);
     playerProfile?.DeletePlayerAreaNotificationWidget();
     playerProfile?.DeleteLastManStandingBuffWidgets();
-    const moveVfxToken = ALPHA_DEBUG_INDICATOR_TOKENS.get(playerObjId);
+    const moveVfxToken = ALPHA_VFX_INDICATOR_TOKENS.get(playerObjId);
     if (moveVfxToken) {
         moveVfxToken.cancel = true;
-        ALPHA_DEBUG_INDICATOR_TOKENS.delete(playerObjId);
+        ALPHA_VFX_INDICATOR_TOKENS.delete(playerObjId);
     }
     PLAYER_ONGOING_TICK_STATE.delete(playerObjId);
 }
@@ -7668,6 +7619,12 @@ function CheckForBannedWeapons(player: mod.Player) {
         whitelistEntries.map(entry => entry.kind === 'weapon' ? WeaponToken(entry.value) : GadgetToken(entry.value))
     );
 
+    const isInfected = playerProfile.isInfectedTeam || (mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM));
+    if (!isInfected) {
+        // Survivors are granted this melee at spawn; allow it so banned checks do not strip it.
+        whitelistSet.add(GadgetToken(mod.Gadgets.Melee_Combat_Knife));
+    }
+
     if (!whitelistSet.size) {
         return false;
     }
@@ -7684,7 +7641,7 @@ function CheckForBannedWeapons(player: mod.Player) {
     }
     RefreshHumanEquipment(player, playerProfile);
     Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
-    if (playerProfile.isInfectedTeam && !GameHandler.suspendWinChecks) {
+    if (isInfected && !GameHandler.suspendWinChecks) {
         const bannedWeaponMessage = MakeMessage(mod.stringkeys.banned_weapon_removed, player);
         Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1);
         mod.ForceSwitchInventory(player, mod.InventorySlots.MeleeWeapon);
@@ -8564,6 +8521,8 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     );
     // enable trail vfx and play projectile flyby sound at destination
     mod.PlaySound(leapSfx, 1);
+    // play localized SFX for player
+    Helpers.PlaySoundFX(SFX_ALPHA_LEAP_2D, 1, player);
     mod.EnableVFX(trailVfx, true);
     // Teleport along the rescaled arc, then snap to exact landing position
     for (let i = 0; i < travelSteps.length - 1; i++) {
@@ -8571,6 +8530,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         mod.MoveVFX(trailVfx, travelSteps[i], ZERO_VEC);
         await mod.Wait(LEAP_STEP_DELAY);
     }
+    mod.MoveObject(leapSfx, finalDest);
     mod.EnableVFX(trailVfx, false);
     // Final teleport: exact collision backstep if applicable, otherwise last arc step
     mod.Teleport(player, finalLandingOverride ?? travelSteps[travelSteps.length - 1], yaw);
@@ -9053,16 +9013,43 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 //////////////////////////////////////////////////////////////////
 
 // planned to use custom ladder logic for the AI infected, but never finished it
+// building out a fallback when bots' pathing fails. Which WILL happen. Fuck.
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
     if (!mod.IsPlayerValid(eventPlayer)) return;
-    // Fall back to idle for both teams to clear any stale move target.
     const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
     if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
         console.log(`OnAIMoveToFailed | Survivor Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
+        mod.AIIdleBehavior(eventPlayer);
     } else {
-        console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) move to failed - reverting to idle behavior`);
+        const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
+        if (!slot) {
+            // when can this happen? never?
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) missing slot - reverting to idle behavior`);
+            mod.AIIdleBehavior(eventPlayer);
+            return;
+        }
+
+        const moveFailCount = (slot.tick.moveFailCount ?? 0) + 1;
+        slot.tick.moveFailCount = moveFailCount;
+
+        if (moveFailCount === 1) {
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #1 - idle for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
+            mod.AIIdleBehavior(eventPlayer);
+            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
+            return;
+        }
+
+        if (moveFailCount === 2) {
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #2 - battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
+            mod.AIBattlefieldBehavior(eventPlayer);
+            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
+            return;
+        }
+
+        console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
+        slot.tick.moveFailHoldUntil = undefined;
+        mod.Kill(eventPlayer);
     }
-    mod.AIIdleBehavior(eventPlayer);
 }
 
 export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner) {
