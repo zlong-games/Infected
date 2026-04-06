@@ -890,7 +890,7 @@ class Weapons {
                 return "545";
             case "m123k":
             case "m4a1":
-                    return "556";
+                return "556";
             case "rpkm":
                 return "762";
             case "m121a2":
@@ -5518,32 +5518,36 @@ class GameHandler {
         if (enabled) {
             PlayerProfile._allPlayerProfiles.forEach(playerProfile => {
                 const player = playerProfile.player;
-                try {
-                    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
-                        mod.AIEnableTargeting(player, false);
-                        mod.AIIdleBehavior(player);
+                if (mod.IsPlayerValid(player)) {
+                    try {
+                        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                            mod.AIEnableTargeting(player, false);
+                            mod.AIIdleBehavior(player);
+                        }
+                    } catch { }
+                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true); } catch { }
+                    if (playerProfile.isInfectedTeam) {
+                        try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, true); } catch { }
+                        try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, true); } catch { }
+                        try { mod.EnableInputRestriction(player, mod.RestrictedInputs.Jump, true); } catch { }
                     }
-                } catch { }
-                try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true); } catch { }
-                if (playerProfile.isInfectedTeam) {
-                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, true); } catch { }
-                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, true); } catch { }
-                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.Jump, true); } catch { }
                 }
             });
         } else {
             PlayerProfile._allPlayerProfiles.forEach(playerProfile => {
                 const player = playerProfile.player;
-                try {
-                    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
-                        mod.AIEnableTargeting(player, true);
-                        mod.AIIdleBehavior(player);
-                    }
-                } catch { }
-                try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false); } catch { }
-                try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false); } catch { }
-                try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false); } catch { }
-                try { mod.EnableInputRestriction(player, mod.RestrictedInputs.Jump, false); } catch { }
+                if (mod.IsPlayerValid(player)) {
+                    try {
+                        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                            mod.AIEnableTargeting(player, true);
+                            mod.AIIdleBehavior(player);
+                        }
+                    } catch { }
+                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false); } catch { }
+                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false); } catch { }
+                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false); } catch { }
+                    try { mod.EnableInputRestriction(player, mod.RestrictedInputs.Jump, false); } catch { }
+                }
             });
         }
 
@@ -5648,7 +5652,6 @@ class GameHandler {
             console.log(`HandleEoRSpawns | Bootstrap recovery applied. Spawning ${survivorsToSpawn} survivors and ${infectedToSpawn} infected.`);
         }
 
-        // Recover from stale recycled plan where counts were reset to 0 before expr update.
         if (expr === '2+ infected' && survivorsToSpawn === 0 && infectedToSpawn === 0 && humanTotal < MAX_PLAYER_COUNT) {
             survivorsToSpawn = Math.max(0, GameHandler.aiSlotsToBackfill - humanSurvivors);
             GameHandler.skipAlphaSelection = false;
