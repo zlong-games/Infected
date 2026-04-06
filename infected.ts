@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.04.00";
+const VERSION = "1.04.01";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -10,7 +10,6 @@ const FAST_START = false;
 const SKIP_SESSION_START = false;
 const DEBUG_ALPHA_HUMAN_ONLY = false;
 const DEBUG_ALPHA_STATE = false;
-const DEBUG_ALPHA_DEBUG_MOVE_INDICATOR = true;
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
 const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
 
@@ -77,6 +76,7 @@ const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
+
 const SURVIVOR_TEAM = mod.GetTeam(1);
 const INFECTED_TEAM = mod.GetTeam(2);
 const POINTS_PER_INFECTED_KILL = 100;
@@ -1618,6 +1618,7 @@ class UI {
         return widget;
     }
 
+    /* Rotating hints and tips for survivors */
     static CreatePlayerAreaNotificationWidget(
         player: mod.Player,
         playerID: number,
@@ -1628,35 +1629,8 @@ class UI {
         const containerHeight = 40;
 
         const xOffset = -(1024 / 2 - containerWidth / 2); // -287: aligns left edge with the scoreboard
-        const children: any[] = [
-            {
-                type: "Text",
-                name: `player_area_notification_text_${playerID}`,
-                position: [0, 0, 10],
-                size: [containerWidth, containerHeight],
-                anchor: mod.UIAnchor.Center,
-                textAnchor: mod.UIAnchor.Center,
-                textSize: 18,
-                bgAlpha: 0,
-                textColor: UI.battlefieldWhite,
-                textLabel: message,
-            },
-        ];
-
-        if (showIcon) {
-            children.push({
-                type: "Image",
-                name: `player_area_notification_icon_${playerID}`,
-                position: [0, 0, 0],
-                size: [containerHeight, containerHeight, 0],
-                anchor: mod.UIAnchor.CenterLeft,
-                imageType: showIcon,
-                imageColor: UI.battlefieldYellow,
-                imageAlpha: 1,
-                bgAlpha: 0,
-            });
-        }
-
+         // root widget
+        // grey base, background color controlled by the container's child
         return ParseUI({
             type: "Container",
             name: `player_area_notification_${playerID}`,
@@ -1667,7 +1641,41 @@ class UI {
             bgColor: UI.battlefieldGrey,
             bgAlpha: 1,
             playerId: player,
-            children,
+            children: [
+                {
+                    type: "Container",
+                    name: `player_area_notification_bgColor_${playerID}`,
+                    position: [0, 0, 0],
+                    size: [containerWidth - 1, containerHeight - 1, 0],
+                    anchor: mod.UIAnchor.Center,
+                    bgFill: mod.UIBgFill.Solid,
+                    bgColor: UI.battlefieldBlueBg,
+                    bgAlpha: 0.1,
+                },
+                {
+                    type: "Text",
+                    name: `player_area_notification_text_${playerID}`,
+                    position: [0, 0, 5],
+                    size: [containerWidth, containerHeight],
+                    anchor: mod.UIAnchor.Center,
+                    textAnchor: mod.UIAnchor.Center,
+                    textSize: 18,
+                    bgAlpha: 0,
+                    textColor: UI.battlefieldWhite,
+                    textLabel: message,
+                },
+                {
+                    type: "Image",
+                    name: `player_area_notification_icon_${playerID}`,
+                    position: [0, 0, 5],
+                    size: [containerHeight, containerHeight, 0],
+                    anchor: mod.UIAnchor.CenterLeft,
+                    imageType: showIcon,
+                    imageColor: UI.battlefieldYellow,
+                    imageAlpha: 1,
+                    bgAlpha: 0,
+                }
+            ]
         });
 
     }
@@ -1676,12 +1684,13 @@ class UI {
         playerProfile: PlayerProfile,
         message: mod.Message,
         showIcon: mod.UIImageType = mod.UIImageType.QuestionMark,
-        bgColor: mod.Vector = UI.battlefieldGrey,
+        bgColor: mod.Vector = UI.battlefieldBlueBg,
     ) {
         if (!playerProfile.playerAreaNotificationWidget) return;
 
         const textWidget = mod.FindUIWidgetWithName(`player_area_notification_text_${playerProfile.playerID}`) as mod.UIWidget;
         const imageWidget = mod.FindUIWidgetWithName(`player_area_notification_icon_${playerProfile.playerID}`) as mod.UIWidget;
+        const backgroundWidget = mod.FindUIWidgetWithName(`player_area_notification_bgColor_${playerProfile.playerID}`) as mod.UIWidget;
 
         if (textWidget) {
             mod.SetUITextLabel(textWidget, message);
@@ -1691,8 +1700,7 @@ class UI {
             mod.SetUIImageType(imageWidget, showIcon);
         }
 
-        mod.SetUIWidgetBgColor(playerProfile.playerAreaNotificationWidget, bgColor);
-        mod.SetUIWidgetBgAlpha(playerProfile.playerAreaNotificationWidget, 1);
+        mod.SetUIWidgetBgColor(backgroundWidget, bgColor);
         mod.SetUIWidgetDepth(playerProfile.playerAreaNotificationWidget, mod.UIDepth.AboveGameUI);
         mod.SetUIWidgetVisible(playerProfile.playerAreaNotificationWidget, true);
     }
@@ -3985,7 +3993,12 @@ class PlayerProfile {
                 );
             }
             if (this.playerAreaNotificationWidget) {
-                UI.UpdatePlayerAreaNotification(this, MakeMessage(mod.stringkeys.survivor_area_warning));
+                UI.UpdatePlayerAreaNotification(
+                    this,
+                    MakeMessage(mod.stringkeys.survivor_area_warning),
+                    mod.UIImageType.QuestionMark,
+                    UI.battlefieldBlueBg
+                );
             }
             return;
         }
@@ -4000,7 +4013,12 @@ class PlayerProfile {
                 );
             }
             if (this.playerAreaNotificationWidget) {
-                UI.UpdatePlayerAreaNotification(this, lmsHintMessage, mod.UIImageType.SpawnBeacon, mod.CreateVector(1, 1, 1));
+                UI.UpdatePlayerAreaNotification(
+                    this,
+                    lmsHintMessage,
+                    mod.UIImageType.SpawnBeacon,
+                    UI.battlefieldBlueBg
+                );
             }
             return;
         }
@@ -4044,7 +4062,7 @@ class PlayerProfile {
                                 this,
                                 MakeMessage(mod.stringkeys.leap_status_ready),
                                 mod.UIImageType.CrownSolid,
-                                mod.CreateVector(0.063, 0.25, 0.094),
+                                mod.CreateVector(0.063, 0.36, 0.094), //forest green
                             );
                         }
                     }
@@ -4065,7 +4083,12 @@ class PlayerProfile {
                 this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
             }
             if (this.playerAreaNotificationWidget) {
-                UI.UpdatePlayerAreaNotification(this, GetAlphaInfectedHintMessage(this.playerAreaHintIndex));
+                UI.UpdatePlayerAreaNotification(
+                    this,
+                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex),
+                    mod.UIImageType.QuestionMark,
+                    UI.battlefieldRedBg
+                );
             }
             return;
         }
@@ -4083,7 +4106,12 @@ class PlayerProfile {
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         }
         if (this.playerAreaNotificationWidget) {
-            UI.UpdatePlayerAreaNotification(this, GetInfectedHintMessage(this.playerAreaHintIndex));
+            UI.UpdatePlayerAreaNotification(
+                this,
+                GetInfectedHintMessage(this.playerAreaHintIndex),
+                mod.UIImageType.QuestionMark,
+                UI.battlefieldRedBg
+            );
         }
     }
 
@@ -5743,7 +5771,9 @@ class GameHandler {
         // If any human survivors remain alive and deployed, refresh their equipment to match the new round
         try {
             const survivorsAlive = GameHandler.GetAllPlayersOnTeam(SURVIVOR_TEAM)
-                .filter(p => PlayerIsAliveAndValid(p) && !mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier));
+                .filter(p => mod.IsPlayerValid(p)
+                    && mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive)
+                    && !mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier));
             for (const player of survivorsAlive) {
                 const pp = PlayerProfile.Get(player);
                 if (pp) {
@@ -6583,7 +6613,7 @@ class AISpawnHandler {
 
 function PlayerIsAliveAndValid(eventPlayer: mod.Player): boolean {
     if (!eventPlayer || !mod.IsPlayerValid(eventPlayer)) return false;
-    return SafeIsAlive(eventPlayer);
+    return mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAlive);
 }
 
 
@@ -7452,12 +7482,13 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
         mod.ZComponentOf(playerPos)
     );
     const alphaIndicatorFlameVFX = mod.SpawnObject(ALPHA_INDICATOR_FLAME_VFX, flamePos, ZERO_VEC);
-    const alphaIndicatorIllumVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, flamePos, ZERO_VEC);
-    mod.EnableVFX(alphaIndicatorIllumVFX, true);
+    // const alphaIndicatorIllumVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, flamePos, ZERO_VEC);
+    // mod.EnableVFX(alphaIndicatorIllumVFX, true);
     mod.EnableVFX(alphaIndicatorFlameVFX, true);
-    mod.SetVFXScale(alphaIndicatorFlameVFX, 2);
-    mod.SetVFXColor(alphaIndicatorFlameVFX, UI.battlefieldBlue); // meh? 
-    mod.SetVFXColor(alphaIndicatorIllumVFX, UI.battlefieldBlue); // meh? nah these don't work :c
+    // can only modify the custom smoke marker vfx, nothing else will work
+    // mod.SetVFXScale(alphaIndicatorFlameVFX, 2);
+    // mod.SetVFXColor(alphaIndicatorFlameVFX, UI.battlefieldBlue); // meh? 
+    // mod.SetVFXColor(alphaIndicatorIllumVFX, UI.battlefieldBlue); // nah these don't work >:c
     LogAlphaState('ShowAlphaInfectedIndicator | spawned indicator', player, playerProfile);
 
     const token = { cancel: false };
@@ -7479,13 +7510,13 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                     mod.YComponentOf(playerPos) + verticalOffset + (mod.YComponentOf(facingDir) * forwardOffset),
                     mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
                 );
-                illumPos = mod.CreateVector(
-                    mod.XComponentOf(playerPos),
-                    mod.YComponentOf(playerPos) + illumVerticalOffset,
-                    mod.ZComponentOf(playerPos)
-                )
+                // illumPos = mod.CreateVector(
+                //     mod.XComponentOf(playerPos),
+                //     mod.YComponentOf(playerPos) + illumVerticalOffset,
+                //     mod.ZComponentOf(playerPos)
+                // )
                 mod.MoveVFX(alphaIndicatorFlameVFX, flamePos, ZERO_VEC);
-                mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
+                // mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
                 await mod.Wait(0.05);
             }
         } finally {
@@ -7494,9 +7525,9 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                 ALPHA_INDICATOR_TOKENS.delete(playerObjId);
             }
             mod.EnableVFX(alphaIndicatorFlameVFX, false);
-            mod.EnableVFX(alphaIndicatorIllumVFX, false);
+            // mod.EnableVFX(alphaIndicatorIllumVFX, false);
             mod.UnspawnObject(alphaIndicatorFlameVFX);
-            mod.UnspawnObject(alphaIndicatorIllumVFX);
+            // mod.UnspawnObject(alphaIndicatorIllumVFX);
             LogAlphaState('ShowAlphaInfectedIndicator | removed both VFX indicators', player, PlayerProfile.Get(player));
         }
     }
