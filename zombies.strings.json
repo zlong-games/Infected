@@ -348,6 +348,8 @@
   "leap_status_cooldown": "LEAP: {}.{}",
   "leap_status_leaping": "LEAPING",
   "leap_status_no_room": "NOT ENOUGH ROOM",
+  "leap_status_blocked": "TOO CLOSE",
+  "leap_test_vehicle_distance": "Distance: {}.{}{}m",
   "dbg_spawn_scenario": "Spawn Scenario",
   "dbg_camera_fixed": "Switch Team",
   "dbg_cleanup": "Cleanup",
