@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.04.01";
+const VERSION = "1.04.10";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -11,6 +11,7 @@ const SKIP_SESSION_START = false;
 const DEBUG_ALPHA_HUMAN_ONLY = false;
 const DEBUG_ALPHA_STATE = false;
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
+const DEBUG_LEAP_RUNTIME = false; // temporary diagnostics for leap init/tick gating
 const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
 const BOT_SURVIVAL_TEST_MODE = false; // set true to disable rounds/timers and soak-test infected bot lifecycle
 
@@ -374,6 +375,23 @@ function IsLeapAttackAvailableNow(): boolean {
     if (LEAP_TEST_MODE) return true;
     return CURRENT_MAP === MapNames.SAND2
         && LEAP_ATTACK_UNLOCKED_THIS_ROUND;
+}
+
+function IsPlayerOnInfectedTeamForLeap(player: mod.Player, playerProfile?: PlayerProfile): boolean {
+    if (LEAP_TEST_MODE) return true;
+    if (mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM)) return true;
+    return !!playerProfile?.isInfectedTeam;
+}
+
+const LEAP_RUNTIME_LAST_LOG_AT: Map<string, number> = new Map();
+
+function LogLeapRuntime(key: string, message: string, cooldownSeconds: number = 0.75): void {
+    if (!DEBUG_LEAP_RUNTIME) return;
+    const now = Date.now() / 1000;
+    const last = LEAP_RUNTIME_LAST_LOG_AT.get(key) ?? 0;
+    if (now - last < cooldownSeconds) return;
+    LEAP_RUNTIME_LAST_LOG_AT.set(key, now);
+    console.log(`[LeapRuntime] ${message}`);
 }
 
 function GetInfectedHintKeysForCurrentRound(): readonly string[] {
@@ -7471,13 +7489,6 @@ async function DisplayWorldIconResupply() {
         mod.SetWorldIconText(worldIcon, MakeMessage(mod.stringkeys.resupply));
         mod.EnableWorldIconText(worldIcon, true);
     }
-    // disabling the removal of icons, not really any need.
-    // await mod.Wait(ROUND_DURATION * 0.95);
-    // for (let i = 0; i < RESUPPLY_WORLD_ICONS.length; i++) {
-    //     const worldIcon = mod.GetWorldIcon(RESUPPLY_WORLD_ICONS[i]);
-    //     mod.EnableWorldIconText(worldIcon, false);
-    //     mod.EnableWorldIconImage(worldIcon, false);
-    // }
 }
 
 async function TeleportPlayerOnInteract(eventPlayer: mod.Player, eventInteractPoint?: mod.Object) {
@@ -8468,7 +8479,26 @@ const LeapTestHarness = {
     /** Called when the human deploys in test mode. */
     onHumanDeployed(player: mod.Player) {
         // Put the human on the infected team and init leap
-        mod.SetTeam(player, INFECTED_TEAM);
+        const playerObjId = mod.GetObjId(player);
+        LogLeapRuntime(`test_deploy_begin_${playerObjId}`, `LeapTest onHumanDeployed begin | player=${playerObjId}`, 0.1);
+        try {
+            mod.SetTeam(player, INFECTED_TEAM);
+            LogLeapRuntime(`test_deploy_team_${playerObjId}`, `LeapTest SetTeam using INFECTED_TEAM succeeded | player=${playerObjId}`, 0.1);
+        } catch (e) {
+            LogLeapRuntime(`test_deploy_team_fail_${playerObjId}`, `LeapTest SetTeam(INFECTED_TEAM) failed | player=${playerObjId} err=${e}`, 0.1);
+            try {
+                mod.SetTeam(player, mod.GetTeam(2));
+                LogLeapRuntime(`test_deploy_team_fallback_${playerObjId}`, `LeapTest SetTeam(GetTeam(2)) fallback succeeded | player=${playerObjId}`, 0.1);
+            } catch (e2) {
+                LogLeapRuntime(`test_deploy_team_fallback_fail_${playerObjId}`, `LeapTest SetTeam(GetTeam(2)) fallback failed | player=${playerObjId} err=${e2}`, 0.1);
+            }
+        }
+        const playerProfile = PlayerProfile.Get(player);
+        if (playerProfile) {
+            playerProfile.isInfectedTeam = true;
+            playerProfile.isAlphaInfected = true;
+            LogLeapRuntime(`test_deploy_profile_${playerObjId}`, `LeapTest profile flags set | player=${playerObjId} infected=${playerProfile.isInfectedTeam} alpha=${playerProfile.isAlphaInfected}`, 0.1);
+        }
         try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false); } catch { }
         try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false); } catch { }
         try { mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false); } catch { }
@@ -8476,6 +8506,7 @@ const LeapTestHarness = {
         mod.ForceSwitchInventory(player, mod.InventorySlots.MeleeWeapon);
         mod.SetCameraTypeForPlayer(player, mod.Cameras.FirstPerson);
         InitLeapSystem(player);
+        LogLeapRuntime(`test_deploy_init_${playerObjId}`, `LeapTest InitLeapSystem called | player=${playerObjId}`, 0.1);
         this.startVehicleDistanceTracking(player);
         console.log(`[LeapTest] Human player(${mod.GetObjId(player)}) deployed -- leap system initialized`);
     },
@@ -8597,6 +8628,8 @@ interface LeapState {
     previewIsBlocked: boolean;
     /** WorldIcon spawned at the blocked location instead of the normal arc, visible only to the owning player */
     blockedWarnIcon: mod.WorldIcon | undefined;
+    /** Red alert WorldIcon shown over the player while leap is in charging (not ready) state */
+    chargeAlertIcon: mod.WorldIcon | undefined;
 }
 
 const LEAP_STATES = new Map<number, LeapState>();
@@ -8686,7 +8719,7 @@ function computeLeapTrack(player: mod.Player) {
 // ============================================================
 
 function createLeapUI(player: mod.Player, playerObjId: number) {
-    if (mod.GetObjId(mod.GetTeam(player)) !== mod.GetObjId(INFECTED_TEAM)) {
+    if (!IsPlayerOnInfectedTeamForLeap(player)) {
         return { statusContainerWidget: undefined, statusWidget: undefined };
     }
     const statusContainerWidget = ParseUI({
@@ -8741,6 +8774,12 @@ function cancelTrajectoryPreview(state: LeapState): void {
         mod.UnspawnObject(state.blockedWarnIcon);
         state.blockedWarnIcon = undefined;
     }
+    if (state.chargeAlertIcon) {
+        mod.EnableWorldIconImage(state.chargeAlertIcon, false);
+        mod.EnableWorldIconText(state.chargeAlertIcon, false);
+        mod.UnspawnObject(state.chargeAlertIcon);
+        state.chargeAlertIcon = undefined;
+    }
     state.previewIsBlocked = false;
     state.previewLandingPos = undefined;
 }
@@ -8788,6 +8827,8 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
     const BLOCKED_WARN_PASSES = 6;
     let blockedSfxCooldown = 0; // start at 0 so the first blocked detection fires immediately
     let currentTrailIsReady = false;
+    let chargeAlertVisible = true;
+    const CHARGE_ALERT_ICON_HEIGHT = 1.2;
 
     // --- Animation loop: each pass recomputes the arc and fires ONE fresh geometry probe ---
     // Doing the collision check per-iteration (instead of once at startup) ensures the
@@ -8798,6 +8839,35 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
         const liveTrackPoints = liveTrack.trackPoints;
         state.cachedStepPositions = liveTrack.steps;
         const arcEndpoint = liveTrack.steps[liveTrack.steps.length - 1];
+
+        // Charging-only world alert: tracked at the same cadence as preview path recalculation.
+        if (state.chargeVfxState === 'charging' && !state.isLeaping) {
+            const chargeIconPos = mod.Add(
+                liveTrack.startPos,
+                mod.Multiply(mod.UpVector(), CHARGE_ALERT_ICON_HEIGHT)
+            );
+            if (!state.chargeAlertIcon) {
+                const iconObj = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, chargeIconPos, ZERO_VEC);
+                const icon = iconObj as mod.WorldIcon;
+                mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+                mod.SetWorldIconColor(icon, mod.CreateVector(1, 0, 0));
+                // consider only displaying this to the vehicle driver?
+                mod.EnableWorldIconText(icon, false);
+                mod.EnableWorldIconImage(icon, true);
+                state.chargeAlertIcon = icon;
+                chargeAlertVisible = true;
+            } else {
+                mod.SetWorldIconPosition(state.chargeAlertIcon, chargeIconPos);
+                chargeAlertVisible = !chargeAlertVisible;
+                mod.EnableWorldIconImage(state.chargeAlertIcon, chargeAlertVisible);
+            }
+        } else if (state.chargeAlertIcon) {
+            mod.EnableWorldIconImage(state.chargeAlertIcon, false);
+            mod.EnableWorldIconText(state.chargeAlertIcon, false);
+            mod.UnspawnObject(state.chargeAlertIcon);
+            state.chargeAlertIcon = undefined;
+            chargeAlertVisible = true;
+        }
 
         // Single-ray geometry probe along the chord from eye level to the arc endpoint.
         // One ray covers most common obstacle cases and resolves within ~50ms.
@@ -9271,8 +9341,21 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
 
 async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): Promise<void> {
     const objId = mod.GetObjId(player);
-    if (objId < 0) return;
-    if (CURRENT_MAP !== MapNames.SAND2) return;
+    const profile = PlayerProfile.Get(player);
+    const teamObjId = mod.GetObjId(mod.GetTeam(player));
+    LogLeapRuntime(
+        `init_enter_${objId}`,
+        `InitLeapSystem enter | player=${objId} map=${CURRENT_MAP ?? 'undefined'} test=${LEAP_TEST_MODE} unlocked=${LEAP_ATTACK_UNLOCKED_THIS_ROUND} teamObjId=${teamObjId} ppInfected=${profile?.isInfectedTeam} ppAlpha=${profile?.isAlphaInfected}`,
+        0.2
+    );
+    if (objId < 0) {
+        LogLeapRuntime(`init_skip_obj_${objId}`, `InitLeapSystem skip invalid ObjID | player=${objId}`, 0.2);
+        return;
+    }
+    if (!LEAP_TEST_MODE && CURRENT_MAP !== MapNames.SAND2) {
+        LogLeapRuntime(`init_skip_map_${objId}`, `InitLeapSystem skip map gate | player=${objId} map=${CURRENT_MAP ?? 'undefined'}`, 0.2);
+        return;
+    }
 
     CleanupLeapSystem(player);
 
@@ -9304,7 +9387,9 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
         currentCamera: mod.Cameras.FirstPerson,
         previewIsBlocked: false,
         blockedWarnIcon: undefined,
+        chargeAlertIcon: undefined,
     });
+    LogLeapRuntime(`init_success_${objId}`, `InitLeapSystem success | player=${objId} hasState=${LEAP_STATES.has(objId)}`, 0.2);
 
     // basic AI leap test
     if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && LEAP_TEST_MODE) {
@@ -9386,6 +9471,12 @@ function CleanupLeapSystem(player: mod.Player): void {
         mod.UnspawnObject(state.blockedWarnIcon);
         state.blockedWarnIcon = undefined;
     }
+    if (state.chargeAlertIcon) {
+        mod.EnableWorldIconImage(state.chargeAlertIcon, false);
+        mod.EnableWorldIconText(state.chargeAlertIcon, false);
+        mod.UnspawnObject(state.chargeAlertIcon);
+        state.chargeAlertIcon = undefined;
+    }
     state.previewScanActive = false;
     state.previewScanId++;
     setLeapCamera(player, state, mod.Cameras.FirstPerson);
@@ -9436,13 +9527,19 @@ function CleanupLeapStateByObjId(objId: number): void {
         mod.UnspawnObject(state.blockedWarnIcon);
         state.blockedWarnIcon = undefined;
     }
+    if (state.chargeAlertIcon) {
+        mod.EnableWorldIconImage(state.chargeAlertIcon, false);
+        mod.EnableWorldIconText(state.chargeAlertIcon, false);
+        mod.UnspawnObject(state.chargeAlertIcon);
+        state.chargeAlertIcon = undefined;
+    }
     state.previewScanActive = false;
     state.previewScanId++;
 
     LEAP_STATES.delete(objId);
 }
 
-function resetLeapChargeState(state: LeapState): void {
+function resetLeapChargeState(state: LeapState, preserveCrouchHold: boolean = false): void {
     if (state.chargeVfx) {
         mod.UnspawnObject(state.chargeVfx);
         state.chargeVfx = undefined;
@@ -9456,10 +9553,12 @@ function resetLeapChargeState(state: LeapState): void {
         state.chargeReadySfx = undefined;
     }
     state.chargeVfxState = 'none';
-    state.crouchStartTime = 0;
+    if (!preserveCrouchHold) {
+        state.crouchStartTime = 0;
+    }
 
     // Cancel trajectory scan and clear all cached path data.
-    if (state.previewScanActive || state.previewVfx || state.previewTrailVfx || state.blockedWarnIcon) {
+    if (state.previewScanActive || state.previewVfx || state.previewTrailVfx || state.blockedWarnIcon || state.chargeAlertIcon) {
         cancelTrajectoryPreview(state);
     }
     state.cachedStepPositions = undefined;
@@ -9470,16 +9569,37 @@ function resetLeapChargeState(state: LeapState): void {
 function TickLeap(player: mod.Player): void {
     const objId = mod.GetObjId(player);
     const state = LEAP_STATES.get(objId);
-    if (!state) return;
+    if (!state) {
+        LogLeapRuntime(`tick_no_state_${objId}`, `TickLeap skip no state | player=${objId}`);
+        return;
+    }
 
     if (!IsLeapAttackAvailableNow()) {
+        LogLeapRuntime(
+            `tick_gate_unavailable_${objId}`,
+            `TickLeap skip unavailable | player=${objId} map=${CURRENT_MAP ?? 'undefined'} unlocked=${LEAP_ATTACK_UNLOCKED_THIS_ROUND} test=${LEAP_TEST_MODE}`
+        );
         resetLeapChargeState(state);
         return;
     }
 
-    if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive)) return;
-    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) return;
-    if (mod.GetObjId(mod.GetTeam(2)) !== mod.GetObjId(mod.GetTeam(player))) return;
+    if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive)) {
+        LogLeapRuntime(`tick_not_alive_${objId}`, `TickLeap skip not alive | player=${objId}`);
+        return;
+    }
+    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) {
+        LogLeapRuntime(`tick_in_vehicle_${objId}`, `TickLeap skip in vehicle | player=${objId}`);
+        return;
+    }
+    const playerProfile = PlayerProfile.Get(player);
+    if (!IsPlayerOnInfectedTeamForLeap(player, playerProfile)) {
+        const teamObjId = mod.GetObjId(mod.GetTeam(player));
+        LogLeapRuntime(
+            `tick_team_gate_${objId}`,
+            `TickLeap skip team gate | player=${objId} teamObjId=${teamObjId} infectedTeamObjId=${mod.GetObjId(INFECTED_TEAM)} ppInfected=${playerProfile?.isInfectedTeam} test=${LEAP_TEST_MODE}`
+        );
+        return;
+    }
     const isFiring = mod.GetSoldierState(player, mod.SoldierStateBool.IsFiring);
     const isCrouching = mod.GetSoldierState(player, mod.SoldierStateBool.IsCrouching);
     const now = Date.now() / 1000;
@@ -9498,72 +9618,97 @@ function TickLeap(player: mod.Player): void {
     // Buffer window: ignore first LEAP_CHARGE_BUFFER_SECONDS to allow slide mechanic to fire uninterrupted
     const isEngaged = crouchHeld >= LEAP_CHARGE_BUFFER_SECONDS;
     const crouchReady = crouchHeld >= LEAP_CROUCH_HOLD_SECONDS;
+    LogLeapRuntime(
+        `tick_status_${objId}`,
+        `TickLeap status | player=${objId} crouch=${isCrouching} fire=${isFiring} held=${crouchHeld.toFixed(2)} engaged=${isEngaged} ready=${crouchReady} chargeState=${state.chargeVfxState} blocked=${state.previewIsBlocked}`,
+        0.5
+    );
 
     // Charge VFX at player location
     const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     const chargeVfxPos = mod.Add(playerPos, mod.Multiply(mod.UpVector(), 0.5));
-    if (isCrouching && !state.isLeaping && isEngaged) {
-        if (crouchReady && state.chargeVfxState !== 'ready') {
-            // Transition to ready: stop charging SFX, play ready SFX, swap VFX
-            if (state.chargingSfx) {
-                mod.UnspawnObject(state.chargingSfx);
-                state.chargingSfx = undefined;
-            }
-            const readySfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.SFX_GameModes_Gauntlet_Mission_Wreckage_ActiveBombNearby_OneShot3D,
-                playerPos, ZERO_VEC
-            );
-            mod.PlaySound(readySfx, 1);
-            state.chargeReadySfx = readySfx;
-            if (state.chargeVfx) {
-                mod.UnspawnObject(state.chargeVfx);
-                state.chargeVfx = undefined;
-            }
-            const readyVfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_RepairTool_Sparks_Damage,
-                chargeVfxPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
-            ) as mod.VFX;
-            mod.EnableVFX(readyVfx, true);
-            state.chargeVfx = readyVfx;
-            state.chargeVfxState = 'ready';
-        } else if (!crouchReady && state.chargeVfxState !== 'charging') {
-            // Just entered charging state: blinking MPAPS indicator, kick off the timed preview trail
-            if (state.chargeVfx) {
-                mod.UnspawnObject(state.chargeVfx);
-                state.chargeVfx = undefined;
-            }
-            const chargeVfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_Gadget_MPAPS_Lights_Active,
-                playerPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
-            ) as mod.VFX;
-            mod.EnableVFX(chargeVfx, true);
-            state.chargeVfx = chargeVfx;
-            state.chargeVfxState = 'charging';
-            startTrajectoryPreview(player, state);
-            // Start a charging SFX at the player
-            const proxChargeSfx = mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_ProgressBarFillingUp_OneShot2D;
-            if (!state.chargingSfx) {
-                const chargeSfxObj = mod.SpawnObject(
-                    proxChargeSfx,
+    if (isCrouching && !state.isLeaping) {
+        if (isEngaged) {
+            if (crouchReady && state.chargeVfxState !== 'ready') {
+                // Transition to ready: stop charging SFX, play ready SFX, swap VFX
+                if (state.chargingSfx) {
+                    mod.UnspawnObject(state.chargingSfx);
+                    state.chargingSfx = undefined;
+                }
+                const readySfx = mod.SpawnObject(
+                    mod.RuntimeSpawn_Common.SFX_GameModes_Gauntlet_Mission_Wreckage_ActiveBombNearby_OneShot3D,
                     playerPos, ZERO_VEC
                 );
-                mod.PlaySound(chargeSfxObj, 1, player);
-                state.chargingSfx = chargeSfxObj;
+                mod.PlaySound(readySfx, 1);
+                state.chargeReadySfx = readySfx;
+                if (state.chargeVfx) {
+                    mod.UnspawnObject(state.chargeVfx);
+                    state.chargeVfx = undefined;
+                }
+                const readyVfx = mod.SpawnObject(
+                    mod.RuntimeSpawn_Common.FX_RepairTool_Sparks_Damage,
+                    chargeVfxPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+                ) as mod.VFX;
+                mod.EnableVFX(readyVfx, true);
+                state.chargeVfx = readyVfx;
+                state.chargeVfxState = 'ready';
+            } else if (!crouchReady && state.chargeVfxState !== 'charging') {
+                // Just entered charging state: blinking MPAPS indicator, kick off the timed preview trail
+                if (state.chargeVfx) {
+                    mod.UnspawnObject(state.chargeVfx);
+                    state.chargeVfx = undefined;
+                }
+                const chargeVfx = mod.SpawnObject(
+                    mod.RuntimeSpawn_Common.FX_Gadget_MPAPS_Lights_Active,
+                    playerPos, ZERO_VEC, mod.CreateVector(1, 1, 1)
+                ) as mod.VFX;
+                mod.EnableVFX(chargeVfx, true);
+                state.chargeVfx = chargeVfx;
+                state.chargeVfxState = 'charging';
+                startTrajectoryPreview(player, state);
+                // Start a charging SFX at the player
+                const proxChargeSfx = mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_ProgressBarFillingUp_OneShot2D;
+                if (!state.chargingSfx) {
+                    const chargeSfxObj = mod.SpawnObject(
+                        proxChargeSfx,
+                        playerPos, ZERO_VEC
+                    );
+                    mod.PlaySound(chargeSfxObj, 1, player);
+                    state.chargingSfx = chargeSfxObj;
+                }
             }
-        }
-        // Move existing charge VFX to follow the player
-        if (state.chargeVfx) {
-            mod.MoveVFX(state.chargeVfx, chargeVfxPos, ZERO_VEC);
+            // Move existing charge VFX to follow the player
+            if (state.chargeVfx) {
+                mod.MoveVFX(state.chargeVfx, chargeVfxPos, ZERO_VEC);
+            }
+        } else {
+            // During the slide-protection buffer, clear charge VFX/SFX but keep hold timing alive.
+            resetLeapChargeState(state, true);
         }
     } else {
-        // Not crouching, is leaping, or within slide-protection buffer -- clean up
+        // Not crouching or currently leaping -- full reset
         resetLeapChargeState(state);
     }
 
     // Leap activation: crouch held long enough + fire
-    if (state.isLeaping) return;
-    if (!crouchReady || !isFiring) return;
-    if (state.previewIsBlocked) return;
+    if (state.isLeaping) {
+        LogLeapRuntime(`tick_already_leaping_${objId}`, `TickLeap activation blocked already leaping | player=${objId}`);
+        return;
+    }
+    if (!crouchReady || !isFiring) {
+        LogLeapRuntime(
+            `tick_activation_not_ready_${objId}`,
+            `TickLeap activation waiting | player=${objId} crouchReady=${crouchReady} firing=${isFiring}`,
+            0.5
+        );
+        return;
+    }
+    if (state.previewIsBlocked) {
+        LogLeapRuntime(`tick_activation_blocked_${objId}`, `TickLeap activation blocked by preview collision | player=${objId}`);
+        return;
+    }
+
+    LogLeapRuntime(`tick_execute_${objId}`, `TickLeap executeLeap fired | player=${objId}`, 0.2);
 
     executeLeap(player, state);
 }
@@ -10222,6 +10367,17 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     const vehicleSpawnedMessage = ResolveStringKeyMessage("vehicle_spawned");
     const alphaLeapReadyMessage = ResolveStringKeyMessage("alpha_leap_available");
     const leapIsNowAvailable = IsLeapAttackAvailableNow();
+
+    // If leap just unlocked, grant leap state to currently deployed alpha infected players now.
+    if (leapIsNowAvailable) {
+        for (const playerProfile of PlayerProfile._allPlayerProfiles) {
+            if (!playerProfile.isAlphaInfected) continue;
+            if (!Helpers.HasValidObjId(playerProfile.player)) continue;
+            if (!mod.GetSoldierState(playerProfile.player, mod.SoldierStateBool.IsAlive)) continue;
+            InitLeapSystem(playerProfile.player);
+        }
+    }
+
     for (const playerProfile of PlayerProfile._allPlayerProfiles) {
         const notifyAlphaLeapReady = leapIsNowAvailable
             && playerProfile.isInfectedTeam
@@ -10242,9 +10398,24 @@ export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
 export async function OngoingPlayer(eventPlayer: mod.Player) {
     const playerObjId = mod.GetObjId(eventPlayer);
     if (!Helpers.HasValidObjId(eventPlayer) || playerObjId < 0) return;
-    if (!IsPlayerDeployed(eventPlayer)) return;
+
+    const playerProfile = PlayerProfile.Get(eventPlayer);
+
+    // Safety net: if leap is unlocked and this deployed alpha is missing state,
+    // initialize leap here so crouch charge detection can start immediately.
+    if (playerProfile
+        && !playerProfile.isAI
+        && playerProfile.isAlphaInfected
+        && IsPlayerOnInfectedTeamForLeap(eventPlayer, playerProfile)
+        && IsLeapAttackAvailableNow()
+        && !LEAP_STATES.has(playerObjId)) {
+        LogLeapRuntime(`ongoing_safety_init_${playerObjId}`, `OngoingPlayer safety init triggered | player=${playerObjId} alpha=${playerProfile.isAlphaInfected} infected=${playerProfile.isInfectedTeam}`, 0.3);
+        InitLeapSystem(eventPlayer);
+    }
 
     TickLeap(eventPlayer);
+
+    if (!IsPlayerDeployed(eventPlayer)) return;
 
     // In test mode, skip all normal ongoing logic (icons, banned weapons, bot AI, etc.)
     if (LEAP_TEST_MODE) return;
@@ -10260,8 +10431,6 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
         tickState = { nextIconUpdateAt: 0, nextBannedCheckAt: 0, nextLadderCheckAt: 0, nextBotDebugUpdateAt: 0 };
         PLAYER_ONGOING_TICK_STATE.set(playerObjId, tickState);
     }
-
-    const playerProfile = PlayerProfile.Get(eventPlayer);
     if (playerProfile && !playerProfile.isAI) {
         const isInVehicle = mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle);
         if (playerProfile.invehicle !== isInVehicle) {
