@@ -61,6 +61,7 @@
   "awaiting_survivors_loadout": "Waiting For Survivors To Choose Loadout...{}/{}",
   "selecting_multiple_infected": "Selecting Multiple Alpha Infected This Round!",
   "became_alpha_infected": "{} Became The Alpha Infected!",
+  "alpha_leap_available": "Leap Attack is now available! Crouch + fire to launch.",
   "multiple_alphas": "2 Players Became An Alpha Infected This Round!",
   "infected_countdown": "{}:{}{}",
   "gametime": "{}:{}{}",

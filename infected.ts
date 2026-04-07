@@ -102,9 +102,19 @@ const INFECTED_HINT_STRING_KEYS = [
     "infected_hint_brains",
 ] as const;
 
+const INFECTED_HINT_STRING_KEYS_NO_LEAP = [
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
 const INFECTED_ALPHA_HINT_STRING_KEYS = [
     "infected_hint_vehicle_leap",
     "infected_hint_leap_mechanic",
+    "infected_hint_assault_ladder",
+    "infected_hint_brains",
+] as const;
+
+const INFECTED_ALPHA_HINT_STRING_KEYS_NO_LEAP = [
     "infected_hint_assault_ladder",
     "infected_hint_brains",
 ] as const;
@@ -124,6 +134,12 @@ const ALPHA_BUFF_STRING_KEYS = [
     "alpha_infected_area_notification",
     "alpha_buff_tankier",
     "alpha_buff_leap_attack",
+    "alpha_buff_speed",
+] as const;
+
+const ALPHA_BUFF_STRING_KEYS_NO_LEAP = [
+    "alpha_infected_area_notification",
+    "alpha_buff_tankier",
     "alpha_buff_speed",
 ] as const;
 
@@ -222,6 +238,7 @@ let GAME_ROUND_LIMIT = 9;
 
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
+let LEAP_ATTACK_UNLOCKED_THIS_ROUND = false;
 
 // Vehicle spawner IDs to randomly pick from when final five triggers
 const VEHICLE_SPAWNER_IDS: number[] = [202, 203];
@@ -232,6 +249,7 @@ const VEHICLE_TYPES: mod.VehicleList[] = [
     mod.VehicleList.Quadbike,
     mod.VehicleList.GolfCart,
     mod.VehicleList.Flyer60,
+    // eventually dirtbike goes here too
 ];
 
 // WEAPON RARITY THRESHOLDS -- lower threshold means more common, higher value means more rare
@@ -352,14 +370,34 @@ function ResolveStringKeyMessage(key: string): mod.Message {
     return MakeMessage((mod.stringkeys as Record<string, string>)[key] ?? key);
 }
 
+function IsLeapAttackAvailableNow(): boolean {
+    if (LEAP_TEST_MODE) return true;
+    return CURRENT_MAP === MapNames.SAND2
+        && LEAP_ATTACK_UNLOCKED_THIS_ROUND;
+}
+
+function GetInfectedHintKeysForCurrentRound(): readonly string[] {
+    return IsLeapAttackAvailableNow()
+        ? INFECTED_HINT_STRING_KEYS
+        : INFECTED_HINT_STRING_KEYS_NO_LEAP;
+}
+
+function GetAlphaInfectedHintKeysForCurrentRound(): readonly string[] {
+    return IsLeapAttackAvailableNow()
+        ? INFECTED_ALPHA_HINT_STRING_KEYS
+        : INFECTED_ALPHA_HINT_STRING_KEYS_NO_LEAP;
+}
+
 function GetInfectedHintMessage(index: number): mod.Message {
-    const normalizedIndex = ((index % INFECTED_HINT_STRING_KEYS.length) + INFECTED_HINT_STRING_KEYS.length) % INFECTED_HINT_STRING_KEYS.length;
-    return ResolveStringKeyMessage(INFECTED_HINT_STRING_KEYS[normalizedIndex]);
+    const hintKeys = GetInfectedHintKeysForCurrentRound();
+    const normalizedIndex = ((index % hintKeys.length) + hintKeys.length) % hintKeys.length;
+    return ResolveStringKeyMessage(hintKeys[normalizedIndex]);
 }
 
 function GetAlphaInfectedHintMessage(index: number): mod.Message {
-    const normalizedIndex = ((index % INFECTED_ALPHA_HINT_STRING_KEYS.length) + INFECTED_ALPHA_HINT_STRING_KEYS.length) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
-    return ResolveStringKeyMessage(INFECTED_ALPHA_HINT_STRING_KEYS[normalizedIndex]);
+    const hintKeys = GetAlphaInfectedHintKeysForCurrentRound();
+    const normalizedIndex = ((index % hintKeys.length) + hintKeys.length) % hintKeys.length;
+    return ResolveStringKeyMessage(hintKeys[normalizedIndex]);
 }
 
 function GetLastManStandingBuffMessages(): mod.Message[] {
@@ -367,7 +405,10 @@ function GetLastManStandingBuffMessages(): mod.Message[] {
 }
 
 function GetAlphaInfectedBuffMessages(): mod.Message[] {
-    return ALPHA_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
+    const buffKeys = IsLeapAttackAvailableNow()
+        ? ALPHA_BUFF_STRING_KEYS
+        : ALPHA_BUFF_STRING_KEYS_NO_LEAP;
+    return buffKeys.map((key) => ResolveStringKeyMessage(key));
 }
 
 
@@ -3978,6 +4019,15 @@ class PlayerProfile {
             }
             UI.UpdateAlphaBuffWidget(this.playerID, index, message);
         }
+
+        // If leap is currently gated off, remove any stale extra widgets from previous rounds.
+        for (let index = buffMessages.length; index < this.alphaBuffWidgets.length; index++) {
+            const staleWidget = this.alphaBuffWidgets[index];
+            if (staleWidget) {
+                try { mod.DeleteUIWidget(staleWidget); } catch { }
+            }
+        }
+        this.alphaBuffWidgets.length = buffMessages.length;
     }
 
     UpdatePlayerAreaNotificationWidget() {
@@ -4048,11 +4098,12 @@ class PlayerProfile {
         }
 
         const now = Date.now() / 1000;
+        const leapAvailable = IsLeapAttackAvailableNow();
 
         // Alpha infected: show leap charge status when crouching, rotate alpha tips when idle
         if (this.isAlphaInfected) {
             const leapState = LEAP_STATES.get(mod.GetObjId(this.player));
-            if (leapState && leapState.chargeVfxState !== 'none') {
+            if (leapAvailable && leapState && leapState.chargeVfxState !== 'none') {
                 if (!this.playerAreaNotificationWidget) {
                     this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
                         this.player,
@@ -4103,7 +4154,7 @@ class PlayerProfile {
                 );
                 this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
             } else if (now >= this.nextPlayerAreaHintRotationAt) {
-                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_ALPHA_HINT_STRING_KEYS.length;
+                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetAlphaInfectedHintKeysForCurrentRound().length;
                 this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
             }
             if (this.playerAreaNotificationWidget) {
@@ -4126,7 +4177,7 @@ class PlayerProfile {
             );
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         } else if (now >= this.nextPlayerAreaHintRotationAt) {
-            this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % INFECTED_HINT_STRING_KEYS.length;
+            this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetInfectedHintKeysForCurrentRound().length;
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         }
         if (this.playerAreaNotificationWidget) {
@@ -5789,6 +5840,7 @@ class GameHandler {
             CleanupVehicleWithDamage(vehicleRef, 5);
         }
         GameHandler.vehicleSpawnedThisRound = false;
+        LEAP_ATTACK_UNLOCKED_THIS_ROUND = false;
 
         GameHandler.isSpawnCheckRunning = false;
         GameHandler.currentRound++;
@@ -6663,6 +6715,7 @@ function pickClosestAliveSurvivorFor(bot: mod.Player): mod.Player | undefined {
 
 /** Trigger the charge-leap for an alpha infected bot. Manages its own async flow; the tick is skipped while leaping. */
 async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Promise<void> {
+    if (!IsLeapAttackAvailableNow()) return;
     if (slot.tick.leapInProgress) return;
     slot.tick.leapInProgress = true;
     try {
@@ -6782,7 +6835,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
                 }
             } else {
                 // Outside melee range: keep all attacking disabled, focus on chasing.
-                if (slot.isAlpha && !disableAttacks) {
+                if (slot.isAlpha && !disableAttacks && IsLeapAttackAvailableNow()) {
                     TriggerAIChargeLeap(slot, infectedBot);
                     tick.behavior = 'vehicle_chase_leap';
                 } else {
@@ -9219,6 +9272,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
 async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): Promise<void> {
     const objId = mod.GetObjId(player);
     if (objId < 0) return;
+    if (CURRENT_MAP !== MapNames.SAND2) return;
 
     CleanupLeapSystem(player);
 
@@ -9388,10 +9442,40 @@ function CleanupLeapStateByObjId(objId: number): void {
     LEAP_STATES.delete(objId);
 }
 
+function resetLeapChargeState(state: LeapState): void {
+    if (state.chargeVfx) {
+        mod.UnspawnObject(state.chargeVfx);
+        state.chargeVfx = undefined;
+    }
+    if (state.chargingSfx) {
+        mod.UnspawnObject(state.chargingSfx);
+        state.chargingSfx = undefined;
+    }
+    if (state.chargeReadySfx) {
+        mod.UnspawnObject(state.chargeReadySfx);
+        state.chargeReadySfx = undefined;
+    }
+    state.chargeVfxState = 'none';
+    state.crouchStartTime = 0;
+
+    // Cancel trajectory scan and clear all cached path data.
+    if (state.previewScanActive || state.previewVfx || state.previewTrailVfx || state.blockedWarnIcon) {
+        cancelTrajectoryPreview(state);
+    }
+    state.cachedStepPositions = undefined;
+    state.cachedGeometryCollisionStep = -1;
+    state.cachedGeometryCollisionPos = undefined;
+}
+
 function TickLeap(player: mod.Player): void {
     const objId = mod.GetObjId(player);
     const state = LEAP_STATES.get(objId);
     if (!state) return;
+
+    if (!IsLeapAttackAvailableNow()) {
+        resetLeapChargeState(state);
+        return;
+    }
 
     if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive)) return;
     if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) return;
@@ -9473,26 +9557,7 @@ function TickLeap(player: mod.Player): void {
         }
     } else {
         // Not crouching, is leaping, or within slide-protection buffer -- clean up
-        if (state.chargeVfx) {
-            mod.UnspawnObject(state.chargeVfx);
-            state.chargeVfx = undefined;
-        }
-        if (state.chargingSfx) {
-            mod.UnspawnObject(state.chargingSfx);
-            state.chargingSfx = undefined;
-        }
-        if (state.chargeReadySfx) {
-            mod.UnspawnObject(state.chargeReadySfx);
-            state.chargeReadySfx = undefined;
-        }
-        state.chargeVfxState = 'none';
-        // Cancel trajectory scan and clear all cached path data
-        if (state.previewScanActive || state.previewVfx) {
-            cancelTrajectoryPreview(state);
-        }
-        state.cachedStepPositions = undefined;
-        state.cachedGeometryCollisionStep = -1;
-        state.cachedGeometryCollisionPos = undefined;
+        resetLeapChargeState(state);
     }
 
     // Leap activation: crouch held long enough + fire
@@ -10146,10 +10211,22 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     }
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
 
+    // Mark leap unlock only when the round had already requested a final-five spawn.
+    if (CURRENT_MAP === MapNames.SAND2) {
+        if (GameHandler.vehicleSpawnedThisRound) {
+            LEAP_ATTACK_UNLOCKED_THIS_ROUND = true;
+        }
+    }
+
     // Notify all players via the alpha feedback banner and attempt a VO on both teams.
     const vehicleSpawnedMessage = ResolveStringKeyMessage("vehicle_spawned");
+    const alphaLeapReadyMessage = ResolveStringKeyMessage("alpha_leap_available");
+    const leapIsNowAvailable = IsLeapAttackAvailableNow();
     for (const playerProfile of PlayerProfile._allPlayerProfiles) {
-        playerProfile.ShowAlphaFeedback(vehicleSpawnedMessage);
+        const notifyAlphaLeapReady = leapIsNowAvailable
+            && playerProfile.isInfectedTeam
+            && playerProfile.isAlphaInfected;
+        playerProfile.ShowAlphaFeedback(notifyAlphaLeapReady ? alphaLeapReadyMessage : vehicleSpawnedMessage);
     }
     if (VOSounds){
         mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
@@ -10312,8 +10389,8 @@ export async function OnGameModeStarted() {
         const existingVehicles = mod.AllVehicles();
         const count = mod.CountOf(existingVehicles);
         if (count > 0) {
-            console.log(`OnGameModeStarted | Found ${count} pre-existing vehicle(s); scheduling removal in 10s.`);
-            await mod.Wait(10);
+            console.log(`OnGameModeStarted | Found ${count} pre-existing vehicle(s); scheduling removal in 3.`);
+            await mod.Wait(3);
             for (let i = 0; i < count; i++) {
                 const v = mod.ValueInArray(existingVehicles, i) as mod.Vehicle;
                 CleanupVehicleWithDamage(v, 0);
