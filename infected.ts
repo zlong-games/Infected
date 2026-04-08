@@ -14,7 +14,7 @@ const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiat
 const DEBUG_LEAP_RUNTIME = false; // temporary diagnostics for leap init/tick gating
 const DEBUG_BOT_LIFECYCLE = false; // targeted checklist logs for bot spawn->death timing investigations
 const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
-const BOT_SURVIVAL_TEST_MODE = true; // set true to disable rounds/timers and soak-test infected bot lifecycle
+const BOT_SURVIVAL_TEST_MODE = false; // set true to disable rounds/timers and soak-test infected bot lifecycle
 
 const BOT_SURVIVAL_TEST_SPAWN_INTERVAL_SECONDS = 10;
 const BOT_SURVIVAL_TEST_MAX_INFECTED_BOTS = 11;
