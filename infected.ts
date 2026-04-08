@@ -13,8 +13,8 @@ const DEBUG_ALPHA_STATE = false;
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
 const DEBUG_LEAP_RUNTIME = false; // temporary diagnostics for leap init/tick gating
 const DEBUG_BOT_LIFECYCLE = false; // targeted checklist logs for bot spawn->death timing investigations
-const LEAP_TEST_MODE = true; // set true to bypass all game logic and run the leap attack sandbox
-const BOT_SURVIVAL_TEST_MODE = false; // set true to disable rounds/timers and soak-test infected bot lifecycle
+const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
+const BOT_SURVIVAL_TEST_MODE = true; // set true to disable rounds/timers and soak-test infected bot lifecycle
 
 const BOT_SURVIVAL_TEST_SPAWN_INTERVAL_SECONDS = 10;
 const BOT_SURVIVAL_TEST_MAX_INFECTED_BOTS = 11;
@@ -35,9 +35,6 @@ const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 
 const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 2;
-// DotProduct(survivorFacing, normalizedDirSurvivorToBot) < this value means the bot is in the
-// survivor's rear hemisphere. Shooting is suppressed there to prevent engine-forced takedown kills.
-const AI_MELEE_BACKSTAB_DOT_THRESHOLD = 0.0;
 const AI_LEASH_RANGE = 5;
 const AI_MIN_DEF_RANGE = 3;
 
@@ -48,7 +45,6 @@ const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.9;        // balanced on-foot chase in
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
 const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep melee weapon equipped only inside this distance
 const AI_BOT_SPAWN_TICK_GRACE_SECONDS = 1.2;        // defer ongoing AI tick briefly to avoid spawn/init race conditions
-const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_MOVE_FAILURE_RECOVERY_SECONDS = 2.0;       // pause chase tick after move-fail recovery behavior
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.8;      // lower values are easier
 const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 1;
@@ -6126,7 +6122,8 @@ interface InfectedBotTickState {
     trackedVehicle?: mod.Vehicle;
     leapInProgress?: boolean;
     inAreaTrigger?: boolean;
-    lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
+    meleeGadgetActive?: boolean;
+    meleeTargetObjId?: number;
     moveFailCount?: number;     // increments on move-fail callbacks; reset on respawn
     moveFailHoldUntil?: number; // suppresses chase tick while failure recovery is active
     lifecycleSpawnedAt?: number;
@@ -6217,7 +6214,13 @@ class InfectedBotSlot {
     }
 
     resetTick(): void {
-        this.tick = { lastMoveIssuedAt: 0, nextTickAt: 0, behavior: 'idle' };
+        this.tick = {
+            lastMoveIssuedAt: 0,
+            nextTickAt: 0,
+            behavior: 'idle',
+            meleeGadgetActive: false,
+            meleeTargetObjId: undefined,
+        };
     }
 
     /** Queues a respawn after INFECTED_RESPAWN_TIME. Called once OnPlayerLeaveGame confirms the body is gone. */
@@ -6290,11 +6293,6 @@ class InfectedBotSlot {
             PlayerProfile._deployedPlayers.set(playerObjID, pp);
         }
 
-        // Keep combat toggles centralized at spawn-time init only.
-        // clear the set target and let the tick run their course
-        try { mod.AISetTarget(player); } catch { }
-        try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true); } catch { }
-
         // Increment the spawn token so any still-pending async block from a prior spawn of
         // this slot detects it is stale and aborts, preventing double-initialization races.
         this.spawnToken++;
@@ -6315,6 +6313,7 @@ class InfectedBotSlot {
             // mod.AISetMoveSpeed(player, this.isAlpha ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run);
             await AISpawnHandler.AssignAIEquipment(player, TeamNameString.Infected);
             if (this.spawnToken !== token || !PlayerIsAliveAndValid(player)) return;
+            ApplyInfectedBotManualControl(player);
             ShowAlphaInfectedIndicator(player);
             if (this.isAlpha) {
                 InitLeapSystem(player);
@@ -6325,6 +6324,9 @@ class InfectedBotSlot {
 
     HandleDeath(): void {
         const prevObjID = this.playerObjID;
+        if (this.player) {
+            StopInfectedBotMeleeAttack(this, this.player);
+        }
         if (prevObjID !== undefined) {
             InfectedBotSlot.byObjID.delete(prevObjID);
             CleanupBotTargetWorldIcon(prevObjID, 'InfectedBotSlot.HandleDeath');
@@ -6771,8 +6773,55 @@ function SetInfectedBotMeleeLoadout(bot: mod.Player): void {
             mod.AddEquipment(bot, mod.Gadgets.Melee_Sledgehammer);
         }
     } catch { }
+    try { mod.AIGadgetSettings(bot, true, true, false); } catch { }
     try { mod.ForceSwitchInventory(bot, mod.InventorySlots.MeleeWeapon); } catch { }
     try { mod.EnableInputRestriction(bot, mod.RestrictedInputs.FireWeapon, false); } catch { }
+}
+
+function ApplyInfectedBotManualControl(bot: mod.Player): void {
+    try { mod.AIIdleBehavior(bot); } catch { }
+    try { mod.AIEnableShooting(bot, false); } catch { }
+    try { mod.AIEnableTargeting(bot, false); } catch { }
+    try { mod.AISetTarget(bot); } catch { }
+    try { mod.AIStopUsingGadget(bot); } catch { }
+    try { mod.AIGadgetSettings(bot, true, true, false); } catch { }
+    try { mod.EnableInputRestriction(bot, mod.RestrictedInputs.FireWeapon, true); } catch { }
+    try { mod.ForceSwitchInventory(bot, mod.InventorySlots.MeleeWeapon); } catch { }
+}
+
+function StartInfectedBotMeleeAttack(slot: InfectedBotSlot, bot: mod.Player, target: mod.Player): void {
+    const targetObjId = mod.GetObjId(target);
+    if (targetObjId < 0 || !PlayerIsAliveAndValid(target)) {
+        StopInfectedBotMeleeAttack(slot, bot);
+        return;
+    }
+
+    if (slot.tick.meleeGadgetActive && slot.tick.meleeTargetObjId === targetObjId) {
+        return;
+    }
+
+    if (slot.tick.meleeGadgetActive) {
+        try { mod.AIStopUsingGadget(bot); } catch { }
+    }
+
+    try { mod.AIGadgetSettings(bot, true, true, false); } catch { }
+    try {
+        mod.AIStartUsingGadget(bot, mod.Gadgets.Melee_Sledgehammer, target);
+        slot.tick.meleeGadgetActive = true;
+        slot.tick.meleeTargetObjId = targetObjId;
+    } catch {
+        slot.tick.meleeGadgetActive = false;
+        slot.tick.meleeTargetObjId = undefined;
+    }
+}
+
+function StopInfectedBotMeleeAttack(slot: InfectedBotSlot, bot: mod.Player): void {
+    if (!slot.tick.meleeGadgetActive && slot.tick.meleeTargetObjId === undefined) {
+        return;
+    }
+    try { mod.AIStopUsingGadget(bot); } catch { }
+    slot.tick.meleeGadgetActive = false;
+    slot.tick.meleeTargetObjId = undefined;
 }
 
 function LogBotLifecycle(slot: InfectedBotSlot, stage: string, details?: string): void {
@@ -6799,13 +6848,13 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
     if (!IsLeapAttackAvailableNow()) return;
     if (slot.tick.leapInProgress) return;
     slot.tick.leapInProgress = true;
+    StopInfectedBotMeleeAttack(slot, bot);
     mod.AIIdleBehavior(bot);
     try {
-        mod.AISetStance(bot, mod.Stance.Crouch);
-        await mod.Wait(LEAP_CROUCH_HOLD_SECONDS + 0.5);
-        if (!PlayerIsAliveAndValid(bot)) return;
-        mod.AIForceFire(bot, 1.5);
+        mod.SetAiInput(bot, mod.AiInput.Crouch, LEAP_CROUCH_HOLD_SECONDS + 0.6);
+        mod.SetAiInput(bot, mod.AiInput.FireWeapon, LEAP_CROUCH_HOLD_SECONDS + 1.5);
         while (true) {
+            if (!PlayerIsAliveAndValid(bot)) return;
             if (mod.GetSoldierState(bot, mod.SoldierStateBool.IsOnGround)
                 || !mod.GetSoldierState(bot, mod.SoldierStateBool.IsInAir))
                 break;
@@ -6815,7 +6864,7 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
     } finally {
         slot.tick.leapInProgress = false;
         if (PlayerIsAliveAndValid(bot)) {
-            mod.AISetStance(bot, mod.Stance.Stand);
+            mod.SetAiInput(bot, mod.AiInput.Sprint, 0.2);
         }
     }
 }
@@ -6835,6 +6884,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     // Hold off the chase tick while move-fail recovery is active.
     const now = Date.now() / 1000;
     if (slot.tick.moveFailHoldUntil && now < slot.tick.moveFailHoldUntil) {
+        StopInfectedBotMeleeAttack(slot, infectedBot);
         slot.tick.behavior = 'recovering_move_fail';
         UpdateBotTargetWorldIcon(slot);
         return;
@@ -6845,6 +6895,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     // Re-evaluate target each tick
     let target = tick.target;
     if (!target || !PlayerIsAliveAndValid(target)) {
+        StopInfectedBotMeleeAttack(slot, infectedBot);
         target = pickClosestAliveSurvivorFor(infectedBot);
         tick.target = target;
         tick.lastMoveIssuedAt = 0;
@@ -6853,6 +6904,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     } else {
         const closest = pickClosestAliveSurvivorFor(infectedBot);
         if (closest && mod.GetObjId(closest) !== mod.GetObjId(target)) {
+            StopInfectedBotMeleeAttack(slot, infectedBot);
             target = closest;
             tick.target = target;
             tick.lastMoveIssuedAt = 0;
@@ -6862,6 +6914,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     }
 
     if (!target) {
+        StopInfectedBotMeleeAttack(slot, infectedBot);
         const botProfile = PlayerProfile.Get(infectedBot);
         if (botProfile) {
             botProfile.currentTarget = undefined;
@@ -6881,12 +6934,8 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const isTargetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
-    mod.AISetTarget(infectedBot, target);
     mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
-    // attempting to use set target and battlefield behavior for simplicty, let engine do thing
-    // AIBattlefieldBehavior doesn't seem to kill bots on spawn w/ pathing issues -
-    // but they struggle at getting within melee range.
-    // mod.AIBattlefieldBehavior(infectedBot);
+    // Keep movement explicit (AIMoveToBehavior reissues) while combat uses gadget start/stop.
 
     // --- Vehicle chase path ---
     if (isTargetInVehicle) {
@@ -6906,29 +6955,25 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
             // a stale destination causes the bot to run to where the vehicle was.
             const timeSinceLastMove = now - tick.lastMoveIssuedAt;
             if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
-                mod.AISetTarget(infectedBot, vehicleDriver);
                 IssueInfectedBotMove(slot, infectedBot, vehiclePos, 'vehicle_chase');
                 tick.lastMoveIssuedAt = now;
                 tick.lastMovePos = vehiclePos;
             }
 
             if (dist <= AI_VEHICLE_MELEE_DISTANCE) {
-                if (!disableAttacks) {
+                if (!disableAttacks && vehicleDriver && PlayerIsAliveAndValid(vehicleDriver)) {
                     SetInfectedBotMeleeLoadout(infectedBot);
-                } else {
-                    SetInfectedBotChaseOnlyLoadout(infectedBot);
-                }
-                const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
-                if (!disableAttacks && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
-                    mod.AIForceFire(infectedBot, 0.1);
-                    tick.lastSwingAt = now;
+                    StartInfectedBotMeleeAttack(slot, infectedBot, vehicleDriver);
                     tick.behavior = 'vehicle_melee_attack_window';
                 } else {
-                    tick.behavior = disableAttacks ? 'vehicle_melee_no_attack' : 'vehicle_melee_cooldown';
+                    SetInfectedBotChaseOnlyLoadout(infectedBot);
+                    StopInfectedBotMeleeAttack(slot, infectedBot);
+                    tick.behavior = 'vehicle_melee_no_attack';
                 }
             } else {
                 // Outside melee range: keep all attacking disabled, focus on chasing.
                 SetInfectedBotChaseOnlyLoadout(infectedBot);
+                StopInfectedBotMeleeAttack(slot, infectedBot);
                 if (slot.isAlpha && !disableAttacks && IsLeapAttackAvailableNow()) {
                     TriggerAIChargeLeap(slot, infectedBot);
                     tick.behavior = 'vehicle_chase_leap';
@@ -6955,6 +7000,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         SetInfectedBotMeleeLoadout(infectedBot);
     } else {
         SetInfectedBotChaseOnlyLoadout(infectedBot);
+        StopInfectedBotMeleeAttack(slot, infectedBot);
     }
 
     if (dist <= AI_INFECTED_MELEE_DISTANCE) {
@@ -6967,27 +7013,15 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
-        // attempting to disable the backstabbing stuff.
-        // commenting out for now to streamline bot logic for troubleshooting
-        // const targetFacing = mod.GetSoldierState(target, mod.SoldierStateVector.GetFacingDirection);
-        // const dirToBot = mod.Normalize(mod.Subtract(infectedBotPos, targetPos));
-        // const behindDot = mod.DotProduct(targetFacing, dirToBot);
-        // const allowAttacking = behindDot >= AI_MELEE_BACKSTAB_DOT_THRESHOLD;
-        // const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
-        // if (!disableAttacks && allowAttacking && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
-        //     // mod.AIForceFire(infectedBot, 0.1);
-        //     tick.lastSwingAt = now;
-        //     tick.behavior = 'melee_attack_window';
-        // } else {
-        //     if (disableAttacks) {
-        //         tick.behavior = 'melee_no_attack';
-        //     } else if (!allowAttacking) {
-        //         tick.behavior = 'melee_backstab_blocked';
-        //     } else {
-        //         tick.behavior = 'melee_cooldown';
-        //     }
-        // }
+        if (!disableAttacks) {
+            StartInfectedBotMeleeAttack(slot, infectedBot, target);
+            tick.behavior = 'melee_attack_window';
+        } else {
+            StopInfectedBotMeleeAttack(slot, infectedBot);
+            tick.behavior = 'melee_no_attack';
+        }
     } else {
+        StopInfectedBotMeleeAttack(slot, infectedBot);
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
         if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
             IssueInfectedBotMove(slot, infectedBot, targetPos, 'chase');
@@ -9496,13 +9530,14 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
             if (mod.DistanceBetween(mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition), vehiclePos) > MIN_LEAP_DIST) {
                 mod.AISetTarget(player, driver);
                 // mod.AIMoveToBehavior(player, vehiclePos);
-                // Hold crouch so TickLeap accumulates charge time, then fire to trigger the leap.
-                mod.AISetStance(player, mod.Stance.Crouch);
-                await mod.Wait(2);
-                mod.AIForceFire(player, 2);
+                // Hold crouch and fire via AI input commands so leap charge is fully input-driven.
+                mod.SetAiInput(player, mod.AiInput.Crouch, LEAP_CROUCH_HOLD_SECONDS + 0.6);
+                mod.SetAiInput(player, mod.AiInput.FireWeapon, LEAP_CROUCH_HOLD_SECONDS + 1.5);
+                await mod.Wait(0.5);
                 mod.AIIdleBehavior(player);
             }
-            mod.AISetStance(player, mod.Stance.Crouch);
+            mod.SetAiInput(player, mod.AiInput.Crouch, 0.2);
+            await mod.Wait(0.25);
         }
         mod.Kill(player);
     }
@@ -9854,6 +9889,8 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
             mod.AIIdleBehavior(eventPlayer);
             return;
         }
+
+        StopInfectedBotMeleeAttack(slot, eventPlayer);
 
         const moveFailCount = (slot.tick.moveFailCount ?? 0) + 1;
         slot.tick.moveFailCount = moveFailCount;
