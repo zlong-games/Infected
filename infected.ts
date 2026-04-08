@@ -12,7 +12,8 @@ const DEBUG_ALPHA_HUMAN_ONLY = false;
 const DEBUG_ALPHA_STATE = false;
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
 const DEBUG_LEAP_RUNTIME = false; // temporary diagnostics for leap init/tick gating
-const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
+const DEBUG_BOT_LIFECYCLE = false; // targeted checklist logs for bot spawn->death timing investigations
+const LEAP_TEST_MODE = true; // set true to bypass all game logic and run the leap attack sandbox
 const BOT_SURVIVAL_TEST_MODE = false; // set true to disable rounds/timers and soak-test infected bot lifecycle
 
 const BOT_SURVIVAL_TEST_SPAWN_INTERVAL_SECONDS = 10;
@@ -43,12 +44,14 @@ const AI_MIN_DEF_RANGE = 3;
 // Vehicle-chase anti-stutter constants
 const AI_VEHICLE_MELEE_DISTANCE = 6;                // attack radius when target is in a vehicle
 const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
-const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.3;        // throttle for normal (on-foot) targets
-const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.3;         // reissue very frequently when within melee range
+const AI_DEFAULT_MOVE_REISSUE_SECONDS = 0.9;        // balanced on-foot chase interval (less stutter than 0.3, less lag than 2.3)
+const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
+const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep melee weapon equipped only inside this distance
+const AI_BOT_SPAWN_TICK_GRACE_SECONDS = 1.2;        // defer ongoing AI tick briefly to avoid spawn/init race conditions
 const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_MOVE_FAILURE_RECOVERY_SECONDS = 2.0;       // pause chase tick after move-fail recovery behavior
-const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.3; // lower values are easier
-const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 0.5;
+const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.8;      // lower values are easier
+const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 1;
 const MAX_PLAYER_COUNT = 12;
 const INFECTED_COUNT_LIMIT = 12;
 
@@ -1719,7 +1722,7 @@ class UI {
         const iconSize = 35;
 
         const xOffset = -(1024 / 2 - containerWidth / 2); // -287: aligns left edge with the scoreboard
-         // root widget
+        // root widget
         // grey base, background color controlled by the container's child
         return ParseUI({
             type: "Container",
@@ -6126,6 +6129,10 @@ interface InfectedBotTickState {
     lastSwingAt?: number;       // timestamp of last explicit melee ForceFire
     moveFailCount?: number;     // increments on move-fail callbacks; reset on respawn
     moveFailHoldUntil?: number; // suppresses chase tick while failure recovery is active
+    lifecycleSpawnedAt?: number;
+    lifecycleFirstOngoingTickLogged?: boolean;
+    lifecycleFirstMoveIssuedLogged?: boolean;
+    lifecycleFirstMoveFailLogged?: boolean;
 }
 
 /** One slot per spawner in INFECTED_AI_SPAWNERS (plus PARACHUTE_INFECTED_SPAWNERS when enabled). Persists across deaths. */
@@ -6261,10 +6268,15 @@ class InfectedBotSlot {
         this.playerObjID = playerObjID;
         this.state = BotSlotState.Alive;
         this.resetTick();
+        this.tick.lifecycleSpawnedAt = Date.now() / 1000;
+        this.tick.lifecycleFirstOngoingTickLogged = false;
+        this.tick.lifecycleFirstMoveIssuedLogged = false;
+        this.tick.lifecycleFirstMoveFailLogged = false;
         this.tick.behavior = 'spawned';
-        this.tick.nextTickAt = (Date.now() / 1000) + AI_BOT_TICK_SECONDS * 2;
+        this.tick.nextTickAt = (Date.now() / 1000) + AI_BOT_SPAWN_TICK_GRACE_SECONDS;
         InfectedBotSlot.byObjID.set(playerObjID, this);
         console.log(`InfectedBotSlot[${this.slotIndex}] | Spawned Player(${playerObjID}) on spawner(${spawnerObjID}) state=${this.state} alpha=${this.isAlpha}`);
+        LogBotLifecycle(this, 'spawned', `spawner=${spawnerObjID} alpha=${this.isAlpha} nextTickDelay=${AI_BOT_SPAWN_TICK_GRACE_SECONDS.toFixed(2)}s`);
 
         const pp = PlayerProfile.Get(player, spawnerObjID);
         if (pp) {
@@ -6278,12 +6290,11 @@ class InfectedBotSlot {
             PlayerProfile._deployedPlayers.set(playerObjID, pp);
         }
 
-        mod.AIIdleBehavior(player);
         // Keep combat toggles centralized at spawn-time init only.
-        try { mod.AIEnableShooting(player, false); } catch { }
-        try { mod.AIEnableTargeting(player, false); } catch { }
+        // clear the set target and let the tick run their course
+        try { mod.AISetTarget(player); } catch { }
         try { mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, true); } catch { }
-1
+
         // Increment the spawn token so any still-pending async block from a prior spawn of
         // this slot detects it is stale and aborts, preventing double-initialization races.
         this.spawnToken++;
@@ -6519,8 +6530,6 @@ class SurvivorBotSlot {
         SurvivorBotSlot.pendingBySpawnerID.set(this.spawnerID, this);
         const botName = MakeMessage(this.name);
         mod.SpawnAIFromAISpawner(spawnerObj, mod.SoldierClass.Assault, botName, SURVIVOR_TEAM);
-        // could setting this on the spawnerobj every time a bot spawns, be the cause of bot decay issues?
-        // mod.SetUnspawnDelayInSeconds(spawnerObj, 2);
     }
 }
 
@@ -6747,17 +6756,62 @@ function pickClosestAliveSurvivorFor(bot: mod.Player): mod.Player | undefined {
     return closestSurvivor;
 }
 
+function SetInfectedBotChaseOnlyLoadout(bot: mod.Player): void {
+    try {
+        if (mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
+            mod.RemoveEquipment(bot, mod.Gadgets.Melee_Sledgehammer);
+        }
+    } catch { }
+    try { mod.EnableInputRestriction(bot, mod.RestrictedInputs.FireWeapon, true); } catch { }
+}
+
+function SetInfectedBotMeleeLoadout(bot: mod.Player): void {
+    try {
+        if (!mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
+            mod.AddEquipment(bot, mod.Gadgets.Melee_Sledgehammer);
+        }
+    } catch { }
+    try { mod.ForceSwitchInventory(bot, mod.InventorySlots.MeleeWeapon); } catch { }
+    try { mod.EnableInputRestriction(bot, mod.RestrictedInputs.FireWeapon, false); } catch { }
+}
+
+function LogBotLifecycle(slot: InfectedBotSlot, stage: string, details?: string): void {
+    if (!DEBUG_BOT_LIFECYCLE) return;
+    const now = Date.now() / 1000;
+    const sinceSpawn = slot.tick.lifecycleSpawnedAt !== undefined
+        ? `${(now - slot.tick.lifecycleSpawnedAt).toFixed(2)}s`
+        : 'n/a';
+    const botObjId = slot.playerObjID ?? -1;
+    const suffix = details ? ` | ${details}` : '';
+    console.log(`[BotLifecycle] slot=${slot.slotIndex} bot=${botObjId} stage=${stage} t+${sinceSpawn}${suffix}`);
+}
+
+function IssueInfectedBotMove(slot: InfectedBotSlot, bot: mod.Player, destination: mod.Vector, reason: string): void {
+    mod.AIMoveToBehavior(bot, destination);
+    if (!slot.tick.lifecycleFirstMoveIssuedLogged) {
+        slot.tick.lifecycleFirstMoveIssuedLogged = true;
+        LogBotLifecycle(slot, 'first_move_command', `reason=${reason}`);
+    }
+}
+
 /** Trigger the charge-leap for an alpha infected bot. Manages its own async flow; the tick is skipped while leaping. */
 async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Promise<void> {
     if (!IsLeapAttackAvailableNow()) return;
     if (slot.tick.leapInProgress) return;
     slot.tick.leapInProgress = true;
+    mod.AIIdleBehavior(bot);
     try {
         mod.AISetStance(bot, mod.Stance.Crouch);
-        await mod.Wait(LEAP_CROUCH_HOLD_SECONDS + 0.15);
+        await mod.Wait(LEAP_CROUCH_HOLD_SECONDS + 0.5);
         if (!PlayerIsAliveAndValid(bot)) return;
         mod.AIForceFire(bot, 1.5);
-        await mod.Wait(2.5); // allow leap flight and landing to complete
+        while (true) {
+            if (mod.GetSoldierState(bot, mod.SoldierStateBool.IsOnGround)
+                || !mod.GetSoldierState(bot, mod.SoldierStateBool.IsInAir))
+                break;
+            // allow leap flight and landing to complete
+            await mod.Wait(0.5);
+        }
     } finally {
         slot.tick.leapInProgress = false;
         if (PlayerIsAliveAndValid(bot)) {
@@ -6788,7 +6842,6 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
 
     const tick = slot.tick;
     const disableAttacks = BOT_SURVIVAL_TEST_MODE && BOT_SURVIVAL_TEST_DISABLE_ATTACKS;
-    mod.EnableInputRestriction(infectedBot, mod.RestrictedInputs.FireWeapon, true);
     // Re-evaluate target each tick
     let target = tick.target;
     if (!target || !PlayerIsAliveAndValid(target)) {
@@ -6813,7 +6866,6 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         if (botProfile) {
             botProfile.currentTarget = undefined;
         }
-        mod.AIIdleBehavior(infectedBot);
         tick.behavior = 'idle_no_target';
         tick.lastMovePos = undefined;
         tick.trackedVehicle = undefined;
@@ -6826,15 +6878,18 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         botProfile.currentTarget = target;
     }
 
-    const targetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
+    const isTargetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
-    // Always sprint never slow down. Slowing for a melee swing causes the bot to
-    // fall behind a moving target, and it may then attempt to attack out of weapon range.
+    mod.AISetTarget(infectedBot, target);
     mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
+    // attempting to use set target and battlefield behavior for simplicty, let engine do thing
+    // AIBattlefieldBehavior doesn't seem to kill bots on spawn w/ pathing issues -
+    // but they struggle at getting within melee range.
+    // mod.AIBattlefieldBehavior(infectedBot);
 
     // --- Vehicle chase path ---
-    if (targetInVehicle) {
+    if (isTargetInVehicle) {
         // Acquire or re-use the tracked vehicle reference
         if (!tick.trackedVehicle) {
             const v = mod.GetVehicleFromPlayer(target);
@@ -6844,21 +6899,25 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         const veh = tick.trackedVehicle;
         if (veh) {
             const vehiclePos = mod.GetVehicleState(veh, mod.VehicleStateVector.VehiclePosition);
+            const vehicleDriver = mod.GetPlayerFromVehicleSeat(veh, 0);
             const dist = mod.DistanceBetween(infectedBotPos, vehiclePos);
 
             // Reissue move every tick the vehicle's position changes every frame and
             // a stale destination causes the bot to run to where the vehicle was.
             const timeSinceLastMove = now - tick.lastMoveIssuedAt;
             if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
-                mod.AIMoveToBehavior(infectedBot, vehiclePos);
+                mod.AISetTarget(infectedBot, vehicleDriver);
+                IssueInfectedBotMove(slot, infectedBot, vehiclePos, 'vehicle_chase');
                 tick.lastMoveIssuedAt = now;
                 tick.lastMovePos = vehiclePos;
             }
 
             if (dist <= AI_VEHICLE_MELEE_DISTANCE) {
-                // Use explicit ForceFire with a cooldown instead of always-on targeting.
-                // Auto-targeting in melee range triggers animations that lock the bot in place;
-                // if the vehicle then accelerates away the engine kills the bot mid-animation.
+                if (!disableAttacks) {
+                    SetInfectedBotMeleeLoadout(infectedBot);
+                } else {
+                    SetInfectedBotChaseOnlyLoadout(infectedBot);
+                }
                 const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
                 if (!disableAttacks && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
                     mod.AIForceFire(infectedBot, 0.1);
@@ -6869,6 +6928,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
                 }
             } else {
                 // Outside melee range: keep all attacking disabled, focus on chasing.
+                SetInfectedBotChaseOnlyLoadout(infectedBot);
                 if (slot.isAlpha && !disableAttacks && IsLeapAttackAvailableNow()) {
                     TriggerAIChargeLeap(slot, infectedBot);
                     tick.behavior = 'vehicle_chase_leap';
@@ -6890,46 +6950,47 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
     const dist = mod.DistanceBetween(infectedBotPos, targetPos);
 
+    // Keep weapons disabled outside melee-approach distance so bots only chase.
+    if (!disableAttacks && dist <= AI_MELEE_LOADOUT_DISTANCE) {
+        SetInfectedBotMeleeLoadout(infectedBot);
+    } else {
+        SetInfectedBotChaseOnlyLoadout(infectedBot);
+    }
+
     if (dist <= AI_INFECTED_MELEE_DISTANCE) {
         // Issue move very frequently when in melee range so the bot tracks
         // target movement between ticks rather than chasing a stale position.
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
         if (timeSinceLastMove >= AI_MELEE_CLOSE_REISSUE_SECONDS || !tick.lastMovePos) {
-            mod.AILOSMoveToBehavior(infectedBot, targetPos);
+            mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Run);
+            IssueInfectedBotMove(slot, infectedBot, targetPos, 'melee_track');
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
-        // Use explicit ForceFire with cooldown instead of always-on targeting.
-        // Always-on targeting in melee range can trigger a Takedown animation that locks
-        // the bot; if the target then moves the engine kills the bot mid-animation.
-        // The backstab check still guards the rear hemisphere.
-        const targetFacing = mod.GetSoldierState(target, mod.SoldierStateVector.GetFacingDirection);
-        const dirToBot = mod.Normalize(mod.Subtract(infectedBotPos, targetPos));
-        const behindDot = mod.DotProduct(targetFacing, dirToBot);
-        const allowAttacking = behindDot >= AI_MELEE_BACKSTAB_DOT_THRESHOLD;
-        const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
-        if (!disableAttacks && allowAttacking && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
-            // mod.AIForceFire(infectedBot, 0.1);
-            mod.EnableInputRestriction(infectedBot, mod.RestrictedInputs.FireWeapon, false);
-            tick.lastSwingAt = now;
-            tick.behavior = 'melee_attack_window';
-        } else {
-            if (disableAttacks) {
-                tick.behavior = 'melee_no_attack';
-            } else if (!allowAttacking) {
-                tick.behavior = 'melee_backstab_blocked';
-            } else {
-                tick.behavior = 'melee_cooldown';
-            }
-        }
+        // attempting to disable the backstabbing stuff.
+        // commenting out for now to streamline bot logic for troubleshooting
+        // const targetFacing = mod.GetSoldierState(target, mod.SoldierStateVector.GetFacingDirection);
+        // const dirToBot = mod.Normalize(mod.Subtract(infectedBotPos, targetPos));
+        // const behindDot = mod.DotProduct(targetFacing, dirToBot);
+        // const allowAttacking = behindDot >= AI_MELEE_BACKSTAB_DOT_THRESHOLD;
+        // const timeSinceSwing = now - (tick.lastSwingAt ?? 0);
+        // if (!disableAttacks && allowAttacking && timeSinceSwing >= AI_MELEE_SWING_COOLDOWN_SECONDS) {
+        //     // mod.AIForceFire(infectedBot, 0.1);
+        //     tick.lastSwingAt = now;
+        //     tick.behavior = 'melee_attack_window';
+        // } else {
+        //     if (disableAttacks) {
+        //         tick.behavior = 'melee_no_attack';
+        //     } else if (!allowAttacking) {
+        //         tick.behavior = 'melee_backstab_blocked';
+        //     } else {
+        //         tick.behavior = 'melee_cooldown';
+        //     }
+        // }
     } else {
-        // Outside melee range: sprint with attacking fully disabled.
-        // Keeping attacks off during the approach prevents mid-sprint melee animations
-        // that interrupt momentum and expose the bot to a stale-target kill.
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
         if (timeSinceLastMove >= AI_DEFAULT_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
-            mod.AIMoveToBehavior(infectedBot, targetPos);
-            mod.EnableInputRestriction(infectedBot, mod.RestrictedInputs.FireWeapon, true);
+            IssueInfectedBotMove(slot, infectedBot, targetPos, 'chase');
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
@@ -7044,7 +7105,7 @@ async function WaitForCurrentMapGate(showStatusToast: boolean): Promise<MapNames
                     break;
             }
             mod.DisplayHighlightedWorldLogMessage(mapIdentifiedStringkey);
-            if (DEBUG_SHOW_ALL_UI_ELEMENTS){
+            if (DEBUG_SHOW_ALL_UI_ELEMENTS) {
                 ShowMapGateMatchHUD(mapIdentifiedStringkey);
             }
             return mapIdentifier;
@@ -8856,8 +8917,9 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
         state.cachedStepPositions = liveTrack.steps;
         const arcEndpoint = liveTrack.steps[liveTrack.steps.length - 1];
 
-        // Charging-only world alert: tracked at the same cadence as preview path recalculation.
-        if (state.chargeVfxState === 'charging' && !state.isLeaping) {
+        // Charge-phase world alert (charging + ready): tracked at preview cadence.
+        const hasChargeState = state.chargeVfxState === 'charging' || state.chargeVfxState === 'ready';
+        if (hasChargeState && !state.isLeaping) {
             const chargeIconPos = mod.Add(
                 liveTrack.startPos,
                 mod.Multiply(mod.UpVector(), CHARGE_ALERT_ICON_HEIGHT)
@@ -8866,7 +8928,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
                 const iconObj = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, chargeIconPos, ZERO_VEC);
                 const icon = iconObj as mod.WorldIcon;
                 mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
-                mod.SetWorldIconColor(icon, mod.CreateVector(1, 0, 0));
+                mod.SetWorldIconColor(icon, UI.enemyOrange);
                 // consider only displaying this to the vehicle driver?
                 mod.EnableWorldIconText(icon, false);
                 mod.EnableWorldIconImage(icon, true);
@@ -9241,23 +9303,26 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         // Apply vehicle damage now that the arc is complete. The player stopped short of
         // the vehicle (never teleported into it), so the entity is still alive and valid.
         if (vehicleHitRef && vehicleHitPos) {
-            const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
-            const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
-            mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
-            mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
-            if (state.hitVfx) {
-                mod.UnspawnObject(state.hitVfx);
-                state.hitVfx = undefined;
+            const vehicleOccupants = ConvertArray(mod.GetAllPlayersInVehicle(vehicleHitRef)) as mod.Player[];
+            if (vehicleOccupants.length > 0) {
+                const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
+                const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
+                mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
+                mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
+                if (state.hitVfx) {
+                    mod.UnspawnObject(state.hitVfx);
+                    state.hitVfx = undefined;
+                }
+                const hitVfx = mod.SpawnObject(
+                    mod.RuntimeSpawn_Common.FX_Missile_MBTLAW_Hit_Glancing,
+                    vehicleHitPos,
+                    mod.CreateVector(0, 0, 0),
+                    mod.CreateVector(1, 1, 1)
+                ) as mod.VFX;
+                mod.EnableVFX(hitVfx, true);
+                state.hitVfx = hitVfx;
+                leapHitVfx = hitVfx;
             }
-            const hitVfx = mod.SpawnObject(
-                mod.RuntimeSpawn_Common.FX_Autocannon_30mm_AP_Hit_Metal_GS,
-                vehicleHitPos,
-                mod.CreateVector(0, 0, 0),
-                mod.CreateVector(1, 1, 1)
-            ) as mod.VFX;
-            mod.EnableVFX(hitVfx, true);
-            state.hitVfx = hitVfx;
-            leapHitVfx = hitVfx;
         }
 
         // Concussion ringing plays only for the leaping player (2D - no world position needed)
@@ -9788,6 +9853,10 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
 
         const moveFailCount = (slot.tick.moveFailCount ?? 0) + 1;
         slot.tick.moveFailCount = moveFailCount;
+        if (!slot.tick.lifecycleFirstMoveFailLogged) {
+            slot.tick.lifecycleFirstMoveFailLogged = true;
+            LogBotLifecycle(slot, 'first_move_fail_callback', `count=${moveFailCount} behavior=${slot.tick.behavior ?? 'unknown'}`);
+        }
 
         if (moveFailCount === 1) {
             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #1 - battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
@@ -9799,14 +9868,15 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
         if (moveFailCount >= 2) {
             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #2 - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
             mod.AIBattlefieldBehavior(eventPlayer);
-            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
+            slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS * slot.tick.moveFailCount;
             return;
         }
-         if (moveFailCount >= 15) {
-             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
-             slot.tick.moveFailHoldUntil = undefined;
-             mod.Kill(eventPlayer);
-         }
+        // engine will likely kill the bot on its own, this never triggers
+        // if (moveFailCount >= 15) {
+        //     console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
+        //     slot.tick.moveFailHoldUntil = undefined;
+        //     mod.Kill(eventPlayer);
+        // }
     }
 }
 
@@ -9824,7 +9894,6 @@ export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mo
         return;
     }
     mod.SetUnspawnDelayInSeconds(eventSpawner, 1.5);
-    mod.EnableInputRestriction(eventPlayer, mod.RestrictedInputs.FireWeapon, true);
     AISpawnHandler.OnBotSpawnFromSpawner(eventPlayer, mod.GetObjId(eventSpawner));
 }
 
@@ -10123,6 +10192,13 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
                             mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Weapon) ? "Weapon" :
                                 "Other";
             if (infectedSlot) {
+                if (deathType === 'Redeploy') {
+                    LogBotLifecycle(
+                        infectedSlot,
+                        'redeploy_death',
+                        `behavior=${infectedSlot.tick.behavior ?? 'unknown'} moveFailCount=${infectedSlot.tick.moveFailCount ?? 0}`
+                    );
+                }
                 console.log(`OnPlayerDied | Infected Bot(${playerObjID}) [${infectedSlot.name}] died\nCause of Death: ${deathType}`);
                 infectedSlot.HandleDeath();
                 return;
@@ -10307,7 +10383,8 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
     }
 }
 
-export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
+export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
+    await mod.Wait(0.2);
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
         if (survivorProfile && !survivorProfile.isAI) {
@@ -10322,7 +10399,9 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
         const targetInVehicle = pp?.currentTarget
             ? mod.GetSoldierState(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
             : false;
-        const aiSpeedMultiplier = targetInVehicle ? 6 : 2;
+        const aiSpeedMultiplier = targetInVehicle
+            ? 4 : (mod.GetMatchTimeElapsed() > 300)
+                ? 2 : 1;
         mod.SetPlayerMovementSpeedMultiplier(eventPlayer, aiSpeedMultiplier);
         const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
         if (slot) slot.tick.inAreaTrigger = true;
@@ -10330,7 +10409,7 @@ export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigg
 }
 
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
-    const playersInVehicle = mod.GetAllPlayersInVehicle(eventVehicle);
+    const playersInVehicle = ConvertArray(mod.GetAllPlayersInVehicle(eventVehicle)) as mod.Player[];
     console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
     const playerProfile = PlayerProfile.Get(eventPlayer);
     if (playerProfile) {
@@ -10338,12 +10417,11 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
     }
     playerProfile?.loadoutDisplayBottom?.Hide();
     // attempting to use the mod APIs to fetch players
-    for (let i = 0; i < mod.CountOf(playersInVehicle); i++) {
-        const playerInSeat = mod.ValueInArray(playersInVehicle, i);
-        if ((mod.GetObjId(mod.GetTeam(playerInSeat)) === mod.GetObjId(INFECTED_TEAM))) {
+    for (const player of playersInVehicle) {
+        if ((mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM))) {
             console.log(`OnPlayerEnterVehicle | Vehicle(${mod.GetObjId(eventVehicle)}) has an infected player inside. Forcing Player(${mod.GetObjId(eventPlayer)}) to exit.`);
-            mod.ForcePlayerExitVehicle(playerInSeat, eventVehicle);
-            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, playerInSeat);
+            mod.ForcePlayerExitVehicle(player, eventVehicle);
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
         }
     }
 }
@@ -10400,7 +10478,7 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
             && playerProfile.isAlphaInfected;
         playerProfile.ShowAlphaFeedback(notifyAlphaLeapReady ? alphaLeapReadyMessage : vehicleSpawnedMessage);
     }
-    if (VOSounds){
+    if (VOSounds) {
         mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
         mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
     }
@@ -10408,7 +10486,7 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
 
 export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
     SPAWNED_ACTIVE_VEHICLE = undefined;
-    CleanupVehicleWithDamage(eventVehicle, 5);
+    CleanupVehicleWithDamage(eventVehicle, 3);
 }
 
 export async function OngoingPlayer(eventPlayer: mod.Player) {
@@ -10546,10 +10624,26 @@ function OngoingAI(player: mod.Player, playerObjId: number): void {
     if (!slot || slot.state !== BotSlotState.Alive) return;
 
     const now = Date.now() / 1000;
+    if (slot.tick.nextTickAt <= 0) {
+        slot.tick.nextTickAt = now + AI_BOT_SPAWN_TICK_GRACE_SECONDS;
+        return;
+    }
     if (now < slot.tick.nextTickAt) return;
+    if (!slot.tick.lifecycleFirstOngoingTickLogged) {
+        slot.tick.lifecycleFirstOngoingTickLogged = true;
+        LogBotLifecycle(slot, 'first_ongoing_ai_tick', `behavior=${slot.tick.behavior ?? 'unknown'}`);
+    }
     slot.tick.nextTickAt = now + AI_BOT_TICK_SECONDS;
 
     InfectedBotLogicTick(slot);
+}
+
+export function OnRayCastHit(eventPlayer: mod.Player,eventPoint: mod.Vector, eventNormal: mod.Vector) {
+    HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+}
+
+export function OnRayCastMissed(eventPlayer: mod.Player) {
+    HandleLeapRayCastMissed(eventPlayer);
 }
 
 export async function OnGameModeStarted() {
@@ -10612,14 +10706,3 @@ export async function OnGameModeStarted() {
     GameHandler.TickUpdate(); // main game loop
 }
 
-export function OnRayCastHit(
-    eventPlayer: mod.Player,
-    eventPoint: mod.Vector,
-    eventNormal: mod.Vector
-): void {
-    HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
-}
-
-export function OnRayCastMissed(eventPlayer: mod.Player): void {
-    HandleLeapRayCastMissed(eventPlayer);
-}
