@@ -50,6 +50,8 @@ const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep melee weapon equippe
 const AI_BOT_SPAWN_TICK_GRACE_SECONDS = 1.2;        // defer ongoing AI tick briefly to avoid spawn/init race conditions
 const AI_MELEE_SWING_COOLDOWN_SECONDS = 2.0;        // minimum gap between explicit melee ForceFire calls
 const AI_MOVE_FAILURE_RECOVERY_SECONDS = 2.0;       // pause chase tick after move-fail recovery behavior
+const AI_SNIPER_DECOY_DISTRACTION_SECONDS = 10.0;   // how long infected bots chase a survivor-placed sniper decoy lure
+const AI_SNIPER_DECOY_MOVE_REISSUE_SECONDS = 0.35;  // decoy lure move reissue cadence
 const AI_TO_HUMAN_DAMAGE_MODIFIER_MULTI = 0.8;      // lower values are easier
 const AI_TO_HUMAN_DAMAGE_MODIFIER_SOLO = 1;
 const MAX_PLAYER_COUNT = 12;
@@ -232,6 +234,12 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
 const POSITION_HQ1 = mod.GetObjectPosition(mod.GetHQ(1));
 const POSITION_HQ2 = mod.GetObjectPosition(mod.GetHQ(2));
 const ZERO_VEC: mod.Vector = mod.CreateVector(0, 0, 0);
+const SNIPER_DECOY_TRACKED_INVENTORY_SLOTS: mod.InventorySlots[] = [
+    mod.InventorySlots.ClassGadget,
+    mod.InventorySlots.GadgetOne,
+    mod.InventorySlots.GadgetTwo,
+    mod.InventorySlots.MiscGadget,
+];
 
 let RESUPPLY_WORLD_ICONS: ResupplyWorldIconId[] = [];
 let RESUPPLY_INTERACT_POINTS: ResupplyInteractPointId[] = [];
@@ -610,6 +618,14 @@ const ALPHA_VFX_INDICATOR_TOKENS: Map<number, { cancel: boolean }> = new Map();
 const INFECTED_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 const LMS_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
 const BOT_TARGET_WORLD_ICON_OBJECTS: Map<number, mod.Any> = new Map();
+interface ActiveSniperDecoyTarget {
+    ownerPlayerObjId: number;
+    position: mod.Vector;
+    expiresAt: number;
+    sourceSlot?: mod.InventorySlots;
+    lureObject?: mod.Object;
+}
+let ACTIVE_SNIPER_DECOY_TARGET: ActiveSniperDecoyTarget | undefined;
 interface BotSurvivalDebugWidgetSet {
     root: mod.UIWidget;
     lines: mod.UIWidget[];
@@ -621,14 +637,17 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
     nextIconUpdateAt: number,
     nextBannedCheckAt: number,
     nextLadderCheckAt: number,
+    nextDecoyCheckAt?: number,
     nextBotDebugUpdateAt?: number,
     bannedChecksEnabledAt?: number,
     lastLadderAmmo?: number,
     nextSledgeReminderAt?: number,
+    decoyAmmoBySlot?: Map<mod.InventorySlots, number>,
 }> = new Map();
 const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
 const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
+const PLAYER_ONGOING_DECOY_CHECK_SECONDS = 0.1;
 const BOT_SURVIVAL_DEBUG_UPDATE_SECONDS = 0.25;
 const AI_BOT_TICK_SECONDS = 0.15; // interval between AI logic ticks per infected bot slot
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
@@ -1215,6 +1234,7 @@ class Weapons {
         { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
         { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
         { nameKey: "supply_pouch", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
+        { nameKey: "sniper_decoy", rarity: 30, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Sniper_Decoy },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
         { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
@@ -5571,6 +5591,7 @@ class GameHandler {
         AISpawnHandler.spawnerLock.clear();
         InfectedBotSlot.ResetAll();
         SurvivorBotSlot.ResetAll();
+        ClearActiveSniperDecoyTarget('ClearTemporaryArrays');
     }
 
     static async DisplayGameStateNotification(message: mod.Message, durationSeconds: number = 4) {
@@ -6748,6 +6769,140 @@ function PlayerIsAliveAndValid(eventPlayer: mod.Player): boolean {
     return mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAlive);
 }
 
+function ClearActiveSniperDecoyTarget(context: string): void {
+    const activeTarget = ACTIVE_SNIPER_DECOY_TARGET;
+    if (!activeTarget) return;
+
+    if (activeTarget.lureObject) {
+        try {
+            mod.UnspawnObject(activeTarget.lureObject);
+        } catch { }
+    }
+
+    ACTIVE_SNIPER_DECOY_TARGET = undefined;
+
+    if (DEBUG_BOT_LIFECYCLE) {
+        console.log(`SniperDecoy | Cleared active lure (${context})`);
+    }
+}
+
+function GetActiveSniperDecoyPosition(): mod.Vector | undefined {
+    const activeTarget = ACTIVE_SNIPER_DECOY_TARGET;
+    if (!activeTarget) return undefined;
+
+    const now = Date.now() / 1000;
+    if (now >= activeTarget.expiresAt) {
+        ClearActiveSniperDecoyTarget('expired');
+        return undefined;
+    }
+
+    if (activeTarget.lureObject) {
+        try {
+            if (mod.GetObjId(activeTarget.lureObject) > -1) {
+                activeTarget.position = mod.GetObjectPosition(activeTarget.lureObject);
+            }
+        } catch { }
+    }
+
+    return activeTarget.position;
+}
+
+function PlayerHasSniperDecoyInLoadout(playerProfile: PlayerProfile | undefined): boolean {
+    if (!playerProfile) return false;
+    const loadout = playerProfile.chosenLoadoutThisRound ?? Weapons.GetRoundLoadout(playerProfile);
+    return !!loadout?.some(item => item?.gadget === mod.Gadgets.Misc_Sniper_Decoy);
+}
+
+function GetInventoryChargeCountSafe(player: mod.Player, slot: mod.InventorySlots): number | undefined {
+    let best: number | undefined;
+
+    try {
+        const ammo = mod.GetInventoryAmmo(player, slot);
+        if (Number.isFinite(ammo) && ammo >= 0) {
+            best = ammo;
+        }
+    } catch { }
+
+    try {
+        const magAmmo = mod.GetInventoryMagazineAmmo(player, slot);
+        if (Number.isFinite(magAmmo) && magAmmo >= 0) {
+            best = best === undefined ? magAmmo : Math.max(best, magAmmo);
+        }
+    } catch { }
+
+    return best;
+}
+
+function TrackSurvivorSniperDecoyPlacement(
+    eventPlayer: mod.Player,
+    playerProfile: PlayerProfile,
+    tickState: { decoyAmmoBySlot?: Map<mod.InventorySlots, number> },
+): void {
+    const isEligible = !playerProfile.isAI
+        && !playerProfile.isInfectedTeam
+        && GameHandler.gameState === GameState.GameRoundIsRunning
+        && PlayerIsAliveAndValid(eventPlayer)
+        && PlayerHasSniperDecoyInLoadout(playerProfile);
+
+    if (!isEligible) {
+        tickState.decoyAmmoBySlot = undefined;
+        return;
+    }
+
+    if (!tickState.decoyAmmoBySlot) {
+        tickState.decoyAmmoBySlot = new Map<mod.InventorySlots, number>();
+    }
+
+    let placementDetectedSlot: mod.InventorySlots | undefined;
+
+    for (const slot of SNIPER_DECOY_TRACKED_INVENTORY_SLOTS) {
+        const currentChargeCount = GetInventoryChargeCountSafe(eventPlayer, slot);
+        if (currentChargeCount === undefined) continue;
+
+        const previousChargeCount = tickState.decoyAmmoBySlot.get(slot);
+        tickState.decoyAmmoBySlot.set(slot, currentChargeCount);
+
+        if (
+            placementDetectedSlot === undefined
+            && previousChargeCount !== undefined
+            && currentChargeCount < previousChargeCount
+        ) {
+            placementDetectedSlot = slot;
+        }
+    }
+
+    if (placementDetectedSlot === undefined) return;
+
+    const playerPos = mod.GetSoldierState(eventPlayer, mod.SoldierStateVector.GetPosition);
+    const facing = mod.GetSoldierState(eventPlayer, mod.SoldierStateVector.GetFacingDirection);
+    const lurePos = mod.Add(playerPos, mod.Multiply(facing, 1.25));
+    const ownerObjId = mod.GetObjId(eventPlayer);
+
+    ClearActiveSniperDecoyTarget('replaced');
+
+    let lureObject: mod.Object | undefined;
+    try {
+        lureObject = mod.SpawnObject(
+            mod.RuntimeSpawn_Common.FX_Gadget_SniperDecoy_LensFlare,
+            lurePos,
+            ZERO_VEC,
+            mod.CreateVector(1, 1, 1),
+        ) as mod.Object;
+    } catch { }
+
+    ACTIVE_SNIPER_DECOY_TARGET = {
+        ownerPlayerObjId: ownerObjId,
+        position: lurePos,
+        expiresAt: (Date.now() / 1000) + AI_SNIPER_DECOY_DISTRACTION_SECONDS,
+        sourceSlot: placementDetectedSlot,
+        lureObject,
+    };
+
+    console.log(
+        `SniperDecoy | Detected placement by Survivor(${ownerObjId}) slot(${placementDetectedSlot}) -> infected lure active for ${AI_SNIPER_DECOY_DISTRACTION_SECONDS}s`,
+    );
+}
+
 
 /** Returns the closest alive survivor to `bot`. If none found, returned player will be invalid*/
 function pickClosestAliveSurvivorFor(bot: mod.Player): mod.Player | undefined {
@@ -6842,6 +6997,27 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
 
     const tick = slot.tick;
     const disableAttacks = BOT_SURVIVAL_TEST_MODE && BOT_SURVIVAL_TEST_DISABLE_ATTACKS;
+
+    const decoyLurePosition = GetActiveSniperDecoyPosition();
+    if (decoyLurePosition) {
+        mod.AISetMoveSpeed(infectedBot, mod.MoveSpeed.Sprint);
+        SetInfectedBotChaseOnlyLoadout(infectedBot);
+
+        const timeSinceLastMove = now - tick.lastMoveIssuedAt;
+        if (timeSinceLastMove >= AI_SNIPER_DECOY_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
+            mod.AISetTarget(infectedBot);
+            IssueInfectedBotMove(slot, infectedBot, decoyLurePosition, 'sniper_decoy');
+            tick.lastMoveIssuedAt = now;
+            tick.lastMovePos = decoyLurePosition;
+        }
+
+        tick.target = undefined;
+        tick.trackedVehicle = undefined;
+        tick.behavior = 'sniper_decoy_chase';
+        UpdateBotTargetWorldIcon(slot);
+        return;
+    }
+
     // Re-evaluate target each tick
     let target = tick.target;
     if (!target || !PlayerIsAliveAndValid(target)) {
@@ -7825,6 +8001,8 @@ function GetBotDebugBehaviorLineKey(behavior?: string): string {
             return 'bot_debug_behavior_melee_backstab_blocked_target';
         case 'melee_cooldown':
             return 'bot_debug_behavior_melee_cooldown_target';
+        case 'sniper_decoy_chase':
+            return 'bot_debug_behavior_chase_target';
         case 'chase':
             return 'bot_debug_behavior_chase_target';
         case 'idle':
@@ -7896,6 +8074,7 @@ function IsBotActivelyMovingToTarget(behavior?: string): boolean {
         case 'melee_no_attack':
         case 'melee_backstab_blocked':
         case 'melee_cooldown':
+        case 'sniper_decoy_chase':
         case 'chase':
             return true;
         default:
@@ -10032,6 +10211,10 @@ export async function OnPlayerLeaveGame(playerObjID: number) {
         LeapTestHarness.onHumanUndeployed(playerObjID);
     }
 
+    if (ACTIVE_SNIPER_DECOY_TARGET?.ownerPlayerObjId === playerObjID) {
+        ClearActiveSniperDecoyTarget('owner_left_game');
+    }
+
     // Check if this is a dead infected bot's body being cleaned up by the spawner unspawn timer.
     // HandleDeath registers the ObjID here so we start the respawn only after the spawner is free.
     const deadInfectedSlot = InfectedBotSlot.deadByObjID.get(playerObjID);
@@ -10526,7 +10709,13 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     let tickState = PLAYER_ONGOING_TICK_STATE.get(playerObjId);
     if (!tickState) {
-        tickState = { nextIconUpdateAt: 0, nextBannedCheckAt: 0, nextLadderCheckAt: 0, nextBotDebugUpdateAt: 0 };
+        tickState = {
+            nextIconUpdateAt: 0,
+            nextBannedCheckAt: 0,
+            nextLadderCheckAt: 0,
+            nextDecoyCheckAt: 0,
+            nextBotDebugUpdateAt: 0,
+        };
         PLAYER_ONGOING_TICK_STATE.set(playerObjId, tickState);
     }
     if (playerProfile && !playerProfile.isAI) {
@@ -10552,6 +10741,13 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     if (BOT_SURVIVAL_TEST_MODE && now >= (tickState.nextBotDebugUpdateAt ?? 0)) {
         tickState.nextBotDebugUpdateAt = now + BOT_SURVIVAL_DEBUG_UPDATE_SECONDS;
         UpdateBotSurvivalDebugWidget(eventPlayer);
+    }
+
+    if (now >= (tickState.nextDecoyCheckAt ?? 0)) {
+        tickState.nextDecoyCheckAt = now + PLAYER_ONGOING_DECOY_CHECK_SECONDS;
+        if (playerProfile) {
+            TrackSurvivorSniperDecoyPlacement(eventPlayer, playerProfile, tickState);
+        }
     }
 
     if (now >= tickState.nextIconUpdateAt) {
