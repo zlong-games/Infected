@@ -9748,10 +9748,10 @@ function TickLeap(player: mod.Player): void {
                 state.chargeVfxState = 'charging';
                 startTrajectoryPreview(player, state);
                 // Start a charging SFX at the player
-                const proxChargeSfx = mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_ProgressBarFillingUp_OneShot2D;
+                const chargingSfx2D = mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_ProgressBarFillingUp_OneShot2D;
                 if (!state.chargingSfx) {
                     const chargeSfxObj = mod.SpawnObject(
-                        proxChargeSfx,
+                        chargingSfx2D,
                         playerPos, ZERO_VEC
                     );
                     mod.PlaySound(chargeSfxObj, 1, player);
@@ -9760,7 +9760,11 @@ function TickLeap(player: mod.Player): void {
             }
             // Move existing charge VFX to follow the player
             if (state.chargeVfx) {
-                mod.MoveVFX(state.chargeVfx, chargeVfxPos, ZERO_VEC);
+                mod.MoveVFX(
+                    state.chargeVfx,
+                    !crouchReady && state.chargeVfxState === 'charging' ? playerPos : chargeVfxPos,
+                    ZERO_VEC
+                );
             }
         } else {
             // During the slide-protection buffer, clear charge VFX/SFX but keep hold timing alive.
@@ -10638,7 +10642,7 @@ function OngoingAI(player: mod.Player, playerObjId: number): void {
     InfectedBotLogicTick(slot);
 }
 
-export function OnRayCastHit(eventPlayer: mod.Player,eventPoint: mod.Vector, eventNormal: mod.Vector) {
+export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
     HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
 }
 
