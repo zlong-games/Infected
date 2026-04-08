@@ -769,6 +769,7 @@ class Weapons {
             mod.WeaponAttachments.Ammo_FMJ,
             mod.WeaponAttachments.Muzzle_Flash_Hider,
             mod.WeaponAttachments.Magazine_100rnd_Belt_Pouch,
+            mod.WeaponAttachments.Barrel_370mm_Compact,
             mod.WeaponAttachments.Scope_SU_123_150x,
             mod.WeaponAttachments.Bottom_Bipod,
         ],
@@ -778,6 +779,14 @@ class Weapons {
             mod.WeaponAttachments.Scope_SU_123_150x,
             mod.WeaponAttachments.Barrel_264mm_Fluted,
             mod.WeaponAttachments.Magazine_50rnd_Magazine,
+        ],
+        sl9: [
+            mod.WeaponAttachments.Ammo_FMJ,
+            mod.WeaponAttachments.Barrel_9_Factory,
+            mod.WeaponAttachments.Muzzle_Flash_Hider,
+            mod.WeaponAttachments.Bottom_Factory_Angled,
+            mod.WeaponAttachments.Magazine_30rnd_Magazine,
+            mod.WeaponAttachments.Scope_R4T_200x
         ],
         m4a1: [
             mod.WeaponAttachments.Ammo_FMJ,
@@ -852,11 +861,13 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Scope_Mini_Flex_100x, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_mini_flex_100x", rarity: 15, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18"] },
         { attachment: mod.WeaponAttachments.Scope_R_MR_100x, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_rmr_100x", rarity: 15, compatibleNameKeys: ["m45a1", "m44", "m357", "es57", "p18"] },
         { attachment: mod.WeaponAttachments.Scope_SU_123_150x, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_su_123_150x", rarity: 25, compatibleNameKeys: ["m87a1", "185ksk", "m1014", "ak205", "m277", "kord6p67", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Scope_CCO_200x, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_cco_200x", rarity: 25, compatibleNameKeys: ["m87a1", "185ksk", "m1014", "ak205", "m277", "kord6p67", "rpkm", "usg90"] },
+        { attachment: mod.WeaponAttachments.Scope_R4T_200x, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_r4t_200x", rarity: 25, compatibleNameKeys: ["m87a1", "185ksk", "m1014", "ak205", "m277", "kord6p67", "rpkm", "usg90"] },
         { attachment: mod.WeaponAttachments.Scope_Iron_Sights, slot: AttachmentSlot.Scope, nameKey: "attachment_scope_iron_sights", rarity: 5, compatibleNameKeys: ["m87a1", "185ksk", "m1014", "ak205", "m277", "kord6p67", "rpkm", "usg90", "m45a1", "m44", "m357", "es57", "p18"] },
-        { attachment: mod.WeaponAttachments.Muzzle_Compensated_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_compensated_brake", rarity: 15, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "ak205", "usg90"] },
-        { attachment: mod.WeaponAttachments.Muzzle_Single_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_single_port_brake", rarity: 15, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "ak205"] },
-        { attachment: mod.WeaponAttachments.Muzzle_Double_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_double_port_brake", rarity: 20, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "m277", "ak205", "185ksk"] },
-        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12", "m45a1", "es57", "p18", "m1014", "m123k", "m4a1", "m277"] },
+        { attachment: mod.WeaponAttachments.Muzzle_Compensated_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_compensated_brake", rarity: 15, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "ak205", "usg90", "sl9"] },
+        { attachment: mod.WeaponAttachments.Muzzle_Single_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_single_port_brake", rarity: 15, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "ak205", "usg90", "sl9"] },
+        { attachment: mod.WeaponAttachments.Muzzle_Double_port_Brake, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_double_port_brake", rarity: 20, compatibleNameKeys: ["rpkm", "m123k", "m4a1", "kord6p67", "m277", "ak205", "185ksk", "usg90", "sl9"] },
+        { attachment: mod.WeaponAttachments.Muzzle_CQB_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_cqb_suppressor", rarity: 15, compatibleNameKeys: ["db12", "m45a1", "es57", "p18", "m1014", "m123k", "m4a1", "m277", "usg90", "sl9"] },
         { attachment: mod.WeaponAttachments.Muzzle_Standard_Suppressor, slot: AttachmentSlot.Muzzle, nameKey: "attachment_muzzle_standard_suppressor", rarity: 15, compatibleNameKeys: ["m45a1", "es57", "p18", "m4a1"] },
         { attachment: mod.WeaponAttachments.Bottom_Ribbed_Stubby, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_ribbed_stubby", rarity: 20, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm", "m4a1"] },
         { attachment: mod.WeaponAttachments.Bottom_Folding_Vertical, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_folding_vertical", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "m277", "ak205", "rpkm", "m4a1"] },
@@ -865,10 +876,10 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Bottom_Underslung_Mount, slot: AttachmentSlot.Underbarrel, nameKey: "attachment_bottom_underslung_mount", rarity: 5, compatibleNameKeys: ["m4a1", "m277"] },
         { attachment: mod.WeaponAttachments.Ergonomic_Improved_Mag_Catch, slot: AttachmentSlot.Ergonomic, nameKey: "attachment_ergonomic_mag_catch", rarity: 10, compatibleNameKeys: ["m45a1", "g22", "es57", "p18"] },
         // ammo
-        { attachment: mod.WeaponAttachments.Ammo_FMJ, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_fmj", rarity: 5, compatibleNameKeys: ["ak205", "m277", "kord6p67", "rpkm", "m123k", "usg90", "m45a1", "m44", "m357", "es57", "p18"] },
-        { attachment: mod.WeaponAttachments.Ammo_Hollow_Point, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_hollow_point", rarity: 15, compatibleNameKeys: ["ak205", "m277", "kord6p67", "rpkm", "m123k", "m4a1", "usg90", "m45a1", "m44", "m357", "es57", "p18"] },
+        { attachment: mod.WeaponAttachments.Ammo_FMJ, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_fmj", rarity: 5, compatibleNameKeys: ["ak205", "m277", "kord6p67", "rpkm", "m123k", "usg90", "sl9", "m45a1", "m44", "m357", "es57", "p18"] },
+        { attachment: mod.WeaponAttachments.Ammo_Hollow_Point, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_hollow_point", rarity: 15, compatibleNameKeys: ["ak205", "m277", "kord6p67", "rpkm", "m123k", "m4a1", "usg90", "sl9", "m45a1", "m44", "m357", "es57", "p18"] },
         { attachment: mod.WeaponAttachments.Ammo_Tungsten_Core, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_tungsten_core", rarity: 15, compatibleNameKeys: ["ak205", "m277", "kord6p67", "rpkm", "m123k", "m4a1", "usg90"] },
-        { attachment: mod.WeaponAttachments.Ammo_Synthetic_Tip, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_synthetic_tip", rarity: 30, compatibleNameKeys: ["ak205", "m4a1", "kord6p67", "rpkm"] },
+        { attachment: mod.WeaponAttachments.Ammo_Synthetic_Tip, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_synthetic_tip", rarity: 30, compatibleNameKeys: ["ak205", "m4a1", "kord6p67", "sl9", "rpkm"] },
         { attachment: mod.WeaponAttachments.Ammo_Flechette, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_flechette", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12"] },
         { attachment: mod.WeaponAttachments.Ammo_Slugs, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_slug", rarity: 25, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12"] },
         { attachment: mod.WeaponAttachments.Ammo_Buckshot, slot: AttachmentSlot.Ammo, nameKey: "attachment_ammo_buckshot", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "db12"] },
@@ -896,6 +907,7 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Magazine_30rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_30rnd_magazine", rarity: 20, compatibleNameKeys: ["m277"] },
         { attachment: mod.WeaponAttachments.Magazine_40rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_40rnd_fast_mag", rarity: 20, compatibleNameKeys: ["kord6p67", "ak205", "rpkm", "m4a1"] },
         { attachment: mod.WeaponAttachments.Magazine_45rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_45rnd_fast_mag", rarity: 30, compatibleNameKeys: ["kord6p67", "ak205", "rpkm"] },
+        { attachment: mod.WeaponAttachments.Magazine_60rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_60rnd_magazine", rarity: 20, compatibleNameKeys: ["sl9"] },
         { attachment: mod.WeaponAttachments.Magazine_75rnd_Drum, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_75rnd_drum", rarity: 30, compatibleNameKeys: ["rpkm"] },
         { attachment: mod.WeaponAttachments.Magazine_100rnd_Belt_Box, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_100rnd_box", rarity: 20, compatibleNameKeys: [] },
         { attachment: mod.WeaponAttachments.Magazine_100rnd_Belt_Pouch, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_100rnd_pouch", rarity: 1, compatibleNameKeys: ["m123k"] },
@@ -912,14 +924,14 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Top_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_50mw_blue", rarity: 10, compatibleNameKeys: ["db12", "m277", "m4a1"] },
         { attachment: mod.WeaponAttachments.Top_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_top_120mw_blue", rarity: 20, compatibleNameKeys: ["db12", "m277", "m4a1"] },
         // Right Lasers and lights
-        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
-        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
-        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
-        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
-        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "rpkm", "m123k",] },
-        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["db12", "kord6p67", "m277", "usg90", "m4a1",] },
-        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["kord6p67",] },
-        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: [] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_red", rarity: 5, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "sl9", "rpkm", "m123k",] },
+        { attachment: mod.WeaponAttachments.Right_5_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_5mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "sl9", "rpkm", "m123k",] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_green", rarity: 10, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "sl9", "rpkm", "m123k",] },
+        { attachment: mod.WeaponAttachments.Right_50_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_50mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "sl9", "rpkm", "m123k",] },
+        { attachment: mod.WeaponAttachments.Right_120_mW_Blue, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_120mw_blue", rarity: 15, compatibleNameKeys: ["m87a1", "m1014", "185ksk", "kord6p67", "ak205", "sl9", "rpkm", "m123k",] },
+        { attachment: mod.WeaponAttachments.Right_Flashlight, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_flashlight", rarity: 10, compatibleNameKeys: ["db12", "kord6p67", "m277", "usg90", "sl9", "m4a1",] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Green, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_green", rarity: 20, compatibleNameKeys: ["kord6p67", "sl9"] },
+        { attachment: mod.WeaponAttachments.Right_Laser_Light_Combo_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_laser_light_combo_red", rarity: 20, compatibleNameKeys: ["sl9"] },
         { attachment: mod.WeaponAttachments.Right_VIS_IR_Light, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_right_vis_ir_light", rarity: 20, compatibleNameKeys: [] },
         // Left lasers
         { attachment: mod.WeaponAttachments.Left_5_mW_Red, slot: AttachmentSlot.Rail, nameKey: "attachment_rail_left_5mw_red", rarity: 5, compatibleNameKeys: ["usg90"] },
@@ -951,6 +963,7 @@ class Weapons {
                 return "fn";
             case "g22":
             case "p18":
+            case "sl9":
                 return "9mm";
             case "m45a1":
                 return "45";
@@ -1098,6 +1111,7 @@ class Weapons {
         { nameKey: "db12", rarity: 60, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_DB_12, packageImage: Weapons.baseWeaponPackages["db12"] },
         { nameKey: "185ksk", rarity: 80, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun__185KS_K, packageImage: Weapons.baseWeaponPackages["185ksk"] },
         { nameKey: "m4a1", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M4A1, packageImage: Weapons.baseWeaponPackages["m4a1"] },
+        { nameKey: "sl9", rarity: 60, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_SL9, packageImage: Weapons.baseWeaponPackages["sl9"] },
         { nameKey: "usg90", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_USG_90, packageImage: Weapons.baseWeaponPackages["usg90"] },
         { nameKey: "m277", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M277, packageImage: Weapons.baseWeaponPackages["m277"] },
         { nameKey: "rpkm", rarity: 50, category: ItemPoolCategory.LMS, item: mod.Weapons.LMG_RPKM, packageImage: Weapons.baseWeaponPackages["rpkm"] },
@@ -1125,6 +1139,7 @@ class Weapons {
 
         // LMS / Primary weapons
         usg90: { baseMagSize: 50, reserveMags: 3, resupplyMags: 3 },
+        sl9: { baseMagSize: 30, reserveMags: 4, resupplyMags: 4 },
         m277: { baseMagSize: 20, reserveMags: 4, resupplyMags: 4 },
         ak205: { baseMagSize: 30, reserveMags: 4, resupplyMags: 4 },
         m4a1: { baseMagSize: 30, reserveMags: 4, resupplyMags: 4 },
@@ -1151,6 +1166,7 @@ class Weapons {
         attachment_magazine_40rnd_fast_mag: 40,
         attachment_magazine_45rnd_fast_mag: 45,
         attachment_magazine_50rnd_magazine: 50,
+        attachment_magazine_60rnd_magazine: 60,
         attachment_magazine_75rnd_drum: 75,
         attachment_magazine_200rnd_box: 200,
     };
@@ -1197,7 +1213,7 @@ class Weapons {
         { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
         { nameKey: "supply_pouch", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
-        { nameKey: "c4_remote", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
+        { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
         { nameKey: "thermobaric_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
