@@ -645,9 +645,9 @@ const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
 const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
 const BOT_SURVIVAL_DEBUG_UPDATE_SECONDS = 0.25;
-const AI_BOT_TICK_SECONDS = 0.15; // interval between AI logic ticks per infected bot slot
+const AI_BOT_TICK_SECONDS = 0.25; // interval between AI logic ticks per infected bot slot
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
-const PLAYER_SLEDGE_REMINDER_MIN_SECONDS = 5;
+const PLAYER_SLEDGE_REMINDER_MIN_SECONDS = 7;
 const PLAYER_SLEDGE_REMINDER_MAX_SECONDS = 10;
 
 // ItemPoolCategory: categorizes weapons/gadgets into pools for random selection
@@ -5024,14 +5024,15 @@ class GameHandler {
 
     // VFX placed as nodes in the Godot scene enabled via mod.GetVFX(id)
     static sand2_Vfx = [
-        { id: 501, object: mod.RuntimeSpawn_Common.FX_Granite_Strike_Smoke_Marker_Red },
+        // { id: 501, object: mod.RuntimeSpawn_Common.FX_Granite_Strike_Smoke_Marker_Red },
+        { id: 1501, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Column_XXL },
         { id: 1502, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_Black_L },
         { id: 1503, object: mod.RuntimeSpawn_Common.FX_CivCar_Tire_fire_S_GS },
-        { id: 1501, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Column_XXL },
-        { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
         { id: 1504, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
+        { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
+        { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
     ];
-
+    
     static sand2_Sfx = [
         { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
         { id: 2503, attenuation: 5, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
@@ -5040,6 +5041,9 @@ class GameHandler {
         { id: 2506, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
         { id: 2507, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
         { id: 2508, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_HighwayUnderneath_SimpleLoop3D },
+        { id: 2509, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
+        { id: 2510, attenuation: 50, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
+        { id: 2511, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -7045,9 +7049,10 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
     slot.tick.leapInProgress = true;
     StopInfectedBotMeleeAttack(slot, bot);
     mod.AIIdleBehavior(bot);
+    mod.AddEquipment(bot, mod.Gadgets.Melee_Sledgehammer);
 
-    const chargeHoldSeconds = LEAP_CROUCH_HOLD_SECONDS + 1;
-    const fireHoldSeconds = chargeHoldSeconds + AI_LEAP_FORCE_FIRE_DURATION + 0.4;
+    const chargeHoldSeconds = LEAP_CROUCH_HOLD_SECONDS + 0.1;
+    const fireHoldSeconds = chargeHoldSeconds + AI_LEAP_FORCE_FIRE_DURATION;
     const chargeCompleteWaitSeconds = LEAP_CROUCH_HOLD_SECONDS + AI_LEAP_POST_CHARGE_WAIT_SECONDS;
     let launched = false;
 
@@ -7086,7 +7091,10 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
     } finally {
         slot.tick.leapInProgress = false;
         if (PlayerIsAliveAndValid(bot)) {
-            mod.SetAiInput(bot, mod.AiInput.Sprint, 0.2);
+            if (mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
+                try { mod.RemoveEquipment(bot, mod.InventorySlots.MeleeWeapon); } catch { }
+            }
+            mod.AIIdleBehavior(bot);
         }
     }
 }
