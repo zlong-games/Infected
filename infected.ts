@@ -43,14 +43,14 @@ const AI_LEASH_RANGE = 5;
 const AI_MIN_DEF_RANGE = 3;
 
 // Vehicle-chase anti-stutter constants
-const AI_VEHICLE_REAR_MELEE_DISTANCE = 3.5;          // full-damage attack radius from rear hemisphere
-const AI_VEHICLE_GLANCING_MELEE_DISTANCE = 1.5;        // reduced-damage attack radius from side/front-glancing
+const AI_VEHICLE_REAR_MELEE_DISTANCE = 4;          // full-damage attack radius from rear hemisphere
+const AI_VEHICLE_GLANCING_MELEE_DISTANCE = 1.9;        // reduced-damage attack radius from side/front-glancing
 const AI_VEHICLE_HEAD_ON_CONE_DOT_MIN = 0.92;        // block attacks in a narrower head-on cone
 const AI_VEHICLE_REAR_CONE_DOT_MAX = -0.6;           // require a tight rear cone for full damage classification
 const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
 const AI_VEHICLE_GLANCING_FORCE_FIRE_DAMAGE = 50;    // side/front-glancing vehicle chip damage
 const AI_VEHICLE_REAR_FORCE_FIRE_DAMAGE = 200;       // rear hemisphere vehicle chip damage
-const AI_VEHICLE_ATTACK_WINDOW_SECONDS = 0.55;       // minimum continuous time in valid vehicle melee window before forcefire
+const AI_VEHICLE_ATTACK_WINDOW_SECONDS = 0.35;       // minimum continuous time in valid vehicle melee window before forcefire
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1;          // balanced on-foot chase interval
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
 const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep gadget use (melee) active within this range
@@ -81,7 +81,9 @@ const SFX_MELEE_HIT_FALL_DMG: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.
 const SFX_MELEE_HIT_ARMR_BRK: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Damage_ArmorBreakSelf_OneShot2D;
 const SFX_FINAL_FIVE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Rodeo_TanksLockerUnlocking_OneShot2D;
 const SFX_ALPHA_SELECTED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Standoff_ZoneExit_OneShot2D;
-const SFX_ALPHA_LEAP_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_Decoy_WeaponFireVar01_OneShot3D; //now 3d cause couldn't find a good one
+const SFX_ALPHA_LEAP_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_EpiPen_Charge_OneShot2D;
+const SFX_ALPHA_LEAP_VEHICLE_WARNING_LOOP_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_GameModes_BR_Mission_Wreckage_BombBeeping_Loop_SimpleLoop3D;
+const SFX_ALPHA_LEAP_EXECUTE_WARN_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Fire_OneShot3D;
 
 const SFX_TICKDOWN_START: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Appear_OneShot2D;
 const SFX_TICKDOWN: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Tick_OneShot2D;
@@ -6916,6 +6918,13 @@ function ApplyInfectedBotManualControl(bot: mod.Player): void {
     SetInfectedBotMeleeAttackEnabled(bot, false);
 }
 
+function EnsureInfectedBotSledgehammerActive(bot: mod.Player): void {
+    if (!mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
+        try { mod.AddEquipment(bot, mod.Gadgets.Melee_Sledgehammer); } catch { }
+    }
+    try { mod.ForceSwitchInventory(bot, mod.InventorySlots.MeleeWeapon); } catch { }
+}
+
 function StartInfectedBotMeleeAttackAtPlayer(slot: InfectedBotSlot, bot: mod.Player, targetPlayer: mod.Player): void {
     if (INFECTED_AI_HARD_DISABLE_ATTACKS) {
         StopInfectedBotMeleeAttack(slot, bot);
@@ -7049,18 +7058,28 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
     slot.tick.leapInProgress = true;
     StopInfectedBotMeleeAttack(slot, bot);
     mod.AIIdleBehavior(bot);
-    mod.AddEquipment(bot, mod.Gadgets.Melee_Sledgehammer);
+    EnsureInfectedBotSledgehammerActive(bot);
 
-    const chargeHoldSeconds = LEAP_CROUCH_HOLD_SECONDS + 0.1;
-    const fireHoldSeconds = chargeHoldSeconds + AI_LEAP_FORCE_FIRE_DURATION;
-    const chargeCompleteWaitSeconds = LEAP_CROUCH_HOLD_SECONDS + AI_LEAP_POST_CHARGE_WAIT_SECONDS;
+    const extraChargeHoldSeconds = 1.0;
+    const crouchLeadSeconds = LEAP_CROUCH_HOLD_SECONDS + extraChargeHoldSeconds;
+    const crouchHoldSeconds = crouchLeadSeconds + AI_LEAP_FORCE_FIRE_DURATION + AI_LEAP_POST_CHARGE_WAIT_SECONDS;
+    const fireHoldSeconds = AI_LEAP_FORCE_FIRE_DURATION;
     let launched = false;
 
     try {
-        mod.SetAiInput(bot, mod.AiInput.Crouch, chargeHoldSeconds);
-        mod.SetAiInput(bot, mod.AiInput.FireWeapon, fireHoldSeconds);
+        // Hold position and crouch-charge first, then fire once charge has been held long enough.
+        mod.AIIdleBehavior(bot);
+        EnsureInfectedBotSledgehammerActive(bot);
+        mod.SetAiInput(bot, mod.AiInput.Crouch, crouchHoldSeconds);
+        await mod.Wait(crouchLeadSeconds);
+        if (!PlayerIsAliveAndValid(bot)) return;
 
-        await mod.Wait(chargeCompleteWaitSeconds);
+        mod.AIIdleBehavior(bot);
+        await mod.Wait(0.05);
+        if (!PlayerIsAliveAndValid(bot)) return;
+        EnsureInfectedBotSledgehammerActive(bot);
+        mod.AIForceFire(bot, fireHoldSeconds);
+        await mod.Wait(AI_LEAP_POST_CHARGE_WAIT_SECONDS);
         if (!PlayerIsAliveAndValid(bot)) return;
 
         // Explicit post-charge fire pulse so AI doesn't uncrouch/reloop before leap is triggered.
@@ -7117,6 +7136,14 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     if (slot.tick.moveFailHoldUntil && now < slot.tick.moveFailHoldUntil) {
         StopInfectedBotMeleeAttack(slot, infectedBot);
         slot.tick.behavior = 'recovering_move_fail';
+        UpdateBotTargetWorldIcon(slot);
+        return;
+    }
+
+    if (slot.tick.leapInProgress) {
+        StopInfectedBotMeleeAttack(slot, infectedBot);
+        mod.AIIdleBehavior(infectedBot);
+        slot.tick.behavior = 'vehicle_chase_leap';
         UpdateBotTargetWorldIcon(slot);
         return;
     }
@@ -8976,6 +9003,10 @@ interface LeapState {
     chargingSfx: mod.Object | undefined;
     /** One-shot SFX played when charge reaches ready state */
     chargeReadySfx: mod.Object | undefined;
+    /** 3D warning loop heard by current spawned-vehicle occupants while charging/ready */
+    chargeWarningLoopSfx: mod.Object | undefined;
+    /** Vehicle occupant ObjIDs currently subscribed to the warning loop */
+    chargeWarningTargets: Map<number, mod.Player>;
     /** Most recent RayCast collision point (set by OnRayCastHit for any leap ray) */
     rayHitPoint: mod.Vector | undefined;
     /** Distance to the most recent RayCast hit point */
@@ -9019,6 +9050,96 @@ interface LeapState {
 }
 
 const LEAP_STATES = new Map<number, LeapState>();
+
+function getLeapWarningTargetsFromSpawnedVehicle(): mod.Player[] {
+    if (!SPAWNED_ACTIVE_VEHICLE || !IsVehicleRefValid(SPAWNED_ACTIVE_VEHICLE)) return [];
+    try {
+        const occupants = ConvertArray(mod.GetAllPlayersInVehicle(SPAWNED_ACTIVE_VEHICLE)) as mod.Player[];
+        return occupants.filter((vehiclePlayer) => Helpers.HasValidObjId(vehiclePlayer) && IsPlayerDeployed(vehiclePlayer));
+    } catch {
+        return [];
+    }
+}
+
+function stopLeapVehicleWarningLoop(state: LeapState): void {
+    if (state.chargeWarningLoopSfx) {
+        for (const [, targetPlayer] of state.chargeWarningTargets) {
+            if (!Helpers.HasValidObjId(targetPlayer)) continue;
+            try {
+                mod.StopSound(state.chargeWarningLoopSfx as mod.SFX, targetPlayer);
+            } catch { }
+        }
+        try {
+            mod.UnspawnObject(state.chargeWarningLoopSfx);
+        } catch { }
+        state.chargeWarningLoopSfx = undefined;
+    }
+    state.chargeWarningTargets.clear();
+}
+
+function syncLeapVehicleWarningLoop(playerPos: mod.Vector, state: LeapState): void {
+    const vehicleTargets = getLeapWarningTargetsFromSpawnedVehicle();
+    if (vehicleTargets.length === 0) {
+        stopLeapVehicleWarningLoop(state);
+        return;
+    }
+
+    if (!state.chargeWarningLoopSfx) {
+        state.chargeWarningLoopSfx = mod.SpawnObject(
+            SFX_ALPHA_LEAP_VEHICLE_WARNING_LOOP_3D,
+            playerPos,
+            ZERO_VEC
+        );
+        state.chargeWarningTargets.clear();
+    } else {
+        try {
+            mod.SetObjectTransform(state.chargeWarningLoopSfx, mod.CreateTransform(playerPos, ZERO_VEC));
+        } catch {
+            try { mod.UnspawnObject(state.chargeWarningLoopSfx); } catch { }
+            state.chargeWarningLoopSfx = mod.SpawnObject(
+                SFX_ALPHA_LEAP_VEHICLE_WARNING_LOOP_3D,
+                playerPos,
+                ZERO_VEC
+            );
+            state.chargeWarningTargets.clear();
+        }
+    }
+
+    const activeObjIds = new Set<number>();
+    for (const targetPlayer of vehicleTargets) {
+        const targetObjId = mod.GetObjId(targetPlayer);
+        if (targetObjId < 0) continue;
+        activeObjIds.add(targetObjId);
+        if (!state.chargeWarningTargets.has(targetObjId)) {
+            mod.PlaySound(state.chargeWarningLoopSfx as mod.SFX, 1, playerPos, 60, targetPlayer);
+            state.chargeWarningTargets.set(targetObjId, targetPlayer);
+        }
+    }
+
+    for (const [trackedObjId, trackedPlayer] of state.chargeWarningTargets) {
+        if (activeObjIds.has(trackedObjId)) continue;
+        if (state.chargeWarningLoopSfx && Helpers.HasValidObjId(trackedPlayer)) {
+            try {
+                mod.StopSound(state.chargeWarningLoopSfx as mod.SFX, trackedPlayer);
+            } catch { }
+        }
+        state.chargeWarningTargets.delete(trackedObjId);
+    }
+}
+
+function playLeapLaunchWarning3DForTargets(launchPos: mod.Vector, targetPlayers: mod.Player[]): void {
+    if (targetPlayers.length === 0) return;
+
+    const launchSfx = mod.SpawnObject(
+        SFX_ALPHA_LEAP_EXECUTE_WARN_3D,
+        launchPos,
+        ZERO_VEC
+    );
+    for (const targetPlayer of targetPlayers) {
+        if (!Helpers.HasValidObjId(targetPlayer)) continue;
+        mod.PlaySound(launchSfx as mod.SFX, 1, launchPos, 60, targetPlayer);
+    }
+}
 
 // ============================================================
 // LEAP VECTOR HELPERS
@@ -9394,6 +9515,12 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     // Hide preview VFX and stop any pending scan
     cancelTrajectoryPreview(state);
 
+    // Transfer from charge warning loop to launch warning for current vehicle occupants.
+    const launchWarningPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const launchWarningTargets = getLeapWarningTargetsFromSpawnedVehicle();
+    stopLeapVehicleWarningLoop(state);
+    playLeapLaunchWarning3DForTargets(launchWarningPos, launchWarningTargets);
+
     // Clear state
     state.cachedStepPositions = undefined;
     state.cachedGeometryCollisionStep = -1;
@@ -9581,7 +9708,7 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         stepPositions[peakIdx], ZERO_VEC
     );
     // enable trail vfx and play projectile flyby sound at peak step in path
-    mod.PlaySound(leapSfx, 1);
+    mod.PlaySound(leapSfx as mod.SFX, 1, stepPositions[peakIdx], 60);
     // play localized charging SFX for player
     Helpers.PlaySoundFX(SFX_ALPHA_LEAP_2D, 1, player);
     mod.EnableVFX(trailVfx, true);
@@ -9759,6 +9886,8 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
         leapStartSfx: undefined,
         chargingSfx: undefined,
         chargeReadySfx: undefined,
+        chargeWarningLoopSfx: undefined,
+        chargeWarningTargets: new Map<number, mod.Player>(),
         rayHitPoint: undefined,
         rayHitDist: 0,
         crouchStartTime: 0,
@@ -9837,6 +9966,7 @@ function CleanupLeapSystem(player: mod.Player): void {
         mod.UnspawnObject(state.chargeReadySfx);
         state.chargeReadySfx = undefined;
     }
+    stopLeapVehicleWarningLoop(state);
     if (state.leapLandingVfx) {
         mod.UnspawnObject(state.leapLandingVfx);
         state.leapLandingVfx = undefined;
@@ -9893,6 +10023,7 @@ function CleanupLeapStateByObjId(objId: number): void {
         mod.UnspawnObject(state.chargeReadySfx);
         state.chargeReadySfx = undefined;
     }
+    stopLeapVehicleWarningLoop(state);
     if (state.leapLandingVfx) {
         mod.UnspawnObject(state.leapLandingVfx);
         state.leapLandingVfx = undefined;
@@ -9942,6 +10073,7 @@ function resetLeapChargeState(state: LeapState, preserveCrouchHold: boolean = fa
         mod.UnspawnObject(state.chargeReadySfx);
         state.chargeReadySfx = undefined;
     }
+    stopLeapVehicleWarningLoop(state);
     state.chargeVfxState = 'none';
     if (!preserveCrouchHold) {
         state.crouchStartTime = 0;
@@ -10082,6 +10214,14 @@ function TickLeap(player: mod.Player): void {
     } else {
         // Not crouching or currently leaping -- full reset
         resetLeapChargeState(state);
+    }
+
+    const shouldBroadcastVehicleLeapWarning =
+        !state.isLeaping && (state.chargeVfxState === 'charging' || state.chargeVfxState === 'ready');
+    if (shouldBroadcastVehicleLeapWarning) {
+        syncLeapVehicleWarningLoop(playerPos, state);
+    } else {
+        stopLeapVehicleWarningLoop(state);
     }
 
     // Leap activation: crouch held long enough + fire
@@ -10701,7 +10841,15 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
 }
 
 export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
-    await mod.Wait(0.2);
+    await mod.Wait(0.15);
+    const pp = PlayerProfile.Get(eventPlayer);
+    // if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsVaulting)) {
+        if (mod.GetObjId(eventAreaTrigger) === 9091){
+            console.log(`OnPlayerEnterAreaTrigger | Player(${mod.GetObjId(eventPlayer)}) entered vault trigger and is vaulting - "killing player"`);
+            pp?.ShowAlphaFeedback(MakeMessage(mod.stringkeys.vault_kill));
+            mod.Kill(eventPlayer);
+        }
+    // }
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
         if (survivorProfile && !survivorProfile.isAI) {
@@ -10711,7 +10859,7 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
         return;
     }
 
-    const pp = PlayerProfile.Get(eventPlayer);
+
     if (pp?.isAI) {
         const targetInVehicle = pp?.currentTarget
             ? mod.GetSoldierState(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
@@ -10723,6 +10871,8 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
         const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
         if (slot) slot.tick.inAreaTrigger = true;
     }
+
+
 }
 
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
