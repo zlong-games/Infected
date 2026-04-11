@@ -426,5 +426,6 @@
   "attachment_rail_left_flashlight": "Weapon Flashlight",
   "attachment_rail_left_vis_ir_light": "VIS/IR Weapon Light",
   "vehicle_spawned": "A vehicle has been deployed!",
+  "you_have_a_license_for_that": "You have a license for that?",
   "vault_kill": "Can't read?"
 }

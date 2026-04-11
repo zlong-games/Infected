@@ -109,11 +109,10 @@ const POINTS_PER_INFECTED_KILL = 100;
 const POINTS_PER_SURVIVOR_INFECTED = 300;
 const POINTS_ROUND_SURVIVED = 850;
 const HEALTH_RESTORE_ON_INFECTED = 50;
-const LMS_RELOAD_POLL_SECONDS = 0.1;
+const LMS_RELOAD_POLL_SECONDS = 0.05;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
 const INFECTED_HINT_ROTATION_SECONDS = 8;
-const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
-const CURRENT_MAP_RESUPPLY_POSITION_THRESHOLD = 5.0;  // Increased from 1.0 to account for floating-point precision
+const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0; 
 const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 10; // Useless, just a player-facing message. Game/AI need to run for nearly 2 minutes before things settle.
 
 const INFECTED_HINT_STRING_KEYS = [
@@ -315,7 +314,7 @@ function LogAlphaState(context: string, player?: mod.Player, playerProfile?: Pla
     const playerObjId = player ? mod.GetObjId(player) : -1;
     const teamObjId = player ? mod.GetObjId(mod.GetTeam(player)) : -1;
     const isAlive = player ? SafeIsAlive(player) : false;
-    const isAI = player ? mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) : false;
+    const isAI = player ? SafeIsAISoldier(player) : false;
     console.log(
         `[AlphaDebug] ${context} | player:${playerObjId} team:${teamObjId} alive:${isAlive} ai:${isAI} ` +
         `ppAlpha:${resolvedPlayerProfile?.isAlphaInfected} ppInfected:${resolvedPlayerProfile?.isInfectedTeam} ` +
@@ -599,9 +598,26 @@ function IsPlayerDeployed(player: mod.Player | undefined): boolean {
     return PlayerProfile._deployedPlayers.has(mod.GetObjId(player as mod.Player));
 }
 
+function SafeGetSoldierStateBool(
+    player: mod.Player | undefined,
+    state: mod.SoldierStateBool,
+    fallback: boolean = false,
+): boolean {
+    if (!Helpers.HasValidObjId(player)) return fallback;
+    try {
+        return mod.GetSoldierState(player as mod.Player, state);
+    } catch {
+        return fallback;
+    }
+}
+
+function SafeIsAISoldier(player: mod.Player | undefined): boolean {
+    return SafeGetSoldierStateBool(player, mod.SoldierStateBool.IsAISoldier, false);
+}
+
 function SafeIsAlive(player: mod.Player | undefined): boolean {
     if (!IsPlayerDeployed(player)) return false;
-    return mod.GetSoldierState(player as mod.Player, mod.SoldierStateBool.IsAlive);
+    return SafeGetSoldierStateBool(player, mod.SoldierStateBool.IsAlive, false);
 }
 
 function GetRandomSledgeReminderDelaySeconds(): number {
@@ -645,7 +661,7 @@ const PLAYER_ONGOING_TICK_STATE: Map<number, {
 }> = new Map();
 const PLAYER_ONGOING_ICON_UPDATE_SECONDS = 0.05;
 const PLAYER_ONGOING_BANNED_CHECK_SECONDS = 1;
-const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 0.1;
+const PLAYER_ONGOING_LADDER_CHECK_SECONDS = 1;
 const BOT_SURVIVAL_DEBUG_UPDATE_SECONDS = 0.25;
 const AI_BOT_TICK_SECONDS = 0.25; // interval between AI logic ticks per infected bot slot
 const PLAYER_BANNED_CHECK_SETTLE_SECONDS = 3;
@@ -3857,7 +3873,9 @@ class PlayerProfile {
         this.isDead = false;
         this.gameCountdownUI = new GameCountdown(this);
 
-        if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+        const isAISoldier = SafeIsAISoldier(player);
+
+        if (!isAISoldier) {
             // player-specific UI are created here, hidden by default, and have their own toggle method
             this.scoreboardUI = new ScoreboardUI(this);
             this.loadoutDisplayBottom = new LoadoutDisplayBottomView(this);
@@ -3879,7 +3897,7 @@ class PlayerProfile {
             PlayerProfile._playerInstances.push(this.player);
         }
 
-        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+        if (isAISoldier) {
             this.isAI = true;
             PlayerProfile._AIPlayerProfiles.push(this);
         }
@@ -3894,11 +3912,12 @@ class PlayerProfile {
         if (Helpers.HasValidObjId(player)) {
             let index = mod.GetObjId(player);
             let playerProfile = this._allPlayers.get(index);
+            const isAISoldier = SafeIsAISoldier(player);
             // create new PlayerProfile if one doesn't exist
             if (!playerProfile) {
                 playerProfile = new PlayerProfile(player);
                 // AI specific flags
-                if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                if (isAISoldier) {
                     console.log(`PlayerProfile | Creating a new AI PlayerProfile for AI Player(${mod.GetObjId(player)})`);
                     playerProfile.isAI = true;
                     if (!PlayerProfile._AIPlayerProfiles.includes(playerProfile)) {
@@ -3915,7 +3934,7 @@ class PlayerProfile {
                 this._allPlayers.set(index, playerProfile);
             }
             // Verify/update spawnerObjID (if provided) and player is AI
-            if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+            if (isAISoldier) {
                 if (spawnerObjID && playerProfile.spawnerObjID !== spawnerObjID) {
                     console.log(`PlayerProfile | Updating spawnerObjID from ${playerProfile.spawnerObjID} to ${spawnerObjID} for AI Player(${mod.GetObjId(player)})`);
                     playerProfile.spawnerObjID = spawnerObjID;
@@ -4000,7 +4019,7 @@ class PlayerProfile {
 
 
         let teamName: string = (mod.GetObjId(INFECTED_TEAM) === mod.GetObjId(mod.GetTeam(player))) ? TeamNameString.Infected : TeamNameString.Survivors;
-        if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && playerProfile.isInitialSpawn) {
+        if (!SafeIsAISoldier(player) && playerProfile.isInitialSpawn) {
             if (teamName === TeamNameString.Infected && !playerProfile.isInfectedTeam) {
                 playerProfile.isInfectedTeam = true;
                 GameHandler.infectedCount = Math.min(INFECTED_COUNT_LIMIT, (GameHandler.infectedCount ?? 0) + 1);
@@ -5034,7 +5053,7 @@ class GameHandler {
         { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
     ];
-    
+
     static sand2_Sfx = [
         { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
         { id: 2503, attenuation: 5, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
@@ -5046,6 +5065,7 @@ class GameHandler {
         { id: 2509, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
         { id: 2510, attenuation: 50, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
         { id: 2511, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
+        { id: 2512, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -5373,7 +5393,7 @@ class GameHandler {
             const p = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!PlayerIsAliveAndValid(p)) continue;
             total++;
-            if (!mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier)) humans++;
+            if (!SafeIsAISoldier(p)) humans++;
             const isAlive = mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive);
             const teamId = mod.GetObjId(mod.GetTeam(p));
             if (isAlive && teamId === survivorTeamId) survivors++;
@@ -5461,7 +5481,7 @@ class GameHandler {
             } else if (GameHandler.currentRound > GAME_ROUND_LIMIT) {
                 // GameHandler.StopLastManStandingMusic();
                 GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.game_over));
-                mod.EndGameMode(SURVIVOR_TEAM);
+                mod.EndGameMode(INFECTED_TEAM);
                 GameHandler.gameState = GameState.GameOver;
                 return;
             }
@@ -5498,7 +5518,7 @@ class GameHandler {
                     InitializePlayerEquipment(lastManStanding, lmsProfile);
                     lmsProfile.loadoutDisplayBottom?.Show();
                     lmsProfile.UpdateLastManStandingBuffWidgets();
-                    if (!mod.GetSoldierState(lastManStanding, mod.SoldierStateBool.IsAISoldier)) {
+                    if (!SafeIsAISoldier(lastManStanding)) {
                         StartLastManStandingReloadLoop(lmsProfile);
                     }
                 }
@@ -5529,7 +5549,7 @@ class GameHandler {
             if (GameHandler.currentRound >= GAME_ROUND_LIMIT) {
                 // GameHandler.StopLastManStandingMusic();
                 GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.game_over));
-                mod.EndGameMode(SURVIVOR_TEAM);
+                mod.EndGameMode(INFECTED_TEAM);
                 GameHandler.gameState = GameState.GameOver;
                 return;
             }
@@ -5731,7 +5751,7 @@ class GameHandler {
                 const player = playerProfile.player;
                 if (PlayerIsAliveAndValid(player)) {
                     try {
-                        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                        if (SafeIsAISoldier(player)) {
                             mod.AIIdleBehavior(player);
                         }
                     } catch { }
@@ -5748,9 +5768,9 @@ class GameHandler {
                 const player = playerProfile.player;
                 if (PlayerIsAliveAndValid(player)) {
                     const keepFireRestricted = playerProfile.isInfectedTeam
-                        && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier);
+                        && SafeIsAISoldier(player);
                     try {
-                        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+                        if (SafeIsAISoldier(player)) {
                             mod.AIIdleBehavior(player);
                         }
                     } catch { }
@@ -5772,7 +5792,7 @@ class GameHandler {
         const pcount = mod.CountOf(allPlayers);
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            const isBot = mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier);
+            const isBot = SafeIsAISoldier(player);
             if (isBot) continue;
 
             const isValid = mod.IsPlayerValid(player);
@@ -5805,7 +5825,7 @@ class GameHandler {
         const pcount = mod.CountOf(allPlayers);
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) mod.DeployPlayer(player);
+            if (SafeIsAISoldier(player)) mod.DeployPlayer(player);
         }
     }
 
@@ -5827,7 +5847,7 @@ class GameHandler {
         const pcount = mod.CountOf(allPlayers);
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
-            if (PlayerIsAliveAndValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+            if (PlayerIsAliveAndValid(player) && SafeIsAISoldier(player)) {
                 // mod.UndeployPlayer(player); // this forces bots to respawn. NEVER USE THIS.
                 if (PlayerProfile._deployedPlayers.has(mod.GetObjId(player))) {
                     PlayerProfile.RemoveFromDeployedPlayers(mod.GetObjId(player));
@@ -5917,13 +5937,14 @@ class GameHandler {
     static async EndRoundCleanup() {
         console.log(`"EoR" | Starting End Round Cleanup`);
         // GameHandler.StopLastManStandingMusic();
-
+        if (GameHandler.gameState === GameState.GameOver)
+            return;
         ScoreboardUI.GlobalUpdate(TeamNameString.Both);
         GameHandler.RestrictAllInputsAllPlayers(true);
 
         PlayerProfile._allPlayerProfiles.forEach((pp) => {
             if (mod.IsPlayerValid(pp.player)) {
-                if (!pp.isInfectedTeam && !mod.GetSoldierState(pp.player, mod.SoldierStateBool.IsAISoldier)) {
+                if (!pp.isInfectedTeam && !SafeIsAISoldier(pp.player)) {
                     pp.survived++;
                     pp.score += POINTS_ROUND_SURVIVED
                     pp.UpdatePlayerScoreboard();
@@ -5957,7 +5978,7 @@ class GameHandler {
             const survivorsAlive = GameHandler.GetAllPlayersOnTeam(SURVIVOR_TEAM)
                 .filter(p => mod.IsPlayerValid(p)
                     && mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive)
-                    && !mod.GetSoldierState(p, mod.SoldierStateBool.IsAISoldier));
+                    && !SafeIsAISoldier(p));
             for (const player of survivorsAlive) {
                 const pp = PlayerProfile.Get(player);
                 if (pp) {
@@ -6810,8 +6831,8 @@ class AISpawnHandler {
 
 
 function PlayerIsAliveAndValid(eventPlayer: mod.Player): boolean {
-    if (!eventPlayer || !mod.IsPlayerValid(eventPlayer)) return false;
-    return mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAlive);
+    if (!eventPlayer) return false;
+    return SafeGetSoldierStateBool(eventPlayer, mod.SoldierStateBool.IsAlive, false);
 }
 
 
@@ -7383,7 +7404,7 @@ function ShowMapGateMatchHUD(message: mod.Message) {
     for (let i = 0; i < pcount; i++) {
         const player = mod.ValueInArray(allPlayers, i) as mod.Player;
         if (!Helpers.HasValidObjId(player)) continue;
-        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
+        if (SafeIsAISoldier(player)) continue;
 
         const playerObjId = mod.GetObjId(player);
         const widgetName = `map_gate_match_hud_${playerObjId}`;
@@ -7609,7 +7630,7 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
 
 // Refresh human player equipment to match the current round rules.
 function RefreshHumanEquipment(eventPlayer: mod.Player, playerProfile: PlayerProfile) {
-    if (!PlayerIsAliveAndValid(eventPlayer) || mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) return;
+    if (!PlayerIsAliveAndValid(eventPlayer) || SafeIsAISoldier(eventPlayer)) return;
     // Clear equipment first to avoid duplicates or stale packages
     try {
         console.log(`RefreshHumanEquipment | Removing existing equipment for Player(${mod.GetObjId(eventPlayer)})`);
@@ -7841,12 +7862,12 @@ async function SelectRandomAlphaInfected(deferActions: boolean = false) {
 
             // If chosen player is a human survivor, call SwitchTeam to convert them.
             if (mod.GetObjId(mod.GetTeam(pp.player)) === mod.GetObjId(SURVIVOR_TEAM) &&
-                !mod.GetSoldierState(pp.player, mod.SoldierStateBool.IsAISoldier)) {
+                !SafeIsAISoldier(pp.player)) {
                 await pp.ConvertHumanSurvivorToInfected(pp.player);
                 return;
             }
             // otherwise (bot or already infected), just kill to force infected respawn logic
-            if (mod.GetSoldierState(pp.player, mod.SoldierStateBool.IsAISoldier)) {
+            if (SafeIsAISoldier(pp.player)) {
                 if (!pp.isInfectedTeam) {
                     pp.isInfectedTeam = true;
                 }
@@ -7869,13 +7890,13 @@ async function ApplySelectedAlphaInfectedAfterRoundStart() {
 
         // If chosen player is a human survivor, convert them now that the round has started
         if (mod.GetObjId(mod.GetTeam(pp.player)) === mod.GetObjId(SURVIVOR_TEAM) &&
-            !mod.GetSoldierState(pp.player, mod.SoldierStateBool.IsAISoldier)) {
+            !SafeIsAISoldier(pp.player)) {
             await pp.ConvertHumanSurvivorToInfected(pp.player);
             continue;
         }
 
         // For AI (or already infected), force respawn as infected
-        if (mod.GetSoldierState(pp.player, mod.SoldierStateBool.IsAISoldier)) {
+        if (SafeIsAISoldier(pp.player)) {
             if (!pp.isInfectedTeam) {
                 pp.isInfectedTeam = true;
             }
@@ -7944,7 +7965,7 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
     }
     const verticalOffset = 1.4;
     const illumVerticalOffset = 1;
-    const forwardOffset = -0.3;
+    const forwardOffset = -0.1;
     let playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     let facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
     let flamePos = mod.CreateVector(
@@ -7958,8 +7979,8 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
         mod.ZComponentOf(playerPos)
     );
     const alphaIndicatorFlameVFX = mod.SpawnObject(ALPHA_INDICATOR_FLAME_VFX, flamePos, ZERO_VEC);
-    // const alphaIndicatorIllumVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, flamePos, ZERO_VEC);
-    // mod.EnableVFX(alphaIndicatorIllumVFX, true);
+    const alphaIndicatorIllumVFX = mod.SpawnObject(ALPH_INDICATOR_BLINKING_FIRE_VFX, flamePos, ZERO_VEC);
+    mod.EnableVFX(alphaIndicatorIllumVFX, true);
     mod.EnableVFX(alphaIndicatorFlameVFX, true);
     // can only modify the custom smoke marker vfx, nothing else will work
     // mod.SetVFXScale(alphaIndicatorFlameVFX, 2);
@@ -7986,13 +8007,13 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                     mod.YComponentOf(playerPos) + verticalOffset + (mod.YComponentOf(facingDir) * forwardOffset),
                     mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * forwardOffset)
                 );
-                // illumPos = mod.CreateVector(
-                //     mod.XComponentOf(playerPos),
-                //     mod.YComponentOf(playerPos) + illumVerticalOffset,
-                //     mod.ZComponentOf(playerPos)
-                // )
+                illumPos = mod.CreateVector(
+                    mod.XComponentOf(playerPos),
+                    mod.YComponentOf(playerPos) + illumVerticalOffset,
+                    mod.ZComponentOf(playerPos)
+                )
                 mod.MoveVFX(alphaIndicatorFlameVFX, flamePos, ZERO_VEC);
-                // mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
+                mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
                 await mod.Wait(0.05);
             }
         } finally {
@@ -8001,9 +8022,9 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                 ALPHA_INDICATOR_TOKENS.delete(playerObjId);
             }
             mod.EnableVFX(alphaIndicatorFlameVFX, false);
-            // mod.EnableVFX(alphaIndicatorIllumVFX, false);
+            mod.EnableVFX(alphaIndicatorIllumVFX, false);
             mod.UnspawnObject(alphaIndicatorFlameVFX);
-            // mod.UnspawnObject(alphaIndicatorIllumVFX);
+            mod.UnspawnObject(alphaIndicatorIllumVFX);
             LogAlphaState('ShowAlphaInfectedIndicator | removed both VFX indicators', player, PlayerProfile.Get(player));
         }
     }
@@ -8058,7 +8079,7 @@ function CleanupBotSurvivalDebugWidget(playerObjId: number) {
 
 function EnsureBotSurvivalDebugWidget(player: mod.Player): BotSurvivalDebugWidgetSet | undefined {
     if (!BOT_SURVIVAL_TEST_MODE) return undefined;
-    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return undefined;
+    if (SafeIsAISoldier(player)) return undefined;
 
     const playerObjId = mod.GetObjId(player);
     if (playerObjId < 0) return undefined;
@@ -8165,7 +8186,7 @@ function GetBotDebugBehaviorLineKey(behavior?: string): string {
 function UpdateBotSurvivalDebugWidget(player: mod.Player) {
     if (!BOT_SURVIVAL_TEST_MODE) return;
     if (!Helpers.HasValidObjId(player)) return;
-    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    if (SafeIsAISoldier(player)) return;
 
     const widgetSet = EnsureBotSurvivalDebugWidget(player);
     if (!widgetSet) return;
@@ -8375,7 +8396,7 @@ function CheckForBannedWeapons(player: mod.Player) {
 function ApplyBotSurvivalTestLMSForSurvivor(player: mod.Player): void {
     if (!BOT_SURVIVAL_TEST_MODE) return;
     if (!Helpers.HasValidObjId(player)) return;
-    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    if (SafeIsAISoldier(player)) return;
 
     const playerProfile = PlayerProfile.Get(player);
     if (!playerProfile) return;
@@ -8411,7 +8432,7 @@ const BotSurvivalTestHarness = {
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!Helpers.HasValidObjId(player)) continue;
-            if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
+            if (SafeIsAISoldier(player)) continue;
 
             ApplyBotSurvivalTestLMSForSurvivor(player);
 
@@ -8428,8 +8449,8 @@ const BotSurvivalTestHarness = {
         for (let i = 0; i < pcount; i++) {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!Helpers.HasValidObjId(player)) continue;
-            if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
-            if (!mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive)) continue;
+            if (!SafeIsAISoldier(player)) continue;
+            if (!PlayerIsAliveAndValid(player)) continue;
             mod.Kill(player);
         }
     },
@@ -9911,7 +9932,7 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
     LogLeapRuntime(`init_success_${objId}`, `InitLeapSystem success | player=${objId} hasState=${LEAP_STATES.has(objId)}`, 0.2);
 
     // basic AI leap test
-    if (mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier) && LEAP_TEST_MODE) {
+    if (SafeIsAISoldier(player) && LEAP_TEST_MODE) {
         // Wait for the survivor bot to settle into the vehicle seat.
         await mod.Wait(4);
 
@@ -9923,9 +9944,10 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
 
         // Chase and charge-leap the vehicle driver until the seat is vacated or the AI dies.
         while (targetVehicle) {
-            let MIN_LEAP_DIST = 4;
+            if (!PlayerIsAliveAndValid(player)) break;
+            const MIN_LEAP_DIST = 4;
             const driver = mod.GetPlayerFromVehicleSeat(targetVehicle, 0);
-            if (!driver || !mod.GetSoldierState(driver, mod.SoldierStateBool.IsAlive)) break;
+            if (!PlayerIsAliveAndValid(driver)) break;
 
             // Explicitly set the engagement target and move toward the vehicle so
             // the bot actually closes distance (without AIMoveToBehavior it just stands still).
@@ -10322,7 +10344,7 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
         }
 
         if (moveFailCount >= 3) {
-            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #2 - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
+            console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
             mod.AIIdleBehavior(eventPlayer);
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS * slot.tick.moveFailCount;
             return;
@@ -10340,15 +10362,16 @@ export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mo
     // Need a delay here to allow the engine to completely spawn the bot. 
     // Too long, and an Infected bot will immediately fire its sniper rifle.
     await mod.Wait(0.25);
-    if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) ||
+    if (!Helpers.HasValidObjId(eventPlayer)) return;
+
+    const isAISoldier = SafeIsAISoldier(eventPlayer);
+    if (!isAISoldier ||
         GameHandler.gameState === GameState.EndOfRound) {
         if (!LEAP_TEST_MODE) return;
     }
 
     if (LEAP_TEST_MODE) {
-        if (Helpers.HasValidObjId(eventPlayer)) {
-            LeapTestHarness.onBotSpawned(eventPlayer, mod.GetObjId(eventSpawner));
-        }
+        LeapTestHarness.onBotSpawned(eventPlayer, mod.GetObjId(eventSpawner));
         return;
     }
     AISpawnHandler.OnBotSpawnFromSpawner(eventPlayer, mod.GetObjId(eventSpawner));
@@ -10418,7 +10441,7 @@ export function OnPlayerInteract(eventPlayer: mod.Player, eventObject: mod.Objec
 export async function OnPlayerJoinGame(eventPlayer: mod.Player) {
     await mod.Wait(0.25);
     if (Helpers.HasValidObjId(eventPlayer)) {
-        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        if (SafeIsAISoldier(eventPlayer)) {
             // bots get their own logic in OnSpawnerSpawned
             return;
         }
@@ -10447,7 +10470,8 @@ export async function OnPlayerJoinGame(eventPlayer: mod.Player) {
                 || GameHandler.gameState === GameState.GameStartCountdown
                 || GameHandler.gameState === GameState.EndOfRound) {
                 await mod.Wait(2);
-                if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAlive)) {
+                if (Helpers.HasValidObjId(eventPlayer)
+                    && SafeGetSoldierStateBool(eventPlayer, mod.SoldierStateBool.IsAlive)) {
                     mod.SetRedeployTime(eventPlayer, PLAYER_REDEPLOY_TIME);
                     mod.UndeployPlayer(eventPlayer);
                 }
@@ -10547,8 +10571,9 @@ export async function OnPlayerLeaveGame(playerObjID: number) {
 
 export async function OnPlayerDeployed(eventPlayer: mod.Player) {
     if (Helpers.HasValidObjId(eventPlayer)) {
+        const isAISoldier = SafeIsAISoldier(eventPlayer);
         if (BOT_SURVIVAL_TEST_MODE) {
-            if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+            if (isAISoldier) {
                 return;
             }
             const playerProfile = PlayerProfile.Get(eventPlayer);
@@ -10572,7 +10597,7 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
             return;
         }
         if (LEAP_TEST_MODE) {
-            if (!mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+            if (!isAISoldier) {
                 await PlayerProfile.CustomOnPlayerDeployed(eventPlayer);
                 LeapTestHarness.onHumanDeployed(eventPlayer);
             }
@@ -10583,7 +10608,7 @@ export async function OnPlayerDeployed(eventPlayer: mod.Player) {
             mod.Kill(eventPlayer);
             return;
         }
-        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        if (isAISoldier) {
             return;
         }
         PlayerProfile.CustomOnPlayerDeployed(eventPlayer);
@@ -10638,23 +10663,9 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         playerProfile?.loadoutDisplayBottom?.Hide();
 
         // Slot-based bot death handling
-        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        if (SafeIsAISoldier(eventPlayer)) {
             const infectedSlot = InfectedBotSlot.GetByObjID(playerObjID);
-            const deathType = mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Deserting) ? "Deserting" :
-                mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Fall) ? "Fall" :
-                    mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Redeploy) ? "Redeploy" :
-                        mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Melee) ? "Melee" :
-                            mod.EventDeathTypeCompare(eventDeathType, mod.PlayerDeathTypes.Weapon) ? "Weapon" :
-                                "Other";
             if (infectedSlot) {
-                if (deathType === 'Redeploy') {
-                    LogBotLifecycle(
-                        infectedSlot,
-                        'redeploy_death',
-                        `behavior=${infectedSlot.tick.behavior ?? 'unknown'} moveFailCount=${infectedSlot.tick.moveFailCount ?? 0}`
-                    );
-                }
-                console.log(`OnPlayerDied | Infected Bot(${playerObjID}) [${infectedSlot.name}] died\nCause of Death: ${deathType}`);
                 infectedSlot.HandleDeath();
                 return;
             }
@@ -10719,7 +10730,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
 export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, eventDamageType: mod.DamageType,) {
     const damageDealer = eventOtherPlayer;
     const damageDealerObjId = mod.GetObjId(damageDealer);
-    if (mod.GetSoldierState(damageDealer, mod.SoldierStateBool.IsAISoldier)) return;
+    if (SafeIsAISoldier(damageDealer)) return;
     if (InfectedBotSlot.GetByObjID(damageDealerObjId)) return;
 
     if (mod.GetObjId(mod.GetTeam(damageDealer)) === mod.GetObjId(INFECTED_TEAM)) {
@@ -10793,7 +10804,7 @@ export async function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlay
             }
         }
         // AI bots don't track kill stats
-        if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+        if (SafeIsAISoldier(eventPlayer)) {
             return;
         }
 
@@ -10843,13 +10854,11 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
 export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
     await mod.Wait(0.15);
     const pp = PlayerProfile.Get(eventPlayer);
-    // if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsVaulting)) {
-        if (mod.GetObjId(eventAreaTrigger) === 9091){
-            console.log(`OnPlayerEnterAreaTrigger | Player(${mod.GetObjId(eventPlayer)}) entered vault trigger and is vaulting - "killing player"`);
-            pp?.ShowAlphaFeedback(MakeMessage(mod.stringkeys.vault_kill));
-            mod.Kill(eventPlayer);
-        }
-    // }
+    if (mod.GetObjId(eventAreaTrigger) === 9091) {
+        console.log(`OnPlayerEnterAreaTrigger | Player(${mod.GetObjId(eventPlayer)}) entered vault trigger and is vaulting - "killing player"`);
+        pp?.ShowAlphaFeedback(MakeMessage(mod.stringkeys.vault_kill));
+        mod.Kill(eventPlayer);
+    }
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
         if (survivorProfile && !survivorProfile.isAI) {
@@ -10862,7 +10871,7 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
 
     if (pp?.isAI) {
         const targetInVehicle = pp?.currentTarget
-            ? mod.GetSoldierState(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
+            ? SafeGetSoldierStateBool(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
             : false;
         const aiSpeedMultiplier = targetInVehicle
             ? 4 : (mod.GetMatchTimeElapsed() > 300)
@@ -10889,6 +10898,7 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
             console.log(`OnPlayerEnterVehicle | Vehicle(${mod.GetObjId(eventVehicle)}) has an infected player inside. Forcing Player(${mod.GetObjId(eventPlayer)}) to exit.`);
             mod.ForcePlayerExitVehicle(player, eventVehicle);
             Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            playerProfile?.ShowAlphaFeedback(MakeMessage(mod.stringkeys.you_have_a_license_for_that));
         }
     }
 }
@@ -10990,29 +11000,31 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     const playerObjId = mod.GetObjId(eventPlayer);
     if (!Helpers.HasValidObjId(eventPlayer) || playerObjId < 0) return;
 
-    const playerProfile = PlayerProfile.Get(eventPlayer);
-
-    // Safety net: if leap is unlocked and this deployed alpha is missing state,
-    // initialize leap here so crouch charge detection can start immediately.
-    if (playerProfile
-        && !playerProfile.isAI
-        && playerProfile.isAlphaInfected
-        && IsPlayerOnInfectedTeamForLeap(eventPlayer, playerProfile)
-        && IsLeapAttackAvailableNow()
-        && !LEAP_STATES.has(playerObjId)) {
-        LogLeapRuntime(`ongoing_safety_init_${playerObjId}`, `OngoingPlayer safety init triggered | player=${playerObjId} alpha=${playerProfile.isAlphaInfected} infected=${playerProfile.isInfectedTeam}`, 0.3);
-        InitLeapSystem(eventPlayer);
-    }
-
-    TickLeap(eventPlayer);
+    const isAISoldier = SafeIsAISoldier(eventPlayer);
+    const playerProfile = isAISoldier ? undefined : PlayerProfile.Get(eventPlayer);
 
     if (!IsPlayerDeployed(eventPlayer)) return;
+
+    if (!isAISoldier) {
+        // Safety net: if leap is unlocked and this deployed alpha is missing state,
+        // initialize leap here so crouch charge detection can start immediately.
+        if (playerProfile
+            && playerProfile.isAlphaInfected
+            && IsPlayerOnInfectedTeamForLeap(eventPlayer, playerProfile)
+            && IsLeapAttackAvailableNow()
+            && !LEAP_STATES.has(playerObjId)) {
+            LogLeapRuntime(`ongoing_safety_init_${playerObjId}`, `OngoingPlayer safety init triggered | player=${playerObjId} alpha=${playerProfile.isAlphaInfected} infected=${playerProfile.isInfectedTeam}`, 0.3);
+            InitLeapSystem(eventPlayer);
+        }
+
+        TickLeap(eventPlayer);
+    }
 
     // In test mode, skip all normal ongoing logic (icons, banned weapons, bot AI, etc.)
     if (LEAP_TEST_MODE) return;
 
     // AI bots skip all human-specific logic and run a lean AI tick instead.
-    if (playerObjId > -1 && mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+    if (isAISoldier) {
         OngoingAI(eventPlayer, playerObjId);
         return;
     }
@@ -11158,6 +11170,11 @@ export async function OnGameModeStarted() {
         mod.EnableAllPlayerDeploy(true);
         await LeapTestHarness.start();
         return;
+    } else {
+        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_INTERACT_SPAWN));
+        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_CHANGE_TEAM));
+        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_INTERACT_CLEANUP));
+
     }
 
     // Sweep any vehicles left in the world from a previous session and remove them after a delay.
