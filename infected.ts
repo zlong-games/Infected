@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.04.14";
+const VERSION = "1.04.15";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -72,7 +72,8 @@ const INFECTED_COUNT_LIMIT = 12;
 const BLACK_COLOR = [1, 1, 1];
 
 let VOModule = mod.RuntimeSpawn_Common.SFX_VOModule_OneShot2D;
-let VOSounds: any;
+let VOSoundsSurvivor: any;
+let VOSoundsInfected: any;
 
 const SFX_NEGATIVE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Beacons_SignalLost_OneShot2D;
 const SFX_POSITIVE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Circuit_TerminalCaptured_OneShot2D;
@@ -112,7 +113,7 @@ const HEALTH_RESTORE_ON_INFECTED = 50;
 const LMS_RELOAD_POLL_SECONDS = 0.05;
 const LMS_RELOAD_SPEED_FACTOR = 0.35;
 const INFECTED_HINT_ROTATION_SECONDS = 8;
-const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0; 
+const CURRENT_MAP_HQ_POSITION_THRESHOLD = 5.0;
 const WAIT_FOR_MAP_GATE_TIMEOUT_SECONDS = 10; // Useless, just a player-facing message. Game/AI need to run for nearly 2 minutes before things settle.
 
 const INFECTED_HINT_STRING_KEYS = [
@@ -153,13 +154,13 @@ const ALPHA_BUFF_STRING_KEYS = [
     "alpha_infected_area_notification",
     "alpha_buff_tankier",
     "alpha_buff_leap_attack",
-    "alpha_buff_speed",
+    "alpha_buff_damage_reduction",
 ] as const;
 
 const ALPHA_BUFF_STRING_KEYS_NO_LEAP = [
     "alpha_infected_area_notification",
     "alpha_buff_tankier",
-    "alpha_buff_speed",
+    "alpha_buff_damage_reduction",
 ] as const;
 
 interface Vector3 {
@@ -247,6 +248,43 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
 const POSITION_HQ1 = mod.GetObjectPosition(mod.GetHQ(1));
 const POSITION_HQ2 = mod.GetObjectPosition(mod.GetHQ(2));
 const ZERO_VEC: mod.Vector = mod.CreateVector(0, 0, 0);
+
+function SpawnTeamVOSoundsAtHQ(): void {
+    VOSoundsSurvivor = mod.SpawnObject(VOModule, POSITION_HQ1, ZERO_VEC, ZERO_VEC);
+    VOSoundsInfected = mod.SpawnObject(VOModule, POSITION_HQ2, ZERO_VEC, ZERO_VEC);
+}
+
+function GetVOSourceForTeam(team: mod.Team | undefined): any {
+    if (!team) return VOSoundsSurvivor ?? VOSoundsInfected;
+    const teamObjId = mod.GetObjId(team);
+    if (teamObjId === mod.GetObjId(SURVIVOR_TEAM)) {
+        return VOSoundsSurvivor ?? VOSoundsInfected;
+    }
+    if (teamObjId === mod.GetObjId(INFECTED_TEAM)) {
+        return VOSoundsInfected ?? VOSoundsSurvivor;
+    }
+    return VOSoundsSurvivor ?? VOSoundsInfected;
+}
+
+function PlayVOForTeam(
+    eventType: mod.VoiceOverEvents2D,
+    voiceFlag: mod.VoiceOverFlags,
+    team: mod.Team,
+): void {
+    const source = GetVOSourceForTeam(team);
+    if (!source) return;
+    mod.PlayVO(source, eventType, voiceFlag, team);
+}
+
+function PlayVOForPlayer(
+    eventType: mod.VoiceOverEvents2D,
+    voiceFlag: mod.VoiceOverFlags,
+    player: mod.Player,
+): void {
+    const source = GetVOSourceForTeam(mod.GetTeam(player));
+    if (!source) return;
+    mod.PlayVO(source, eventType, voiceFlag, player);
+}
 
 let RESUPPLY_WORLD_ICONS: ResupplyWorldIconId[] = [];
 let RESUPPLY_INTERACT_POINTS: ResupplyInteractPointId[] = [];
@@ -5052,6 +5090,18 @@ class GameHandler {
         { id: 1504, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
         { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
+        { id: 1513, object: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_A },
+        { id: 1540, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1541, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1542, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1543, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1544, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1545, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1546, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1547, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1548, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1549, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1550, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
     ];
 
     static sand2_Sfx = [
@@ -5066,6 +5116,7 @@ class GameHandler {
         { id: 2510, attenuation: 50, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
         { id: 2511, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
         { id: 2512, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
+        { id: 2513, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -5463,8 +5514,8 @@ class GameHandler {
         } finally {
             Helpers.PlaySoundFX(SFX_TICKDOWN_FINAL, 1);
             GameCountdown.GlobalClose();
-            mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
-            mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Bravo, INFECTED_TEAM);
+            PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+            PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Bravo, INFECTED_TEAM);
             // mod.PlayMusic(mod.MusicEvents.Core_PhaseBegin, SURVIVOR_TEAM);
             LoadoutSelectionMenu.GlobalClose(false);
             this.RestrictAllInputsAllPlayers(false);
@@ -5531,8 +5582,8 @@ class GameHandler {
                     GameHandler.vehicleSpawnedThisRound = true;
                     GameHandler.SpawnVehicle();
                 }
-                mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.ProgressMidLosing, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
-                mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.PlayerCountEnemyLow, mod.VoiceOverFlags.Echo, INFECTED_TEAM);
+                PlayVOForTeam(mod.VoiceOverEvents2D.ProgressMidLosing, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+                PlayVOForTeam(mod.VoiceOverEvents2D.PlayerCountEnemyLow, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
                 for (let playerProfile of PlayerProfile._allPlayerProfiles) {
                     // playerProfile.ShowAlphaFeedback(finalFiveMessage); // disabling to reduce notification spam
                     if (playerProfile.isInfectedTeam) continue;
@@ -6152,7 +6203,7 @@ class GameHandler {
                     timeRemaining[2]
                 );
                 if (GameHandler.roundTimeRemaining === 62) {
-                    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.Time60Left, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+                    PlayVOForTeam(mod.VoiceOverEvents2D.Time60Left, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
                 }
                 if (GameHandler.roundTimeRemaining <= 10) {
                     if (GameHandler.roundTimeRemaining === 10) {
@@ -7513,7 +7564,7 @@ async function StartLastManStandingReloadLoop(playerProfile: PlayerProfile) {
     playerProfile.lmsReloadLoopActive = true;
     let wasReloading = false;
     const RELOAD_SFX = mod.SpawnObject(mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Loadout_EquipSecondaryWeapon_OneShot2D, ZERO_VEC, ZERO_VEC);
-    mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, player);
+    PlayVOForPlayer(mod.VoiceOverEvents2D.RoundSuddenDeath, mod.VoiceOverFlags.Alpha, player);
 
     while (
         GameHandler.gameState === GameState.GameRoundIsRunning &&
@@ -7616,13 +7667,14 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     // conditional stats for humans
     if (!isAI) {
         if (isInfected) {
-            mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.1 : 1);
+            // disabling to troubleshoot high TN/SFT rubberbanding
+            // mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.1 : 1);
             mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 0.7 : 0.9);
             mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 300 : 150);
         }
     }
     if (!isInfected) {
-        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, 1);
+        // mod.SetPlayerMovementSpeedMultiplier(eventPlayer, 1);
         mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isLastManStanding ? 0.5 : 1);
         mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isLastManStanding ? 300 : 60);
     }
@@ -7964,8 +8016,9 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
         LogAlphaState('ShowAlphaInfectedIndicator | canceled previous token', player, playerProfile);
     }
     const verticalOffset = 1.4;
-    const illumVerticalOffset = 1;
-    const forwardOffset = -0.1;
+    const illumVerticalOffset = 0.7;
+    const forwardOffset = 0.3;
+    const illumForwardOffset = -0.4;
     let playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
     let facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
     let flamePos = mod.CreateVector(
@@ -8010,7 +8063,7 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                 illumPos = mod.CreateVector(
                     mod.XComponentOf(playerPos),
                     mod.YComponentOf(playerPos) + illumVerticalOffset,
-                    mod.ZComponentOf(playerPos)
+                    mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * illumForwardOffset)
                 )
                 mod.MoveVFX(alphaIndicatorFlameVFX, flamePos, ZERO_VEC);
                 mod.MoveVFX(alphaIndicatorIllumVFX, illumPos, ZERO_VEC);
@@ -10920,6 +10973,15 @@ async function CleanupVehicleWithDamage(vehicle: mod.Vehicle, delaySeconds: numb
     }
 }
 
+async function CleanupVehicleUnspawn(vehicle: mod.Vehicle, delaySeconds: number) {
+    await mod.Wait(delaySeconds);
+    try {
+        try { mod.UnspawnObject(vehicle); } catch { }
+    } catch {
+        mod.DealDamage(vehicle, 99999);
+    }
+}
+
 function QueueBotSurvivalTestVehicleSpawn(
     reason: string,
     delaySeconds: number = BOT_SURVIVAL_TEST_VEHICLE_RESPAWN_DELAY_SECONDS,
@@ -10977,9 +11039,9 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
             && playerProfile.isAlphaInfected;
         playerProfile.ShowAlphaFeedback(notifyAlphaLeapReady ? alphaLeapReadyMessage : vehicleSpawnedMessage);
     }
-    if (VOSounds) {
-        mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
-        mod.PlayVO(VOSounds, mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
+    if (VOSoundsSurvivor || VOSoundsInfected) {
+        PlayVOForTeam(mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
+        PlayVOForTeam(mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
     }
 }
 
@@ -10989,7 +11051,7 @@ export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
     const wasTrackedVehicle = trackedVehicleObjId > -1 && trackedVehicleObjId === destroyedVehicleObjId;
 
     SPAWNED_ACTIVE_VEHICLE = undefined;
-    CleanupVehicleWithDamage(eventVehicle, 3);
+    CleanupVehicleUnspawn(eventVehicle, 3);
 
     if (BOT_SURVIVAL_TEST_MODE && wasTrackedVehicle) {
         QueueBotSurvivalTestVehicleSpawn('destroyed');
@@ -11170,11 +11232,6 @@ export async function OnGameModeStarted() {
         mod.EnableAllPlayerDeploy(true);
         await LeapTestHarness.start();
         return;
-    } else {
-        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_INTERACT_SPAWN));
-        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_CHANGE_TEAM));
-        mod.UnspawnObject(mod.GetInteractPoint(LEAP_TEST_INTERACT_CLEANUP));
-
     }
 
     // Sweep any vehicles left in the world from a previous session and remove them after a delay.
@@ -11186,7 +11243,7 @@ export async function OnGameModeStarted() {
             await mod.Wait(3);
             for (let i = 0; i < count; i++) {
                 const v = mod.ValueInArray(existingVehicles, i) as mod.Vehicle;
-                CleanupVehicleWithDamage(v, 0);
+                CleanupVehicleUnspawn(v, 0);
             }
         }
     })();
@@ -11197,7 +11254,7 @@ export async function OnGameModeStarted() {
         ROUND_DURATION = 180;
         GAME_ROUND_LIMIT = 6;
     }
-    VOSounds = mod.SpawnObject(VOModule, mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0), mod.CreateVector(0, 0, 0));
+    SpawnTeamVOSoundsAtHQ();
     // mod.LoadMusic(mod.MusicPackages.Core);
     // mod.SetMusicParam(mod.MusicParams.Core_Amplitude, 1.8);
 

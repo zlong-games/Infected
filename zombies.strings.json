@@ -7,12 +7,12 @@
   "infected_hint_leap_mechanic": "Crouch to charge your leap, then attack to launch",
   "alpha_buff_tankier": "Max Health Increased to 300",
   "alpha_buff_leap_attack": "Leap Attack Ready",
-  "alpha_buff_speed": "10% Movement Speed Increase",
+  "alpha_buff_damage_reduction": "30% Damage Reduction",
   "survivor_area_warning": "The roads are dangerous for survivors",
   "lms_hint_you_are_last": "Objective: Survive.",
   "lms_buff_fast_reload": "Fast Weapon Reloads",
   "lms_buff_bonus_health": "Max Health Increased to 240",
-  "lms_buff_damage_resist": "Incoming damage reduced",
+  "lms_buff_damage_resist": "50% Damage Reduction",
   "lms_buff_ammo_on_kill": "+Primary and +Secondary Ammo on Kill",
   "debugging_message": "{}",
   "eor_condition_2_infected": "EOR: 2+ Infected",
@@ -427,5 +427,5 @@
   "attachment_rail_left_vis_ir_light": "VIS/IR Weapon Light",
   "vehicle_spawned": "A vehicle has been deployed!",
   "you_have_a_license_for_that": "You have a license for that?",
-  "vault_kill": "Can't read?"
+  "vault_kill": "Can't you read?"
 }
