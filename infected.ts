@@ -51,6 +51,9 @@ const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicl
 const AI_VEHICLE_GLANCING_FORCE_FIRE_DAMAGE = 50;    // side/front-glancing vehicle chip damage
 const AI_VEHICLE_REAR_FORCE_FIRE_DAMAGE = 200;       // rear hemisphere vehicle chip damage
 const AI_VEHICLE_ATTACK_WINDOW_SECONDS = 0.35;       // minimum continuous time in valid vehicle melee window before forcefire
+const AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER = 4;     // minimum movement speed multiplier when target is in a vehicle
+const AI_VEHICLE_TARGET_MAX_MOVE_MULTIPLIER = 8;     // cap for velocity-scaled movement boost while chasing vehicles
+const AI_VEHICLE_TARGET_SPEED_PER_MULTIPLIER_STEP = 10; // linear velocity units needed for each +1 multiplier above minimum
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1;          // balanced on-foot chase interval
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
 const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep gadget use (melee) active within this range
@@ -5102,6 +5105,12 @@ class GameHandler {
         { id: 1548, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1549, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1550, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1551, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1552, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1553, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1554, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1555, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1556, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
     ];
 
     static sand2_Sfx = [
@@ -6267,6 +6276,7 @@ interface InfectedBotTickState {
     trackedVehicle?: mod.Vehicle;
     leapInProgress?: boolean;
     inAreaTrigger?: boolean;
+    lastAreaMoveSpeedMultiplier?: number;
     meleeGadgetActive?: boolean;
     meleeTargetObjId?: number;
     nextMeleeForceFireAt?: number;
@@ -6909,6 +6919,57 @@ function CleanupVehicleChaseState(slot: InfectedBotSlot): void {
     slot.tick.vehicleAttackWindowDamageProfile = undefined;
 }
 
+function GetVectorMagnitude(vector: mod.Vector): number {
+    const x = getVecX(vector);
+    const y = getVecY(vector);
+    const z = getVecZ(vector);
+    return Math.sqrt((x * x) + (y * y) + (z * z));
+}
+
+function GetInfectedAIAreaMoveSpeedMultiplierForTarget(target: mod.Player | undefined): number {
+    const baseMultiplier = mod.GetMatchTimeElapsed() > 90 ? 2 : 1;
+    const targetInVehicle = target
+        ? SafeGetSoldierStateBool(target, mod.SoldierStateBool.IsInVehicle)
+        : false;
+
+    if (!targetInVehicle) {
+        return baseMultiplier;
+    }
+
+    const targetVehicle = target ? mod.GetVehicleFromPlayer(target) : undefined;
+    if (!targetVehicle || !IsVehicleRefValid(targetVehicle)) {
+        return AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER;
+    }
+
+    const vehicleVelocity = mod.GetVehicleState(targetVehicle, mod.VehicleStateVector.LinearVelocity);
+    const vehicleSpeed = GetVectorMagnitude(vehicleVelocity);
+    const scaledMultiplier =
+        AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER +
+        (vehicleSpeed / AI_VEHICLE_TARGET_SPEED_PER_MULTIPLIER_STEP);
+
+    return Math.min(
+        AI_VEHICLE_TARGET_MAX_MOVE_MULTIPLIER,
+        Math.max(AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER, scaledMultiplier),
+    );
+}
+
+function ApplyInfectedAIAreaMoveSpeedMultiplier(
+    bot: mod.Player,
+    slot: InfectedBotSlot | undefined,
+    target: mod.Player | undefined,
+): void {
+    const desiredMultiplier = GetInfectedAIAreaMoveSpeedMultiplierForTarget(target);
+    const cachedMultiplier = slot?.tick.lastAreaMoveSpeedMultiplier;
+    if (cachedMultiplier !== undefined && Math.abs(cachedMultiplier - desiredMultiplier) < 0.01) {
+        return;
+    }
+
+    mod.SetPlayerMovementSpeedMultiplier(bot, desiredMultiplier);
+    if (slot) {
+        slot.tick.lastAreaMoveSpeedMultiplier = desiredMultiplier;
+    }
+}
+
 interface VehicleMeleeAttackProfile {
     canAttack: boolean;
     blockedByHeadOnCone: boolean;
@@ -7249,6 +7310,9 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     }
 
     if (!target) {
+        if (tick.inAreaTrigger) {
+            ApplyInfectedAIAreaMoveSpeedMultiplier(infectedBot, slot, undefined);
+        }
         StopInfectedBotMeleeAttack(slot, infectedBot);
         CleanupVehicleChaseState(slot);
         const botProfile = PlayerProfile.Get(infectedBot);
@@ -7268,9 +7332,19 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     }
 
     const isTargetInVehicle = mod.GetSoldierState(target, mod.SoldierStateBool.IsInVehicle);
+    // Vehicle-chase speed scaling should apply everywhere, not only inside area triggers.
+    if (tick.inAreaTrigger || isTargetInVehicle) {
+        ApplyInfectedAIAreaMoveSpeedMultiplier(infectedBot, slot, target);
+    } else if (tick.lastAreaMoveSpeedMultiplier !== undefined) {
+        // Ensure temporary chase boosts are cleared when not in trigger and target is dismounted.
+        mod.SetPlayerMovementSpeedMultiplier(infectedBot, botProfile?.isAlphaInfected ? 1.2 : 1);
+        tick.lastAreaMoveSpeedMultiplier = undefined;
+    }
+
+    const sprintAllowed = mod.GetMatchTimeElapsed() >= 90 ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run;
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
-    mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run);
+    mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : sprintAllowed);
     // Keep movement explicit (AIMoveToBehavior reissues) while combat uses gadget start/stop.
 
     // --- Vehicle chase path ---
@@ -10898,9 +10972,12 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
     }
     const playerProfile = PlayerProfile.Get(eventPlayer);
     if (playerProfile?.isAI) {
-        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.3 : 1);
+        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.2 : 1);
         const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
-        if (slot) slot.tick.inAreaTrigger = false;
+        if (slot) {
+            slot.tick.inAreaTrigger = false;
+            slot.tick.lastAreaMoveSpeedMultiplier = undefined;
+        }
     }
 }
 
@@ -10923,15 +11000,9 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
 
 
     if (pp?.isAI) {
-        const targetInVehicle = pp?.currentTarget
-            ? SafeGetSoldierStateBool(pp.currentTarget, mod.SoldierStateBool.IsInVehicle)
-            : false;
-        const aiSpeedMultiplier = targetInVehicle
-            ? 4 : (mod.GetMatchTimeElapsed() > 300)
-                ? 2 : 1;
-        mod.SetPlayerMovementSpeedMultiplier(eventPlayer, aiSpeedMultiplier);
         const slot = InfectedBotSlot.GetByObjID(mod.GetObjId(eventPlayer));
         if (slot) slot.tick.inAreaTrigger = true;
+        ApplyInfectedAIAreaMoveSpeedMultiplier(eventPlayer, slot, pp.currentTarget);
     }
 
 
@@ -11239,11 +11310,11 @@ export async function OnGameModeStarted() {
         const existingVehicles = mod.AllVehicles();
         const count = mod.CountOf(existingVehicles);
         if (count > 0) {
-            console.log(`OnGameModeStarted | Found ${count} pre-existing vehicle(s); scheduling removal in 3.`);
-            await mod.Wait(3);
+            console.log(`OnGameModeStarted | Found ${count} pre-existing vehicle(s); scheduling removal in 2.`);
+            await mod.Wait(2);
             for (let i = 0; i < count; i++) {
                 const v = mod.ValueInArray(existingVehicles, i) as mod.Vehicle;
-                CleanupVehicleUnspawn(v, 0);
+                CleanupVehicleWithDamage(v, 0);
             }
         }
     })();
