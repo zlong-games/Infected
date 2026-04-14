@@ -5089,7 +5089,7 @@ class GameHandler {
         // { id: 501, object: mod.RuntimeSpawn_Common.FX_Granite_Strike_Smoke_Marker_Red },
         { id: 1501, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Column_XXL },
         { id: 1502, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_Black_L },
-        { id: 1503, object: mod.RuntimeSpawn_Common.FX_CivCar_Tire_fire_S_GS },
+        { id: 1503, object: mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl },
         { id: 1504, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
         { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
@@ -5111,6 +5111,10 @@ class GameHandler {
         { id: 1554, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1555, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1556, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1557, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1558, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1559, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1560, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
     ];
 
     static sand2_Sfx = [
@@ -5126,6 +5130,8 @@ class GameHandler {
         { id: 2511, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
         { id: 2512, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
         { id: 2513, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
+        { id: 2514, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
+        { id: 2515, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Shared_Bigworld_Winds_SandMist_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -7341,7 +7347,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         tick.lastAreaMoveSpeedMultiplier = undefined;
     }
 
-    const sprintAllowed = mod.GetMatchTimeElapsed() >= 90 ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run;
+    const sprintAllowed = mod.GetMatchTimeElapsed() >= 45 ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run;
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
     mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : sprintAllowed);
@@ -10472,7 +10478,7 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
 
         if (moveFailCount >= 3) {
             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
-            mod.AIIdleBehavior(eventPlayer);
+            mod.AIBattlefieldBehavior(eventPlayer);
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS * slot.tick.moveFailCount;
             return;
         }
@@ -11122,7 +11128,7 @@ export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
     const wasTrackedVehicle = trackedVehicleObjId > -1 && trackedVehicleObjId === destroyedVehicleObjId;
 
     SPAWNED_ACTIVE_VEHICLE = undefined;
-    CleanupVehicleUnspawn(eventVehicle, 3);
+    CleanupVehicleWithDamage(eventVehicle, 3);
 
     if (BOT_SURVIVAL_TEST_MODE && wasTrackedVehicle) {
         QueueBotSurvivalTestVehicleSpawn('destroyed');
