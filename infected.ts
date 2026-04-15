@@ -5121,6 +5121,38 @@ class GameHandler {
         { id: 1558, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1559, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1560, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1561, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1562, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1563, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1564, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1565, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1566, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1567, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1568, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1569, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1570, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1571, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1572, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1573, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1574, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1575, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1576, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1577, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1578, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1579, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1580, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1581, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1582, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1583, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1584, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1585, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1586, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1587, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1588, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1589, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1590, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1591, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1592, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
     ];
 
     static sand2_Sfx = [
@@ -11026,6 +11058,9 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
         playerProfile.invehicle = true;
     }
     playerProfile?.loadoutDisplayBottom?.Hide();
+    if (playerProfile && !playerProfile.isInfectedTeam) {
+        mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.VL7, false);
+    }
     // attempting to use the mod APIs to fetch players
     for (const player of playersInVehicle) {
         if ((mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM))) {
@@ -11043,6 +11078,9 @@ export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.V
         playerProfile.invehicle = false;
     }
     playerProfile?.loadoutDisplayBottom?.Show();
+    if (playerProfile && !playerProfile.isInfectedTeam) {
+        mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.VL7, true);
+    }
 }
 
 async function CleanupVehicleWithDamage(vehicle: mod.Vehicle, delaySeconds: number) {
