@@ -310,7 +310,7 @@ const VEHICLE_TYPES: mod.VehicleList[] = [
     mod.VehicleList.Quadbike,
     mod.VehicleList.GolfCart,
     mod.VehicleList.Flyer60,
-    // eventually dirtbike goes here too
+    mod.VehicleList.DirtBike
 ];
 
 // WEAPON RARITY THRESHOLDS -- lower threshold means more common, higher value means more rare
@@ -4035,12 +4035,14 @@ class PlayerProfile {
         }
         if (!playerProfile.isInfectedTeam) {
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, false);
+            mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
             playerProfile.gameCountdownUI?.Close();
         }
 
         if (playerProfile.isInfectedTeam) {
             InitializePlayerEquipment(player, playerProfile);
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, true);
+            mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
             if (playerProfile.isAlphaInfected) {
                 ShowAlphaInfectedIndicator(player);
             }
@@ -4966,6 +4968,10 @@ class PlayerProfile {
         this.deaths++;
         this.UpdatePlayerScoreboard();
 
+        if (!this.isInfectedTeam) {
+            mod.EnableScreenEffect(this.player, mod.ScreenEffects.VL7, false);
+        }
+
         // redraw team indication border after death
         if (!this.teamIndicationWidget) return;
         for (let widget of this.teamIndicationWidget) {
@@ -5118,7 +5124,7 @@ class GameHandler {
     ];
 
     static sand2_Sfx = [
-        { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Abbasid_Spots_Birds_Palace_SimpleLoop3D },
+        { id: 2501, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_DesertWindGusts_SimpleLoop3D },
         { id: 2503, attenuation: 5, object: mod.RuntimeSpawn_Common.SFX_Destruction_Fuse_Loop_GasFire_SimpleLoop3D },
         { id: 2504, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Brooklyn_Shared_Spots_GarbageFlies_SimpleLoop3D },
         { id: 2505, attenuation: 25, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingWarm_SimpleLoop3D },
@@ -5132,6 +5138,8 @@ class GameHandler {
         { id: 2513, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
         { id: 2514, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
         { id: 2515, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Shared_Bigworld_Winds_SandMist_SimpleLoop3D },
+        { id: 2516, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Riot_CrowdRumble_SimpleLoop3D },
+        { id: 2517, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_PigeonTowerCreak_SimpleLoop3D },
     ];
 
     // unused, add later for non-AI conditions
@@ -7369,8 +7377,6 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
             const vehiclePos = mod.GetVehicleState(veh, mod.VehicleStateVector.VehiclePosition);
             const vehicleMeleeProfile = GetVehicleMeleeAttackProfile(infectedBot, veh);
 
-            // Reissue move every tick the vehicle's position changes every frame and
-            // a stale destination causes the bot to run to where the vehicle was.
             const timeSinceLastMove = now - tick.lastMoveIssuedAt;
             if (timeSinceLastMove >= AI_VEHICLE_MOVE_REISSUE_SECONDS || !tick.lastMovePos) {
                 IssueInfectedBotMove(slot, infectedBot, vehiclePos, 'vehicle_chase');
@@ -7448,9 +7454,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         // so the bot tracks updated pos between ticks rather than chasing a stale position.
         const timeSinceLastMove = now - tick.lastMoveIssuedAt;
         if (timeSinceLastMove >= AI_MELEE_CLOSE_REISSUE_SECONDS || !tick.lastMovePos) {
-            // don't think we need to issue another move command if StartInfectedBotMelee...()
-            //  will auto-guide the bot to the usegadget pos
-            // IssueInfectedBotMove(slot, infectedBot, targetPos, 'melee_track');
+            IssueInfectedBotMove(slot, infectedBot, targetPos, 'melee_track');
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
@@ -8117,8 +8121,6 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
     mod.EnableVFX(alphaIndicatorFlameVFX, true);
     // can only modify the custom smoke marker vfx, nothing else will work
     // mod.SetVFXScale(alphaIndicatorFlameVFX, 2);
-    // mod.SetVFXColor(alphaIndicatorFlameVFX, UI.battlefieldBlue); // meh? 
-    // mod.SetVFXColor(alphaIndicatorIllumVFX, UI.battlefieldBlue); // nah these don't work >:c
     LogAlphaState('ShowAlphaInfectedIndicator | spawned indicator', player, playerProfile);
 
     const token = { cancel: false };
@@ -8133,6 +8135,8 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                 && mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(INFECTED_TEAM)
                 && PlayerProfile.Get(player)?.isAlphaInfected
             ) {
+                const isCrouching = mod.GetSoldierState(player, mod.SoldierStateBool.IsCrouching);
+                const currentVerticalOffset = isCrouching ? verticalOffset - 1.5 : illumVerticalOffset;
                 playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
                 facingDir = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
                 flamePos = mod.CreateVector(
@@ -8142,7 +8146,7 @@ function ShowAlphaInfectedIndicator(player: mod.Player) {
                 );
                 illumPos = mod.CreateVector(
                     mod.XComponentOf(playerPos),
-                    mod.YComponentOf(playerPos) + illumVerticalOffset,
+                    mod.YComponentOf(playerPos) + currentVerticalOffset,
                     mod.ZComponentOf(playerPos) + (mod.ZComponentOf(facingDir) * illumForwardOffset)
                 )
                 mod.MoveVFX(alphaIndicatorFlameVFX, flamePos, ZERO_VEC);
