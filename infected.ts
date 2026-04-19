@@ -35,7 +35,6 @@ const INFECTED_PENDING_SPAWN_TIMEOUT_SECONDS = 3;
 const PLAYER_REDEPLOY_TIME = 1;
 const SURVIVOR_AI_SPAWNERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
-// TODO: replace with actual map spawner IDs configured in the level editor.
 const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 2;
@@ -103,6 +102,14 @@ const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Comm
 const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_EOM_ReinforcementCardReveal_OneShot2D;
 const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_FieldUpgrade_Main_OneShot2D;
 const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Notification_ToasterPopUp_OneShot2D;
+const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Standoff_ZoneExit_OneShot2D;
+const VL7_TRANSITION_OVERLAY_ALPHA = 0.9;
+const VL7_TRANSITION_OVERLAY_FADE_SECONDS = 3;
+const VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS = 0.02;
+const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0.35;
+const VL7_TRANSITION_CLOUD_SCALE = 0.2;
+const VL7_TRANSITION_CLOUD_BIND_SECONDS = 0.05;
+const VL7_TRANSITION_CLOUD_RESPAWN_EACH_TICK = true;
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
@@ -165,6 +172,14 @@ const ALPHA_BUFF_STRING_KEYS_NO_LEAP = [
     "alpha_buff_tankier",
     "alpha_buff_damage_reduction",
 ] as const;
+
+const VL7_TRIGGER_INSIDE_PLAYER_IDS = new Set<number>();
+const VL7_TRANSITION_CLOUD_BY_PLAYER = new Map<number, mod.VL7Cloud>();
+const VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER = new Map<number, number>();
+const VL7_TRANSITION_OVERLAY_BY_PLAYER = new Map<number, mod.UIWidget>();
+const VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER = new Map<number, number>();
+let VL7_TRANSITION_CLOUD_LOOP_TOKEN_COUNTER = 0;
+let VL7_TRANSITION_OVERLAY_TOKEN_COUNTER = 0;
 
 interface Vector3 {
     x: number;
@@ -296,6 +311,23 @@ const RESUPPLY_WORLD_LOCATION: Map<ResupplyInteractPointId, mod.Vector> = new Ma
 let ROUND_DURATION = 120; // duration of each round in seconds
 let GAME_ROUND_LIMIT = 9;
 
+const SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS = 30;
+const SANDSTORM_WARNING_LEAD_SECONDS = 15;
+const SANDSTORM_DURATION_MIN_SECONDS = 45;
+const SANDSTORM_DURATION_MAX_SECONDS = 60;
+const SANDSTORM_CHANCE_LMS = 0.75;
+const SANDSTORM_CHANCE_DEFAULT = 0.9;
+// Reserve these IDs in Godot for sandstorm warning/loop sounds.
+const SANDSTORM_WARNING_SFX_ID = 2601;
+const SANDSTORM_WARNING_SFX_ATTENUATION = 70;
+const SANDSTORM_WIND_LOOP_SFX_ID = 2602;
+const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 100;
+const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605];
+const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 100;
+const SANDSTORM_LOOP_SFX_FADE_SECONDS = 2;
+const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
+const SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA = 0.15;
+
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
 let BOT_SURVIVAL_TEST_VEHICLE_SPAWN_REQUEST_ID = 0;
@@ -317,7 +349,7 @@ const VEHICLE_TYPES: mod.VehicleList[] = [
 const RARITY_MEDIUM_THRESHOLD = 30;
 const RARITY_HIGH_THRESHOLD = 60;
 const RARITY_RARE_THRESHOLD = 80;
-const RARITY_LEGENDARY_THRESHOLD = 100;
+const RARITY_LEGENDARY_THRESHOLD = 90;
 const ATTACHMENT_RARITY_RARE_THRESHOLD = 15;
 const ATTACHMENT_RARITY_LEGENDARY_THRESHOLD = 30;
 
@@ -2057,7 +2089,7 @@ class UI {
         const widget = mod.FindUIWidgetWithName(componentName) as mod.UIWidget;
         mod.SetUIWidgetBgFill(widget, mod.UIBgFill.Solid);
         mod.SetUIWidgetBgColor(widget, UI.infectedNightGreen);
-        mod.SetUIWidgetBgAlpha(widget, 0.5);
+        mod.SetUIWidgetBgAlpha(widget, 0.8);
         mod.SetUIWidgetDepth(widget, mod.UIDepth.BelowGameUI);
         mod.SetUIWidgetVisible(widget, false);
         return widget;
@@ -4035,14 +4067,14 @@ class PlayerProfile {
         }
         if (!playerProfile.isInfectedTeam) {
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, false);
-            mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
+            GameHandler.SyncSandstormScreenEffectForPlayer(player);
             playerProfile.gameCountdownUI?.Close();
         }
 
         if (playerProfile.isInfectedTeam) {
             InitializePlayerEquipment(player, playerProfile);
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, true);
-            mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
+            GameHandler.SyncSandstormScreenEffectForPlayer(player);
             if (playerProfile.isAlphaInfected) {
                 ShowAlphaInfectedIndicator(player);
             }
@@ -4969,7 +5001,7 @@ class PlayerProfile {
         this.UpdatePlayerScoreboard();
 
         if (!this.isInfectedTeam) {
-            mod.EnableScreenEffect(this.player, mod.ScreenEffects.VL7, false);
+            // mod.EnableScreenEffect(this.player, mod.ScreenEffects.VL7, false);
         }
 
         // redraw team indication border after death
@@ -5240,6 +5272,19 @@ class GameHandler {
     /** True once the parachute spawner pool has been unlocked (first time 2+ survivors survive). */
     static parachuteSpawnersEnabled: boolean = false;
 
+    static sandstormRollTimeRemaining: number = -1;
+    static sandstormRollResolved: boolean = false;
+    static sandstormHasAppearedThisRound: boolean = false;
+    static sandstormWarningSecondsRemaining: number = 0;
+    static sandstormActive: boolean = false;
+    static sandstormActiveSecondsRemaining: number = 0;
+    static sandstormWarningSfx?: mod.SFX;
+    static sandstormWindLoopSfx?: mod.SFX;
+    static sandstormFireLoopSfx: mod.SFX[] = [];
+    static sandstormLoopFadeToken: number = 0;
+    static sandstormLoopSfxMovedDeltaByObjId: Map<number, Vector3> = new Map();
+    static sandstormTickLoopStarted: boolean = false;
+
     // Recent infected increment events (for detecting accidental double-increments)
     // Each entry: { t: timestamp_ms, source: string, playerID?: number }
     static recentInfectedIncrements: { t: number; source: string; playerID?: number }[] = [];
@@ -5383,7 +5428,8 @@ class GameHandler {
         });
         if (vfxToActivate.length > 0) {
             for (const vfxEntry of vfxToActivate) {
-                mod.EnableVFX(mod.GetVFX(vfxEntry.id), true);
+                const enableByDefault = vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L;
+                mod.EnableVFX(mod.GetVFX(vfxEntry.id), enableByDefault);
             }
         }
     }
@@ -5417,6 +5463,354 @@ class GameHandler {
 
         this.SpawnFX(mapSelection);
         this.EnableSFX(mapSelection);
+    }
+
+    static IsSandstormMapEligible(): boolean {
+        return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE;
+    }
+
+    static IsLmsActiveForSandstormChance(): boolean {
+        if (GameHandler.survivorsCount === 1) return true;
+        return PlayerProfile._allPlayerProfiles.some(pp =>
+            !pp.isAI
+            && !pp.isInfectedTeam
+            && pp.isLastManStanding
+            && Helpers.HasValidObjId(pp.player)
+            && SafeIsAlive(pp.player)
+        );
+    }
+
+    static SyncSandstormScreenEffectForPlayer(
+        player: mod.Player,
+        useTransitionOnEnable: boolean = false,
+        useTransitionOnDisable: boolean = false,
+    ): void {
+        if (!Helpers.HasValidObjId(player)) return;
+        if (SafeIsAISoldier(player)) return;
+
+        if (GameHandler.sandstormActive) {
+            if (useTransitionOnEnable) {
+                void applyVL7TransitionEffect(player, true);
+            } else {
+                mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
+            }
+            return;
+        }
+
+        if (useTransitionOnDisable) {
+            void applyVL7TransitionEffect(player, false);
+            return;
+        }
+
+        mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
+    }
+
+    static SyncSandstormScreenEffectForAllPlayers(
+        useTransitionOnEnable: boolean = false,
+        useTransitionOnDisable: boolean = false,
+    ): void {
+        for (const pp of PlayerProfile._allPlayerProfiles) {
+            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
+            GameHandler.SyncSandstormScreenEffectForPlayer(pp.player, useTransitionOnEnable, useTransitionOnDisable);
+        }
+    }
+
+    static SetSandstormWhiteSmokeVfxEnabled(enable: boolean): void {
+        if (CURRENT_MAP !== MapNames.SAND2) return;
+        for (const vfxEntry of GameHandler.sand2_Vfx) {
+            if (vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L) continue;
+            try {
+                mod.EnableVFX(mod.GetVFX(vfxEntry.id), enable);
+            } catch {
+                // Best-effort VFX toggle; IDs may not exist in all map versions.
+            }
+        }
+    }
+
+    static TryPlaySandstormSfxById(sfxId: number, attenuation: number): mod.SFX | undefined {
+        if (sfxId <= 0) return undefined;
+        try {
+            const sfx = mod.GetSFX(sfxId);
+            if (mod.GetObjId(sfx) < 0) return undefined;
+            const sfxPos = mod.GetObjectPosition(sfx);
+            mod.SetSoundAmplitude(sfx, 1);
+            mod.PlaySound(sfx, 1, sfxPos, attenuation);
+            return sfx;
+        } catch {
+            return undefined;
+        }
+    }
+
+    static GetActiveSandstormLoopSfx(): mod.SFX[] {
+        const loopSfx: mod.SFX[] = [];
+        if (GameHandler.sandstormWindLoopSfx) {
+            loopSfx.push(GameHandler.sandstormWindLoopSfx);
+        }
+        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
+            loopSfx.push(fireLoopSfx);
+        }
+        return loopSfx.filter((sfx) => mod.GetObjId(sfx) > -1);
+    }
+
+    static StopSandstormWarningSfx(): void {
+        if (!GameHandler.sandstormWarningSfx) return;
+        try { mod.StopSound(GameHandler.sandstormWarningSfx); } catch { }
+        GameHandler.sandstormWarningSfx = undefined;
+    }
+
+    static UpdateSandstormLoopSfxDriftTick(): void {
+        const loopSfx = GameHandler.GetActiveSandstormLoopSfx();
+        if (loopSfx.length === 0) return;
+
+        for (const sfx of loopSfx) {
+            const deltaX = (Math.random() * 2 - 1) * SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA;
+            const deltaZ = (Math.random() * 2 - 1) * SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA;
+            if (Math.abs(deltaX) < 0.0001 && Math.abs(deltaZ) < 0.0001) continue;
+
+            try {
+                mod.MoveObject(sfx, mod.CreateVector(deltaX, 0, deltaZ));
+                const sfxObjId = mod.GetObjId(sfx);
+                if (sfxObjId < 0) continue;
+                const existing = GameHandler.sandstormLoopSfxMovedDeltaByObjId.get(sfxObjId) ?? { x: 0, y: 0, z: 0 };
+                GameHandler.sandstormLoopSfxMovedDeltaByObjId.set(sfxObjId, {
+                    x: existing.x + deltaX,
+                    y: existing.y,
+                    z: existing.z + deltaZ,
+                });
+            } catch {
+                // Best-effort movement for ambience only.
+            }
+        }
+    }
+
+    static RestoreSandstormLoopSfxMovedOffsets(): void {
+        for (const [sfxObjId, movedDelta] of GameHandler.sandstormLoopSfxMovedDeltaByObjId) {
+            if (!movedDelta) continue;
+            if (Math.abs(movedDelta.x) < 0.0001 && Math.abs(movedDelta.y) < 0.0001 && Math.abs(movedDelta.z) < 0.0001) continue;
+
+            try {
+                const sfx = mod.GetSFX(sfxObjId);
+                if (mod.GetObjId(sfx) < 0) continue;
+                mod.MoveObject(sfx, mod.CreateVector(-movedDelta.x, -movedDelta.y, -movedDelta.z));
+            } catch {
+                // Best-effort restore.
+            }
+        }
+        GameHandler.sandstormLoopSfxMovedDeltaByObjId.clear();
+    }
+
+    static async FadeOutSandstormLoopSfxAndStop(fadeToken: number): Promise<void> {
+        const loopSfx = GameHandler.GetActiveSandstormLoopSfx();
+        if (loopSfx.length === 0) {
+            GameHandler.sandstormWindLoopSfx = undefined;
+            GameHandler.sandstormFireLoopSfx = [];
+            GameHandler.RestoreSandstormLoopSfxMovedOffsets();
+            return;
+        }
+
+        const steps = Math.max(
+            1,
+            Math.ceil(SANDSTORM_LOOP_SFX_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
+        );
+
+        for (let i = 1; i <= steps; i++) {
+            if (fadeToken !== GameHandler.sandstormLoopFadeToken) return;
+
+            const amplitude = Math.max(0, 1 - (i / steps));
+            for (const sfx of loopSfx) {
+                try {
+                    mod.SetSoundAmplitude(sfx, amplitude);
+                } catch {
+                    // Best-effort fade.
+                }
+            }
+
+            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
+        }
+
+        if (fadeToken !== GameHandler.sandstormLoopFadeToken) return;
+
+        for (const sfx of loopSfx) {
+            try {
+                mod.StopSound(sfx);
+            } catch {
+                // Best-effort stop.
+            }
+        }
+
+        GameHandler.sandstormWindLoopSfx = undefined;
+        GameHandler.sandstormFireLoopSfx = [];
+        GameHandler.RestoreSandstormLoopSfxMovedOffsets();
+    }
+
+    static StopSandstormLoopSfx(): void {
+        GameHandler.sandstormLoopFadeToken++;
+        GameHandler.StopSandstormWarningSfx();
+
+        if (GameHandler.sandstormWindLoopSfx) {
+            try { mod.StopSound(GameHandler.sandstormWindLoopSfx); } catch { }
+            GameHandler.sandstormWindLoopSfx = undefined;
+        }
+
+        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
+            try { mod.StopSound(fireLoopSfx); } catch { }
+        }
+        GameHandler.sandstormFireLoopSfx = [];
+        GameHandler.RestoreSandstormLoopSfxMovedOffsets();
+    }
+
+    static ResetSandstormRoundState(): void {
+        GameHandler.sandstormRollTimeRemaining = -1;
+        GameHandler.sandstormRollResolved = true;
+        GameHandler.sandstormHasAppearedThisRound = false;
+        GameHandler.sandstormWarningSecondsRemaining = 0;
+        GameHandler.sandstormActive = false;
+        GameHandler.sandstormActiveSecondsRemaining = 0;
+        GameHandler.StopSandstormLoopSfx();
+        GameHandler.SetSandstormWhiteSmokeVfxEnabled(false);
+        GameHandler.SyncSandstormScreenEffectForAllPlayers(false);
+    }
+
+    static StartSandstormTickLoop(): void {
+        if (GameHandler.sandstormTickLoopStarted) return;
+        GameHandler.sandstormTickLoopStarted = true;
+
+        (async () => {
+            while (GameHandler.gameState !== GameState.GameOver) {
+                GameHandler.UpdateSandstormEventTick();
+                await mod.Wait(1);
+            }
+            GameHandler.sandstormTickLoopStarted = false;
+        })();
+    }
+
+    static InitializeSandstormEventForRound(): void {
+        if (!GameHandler.IsSandstormMapEligible()) {
+            GameHandler.ResetSandstormRoundState();
+            return;
+        }
+
+        if (GameHandler.sandstormWarningSecondsRemaining > 0 || GameHandler.sandstormActive) {
+            GameHandler.sandstormRollTimeRemaining = -1;
+            GameHandler.sandstormRollResolved = true;
+            GameHandler.sandstormHasAppearedThisRound = true;
+            console.log('Sandstorm | Carryover active at round start; skipping new roll this round.');
+            return;
+        }
+
+        const minRemaining = SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS + 1;
+        const maxRemaining = Math.max(minRemaining, GameHandler.roundTimeRemaining - 1);
+        if (maxRemaining <= minRemaining) {
+            GameHandler.sandstormRollTimeRemaining = -1;
+            GameHandler.sandstormRollResolved = true;
+            GameHandler.sandstormHasAppearedThisRound = false;
+            return;
+        }
+
+        GameHandler.sandstormRollResolved = false;
+        GameHandler.sandstormHasAppearedThisRound = false;
+        GameHandler.sandstormRollTimeRemaining = Helpers.GetRandomSpawnFromRange(minRemaining, maxRemaining);
+        console.log(`Sandstorm | Roll scheduled at <=${GameHandler.sandstormRollTimeRemaining}s remaining.`);
+    }
+
+    static StartSandstormWarning(): void {
+        if (GameHandler.sandstormHasAppearedThisRound) return;
+
+        GameHandler.sandstormHasAppearedThisRound = true;
+        GameHandler.sandstormWarningSecondsRemaining = SANDSTORM_WARNING_LEAD_SECONDS;
+        GameHandler.SetSandstormWhiteSmokeVfxEnabled(true);
+        GameHandler.sandstormWarningSfx = GameHandler.TryPlaySandstormSfxById(
+            SANDSTORM_WARNING_SFX_ID,
+            SANDSTORM_WARNING_SFX_ATTENUATION,
+        );
+        void GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.sandstorm_warning));
+        console.log(`Sandstorm | Warning started (${SANDSTORM_WARNING_LEAD_SECONDS}s lead).`);
+    }
+
+    static BeginSandstorm(): void {
+        GameHandler.sandstormWarningSecondsRemaining = 0;
+        GameHandler.StopSandstormWarningSfx();
+        GameHandler.sandstormActive = true;
+        GameHandler.sandstormLoopFadeToken++;
+        GameHandler.sandstormActiveSecondsRemaining = Helpers.GetRandomSpawnFromRange(
+            SANDSTORM_DURATION_MIN_SECONDS,
+            SANDSTORM_DURATION_MAX_SECONDS,
+        );
+        GameHandler.sandstormWindLoopSfx = GameHandler.TryPlaySandstormSfxById(
+            SANDSTORM_WIND_LOOP_SFX_ID,
+            SANDSTORM_WIND_LOOP_SFX_ATTENUATION,
+        );
+        GameHandler.sandstormFireLoopSfx = [];
+        for (const fireLoopSfxId of SANDSTORM_FIRE_LOOP_SFX_IDS) {
+            const fireLoopSfx = GameHandler.TryPlaySandstormSfxById(
+                fireLoopSfxId,
+                SANDSTORM_FIRE_LOOP_SFX_ATTENUATION,
+            );
+            if (fireLoopSfx) {
+                GameHandler.sandstormFireLoopSfx.push(fireLoopSfx);
+            }
+        }
+        GameHandler.SyncSandstormScreenEffectForAllPlayers(true);
+        console.log(`Sandstorm | Active for ${GameHandler.sandstormActiveSecondsRemaining}s.`);
+    }
+
+    static EndSandstorm(): void {
+        GameHandler.sandstormWarningSecondsRemaining = 0;
+        GameHandler.StopSandstormWarningSfx();
+        GameHandler.sandstormActive = false;
+        GameHandler.sandstormActiveSecondsRemaining = 0;
+        const fadeToken = ++GameHandler.sandstormLoopFadeToken;
+        void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
+        GameHandler.SetSandstormWhiteSmokeVfxEnabled(false);
+        GameHandler.SyncSandstormScreenEffectForAllPlayers(false, true);
+        console.log('Sandstorm | Cleared.');
+    }
+
+    static UpdateSandstormEventTick(): void {
+        if (!GameHandler.IsSandstormMapEligible()) return;
+
+        if (GameHandler.sandstormWarningSecondsRemaining > 0) {
+            GameHandler.sandstormWarningSecondsRemaining--;
+            if (GameHandler.sandstormWarningSecondsRemaining <= 0) {
+                GameHandler.BeginSandstorm();
+            }
+            return;
+        }
+
+        if (GameHandler.sandstormActive) {
+            GameHandler.UpdateSandstormLoopSfxDriftTick();
+            GameHandler.sandstormActiveSecondsRemaining--;
+            if (GameHandler.sandstormActiveSecondsRemaining <= 0) {
+                GameHandler.EndSandstorm();
+            }
+            return;
+        }
+
+        if (GameHandler.gameState !== GameState.GameRoundIsRunning) return;
+
+        if (GameHandler.sandstormRollResolved || GameHandler.sandstormHasAppearedThisRound) return;
+        if (GameHandler.roundTimeRemaining <= SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS) {
+            GameHandler.sandstormRollResolved = true;
+            console.log('Sandstorm | No roll: round time too low.');
+            return;
+        }
+        if (GameHandler.sandstormRollTimeRemaining < 0) {
+            GameHandler.sandstormRollResolved = true;
+            return;
+        }
+        if (GameHandler.roundTimeRemaining > GameHandler.sandstormRollTimeRemaining) return;
+
+        GameHandler.sandstormRollResolved = true;
+        const isLms = GameHandler.IsLmsActiveForSandstormChance();
+        const chance = isLms ? SANDSTORM_CHANCE_LMS : SANDSTORM_CHANCE_DEFAULT;
+        const roll = Math.random();
+        console.log(`Sandstorm | Roll=${roll.toFixed(3)} chance=${chance.toFixed(2)} lms=${isLms}`);
+
+        if (roll <= chance) {
+            GameHandler.StartSandstormWarning();
+        } else {
+            console.log('Sandstorm | Not triggered this round.');
+        }
     }
 
     static async SuspendWinChecksFor(seconds: number) {
@@ -6072,6 +6466,14 @@ class GameHandler {
             try { mod.ForcePlayerExitVehicle(vehicleRef); } catch (e) { }
             CleanupVehicleWithDamage(vehicleRef, 5);
         }
+        // Correct VL7 state for any survivors still flagged as in-vehicle after round-end ejection.
+        // ForcePlayerExitVehicle does not reliably fire OnPlayerExitVehicle, so we fix it manually.
+        PlayerProfile._allPlayerProfiles.forEach(pp => {
+            if (pp.invehicle && !pp.isInfectedTeam && mod.IsPlayerValid(pp.player)) {
+                pp.invehicle = false;
+                // mod.EnableScreenEffect(pp.player, mod.ScreenEffects.VL7, true);
+            }
+        });
         GameHandler.vehicleSpawnedThisRound = false;
         LEAP_ATTACK_UNLOCKED_THIS_ROUND = false;
 
@@ -6183,6 +6585,7 @@ class GameHandler {
         await this.RoundStartCountdown();
         console.log('Game is starting. Current Round: ' + GameHandler.currentRound);
         this.gameState = GameState.GameRoundIsRunning;
+        GameHandler.InitializeSandstormEventForRound();
 
         for (let playerProfile of PlayerProfile._allPlayerProfiles) {
             if (playerProfile.isAI) continue;
@@ -7390,7 +7793,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const sprintAllowed = mod.GetMatchTimeElapsed() >= 45 ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run;
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
 
-    mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : sprintAllowed);
+    // mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : sprintAllowed);
     // Keep movement explicit (AIMoveToBehavior reissues) while combat uses gadget start/stop.
 
     // --- Vehicle chase path ---
@@ -10532,7 +10935,7 @@ export async function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mo
     // Too long, and an Infected bot will immediately fire its sniper rifle.
     await mod.Wait(0.25);
     if (!Helpers.HasValidObjId(eventPlayer)) return;
-
+    mod.AISetMoveSpeed(eventPlayer, mod.MoveSpeed.Sprint);
     const isAISoldier = SafeIsAISoldier(eventPlayer);
     if (!isAISoldier ||
         GameHandler.gameState === GameState.EndOfRound) {
@@ -10672,6 +11075,8 @@ export async function OnPlayerLeaveGame(playerObjID: number) {
         LeapTestHarness.onHumanUndeployed(playerObjID);
     }
 
+    CleanupVL7TransitionState(playerObjID);
+
     // Check if this is a dead infected bot's body being cleaned up by the spawner unspawn timer.
     // HandleDeath registers the ObjID here so we start the respawn only after the spawner is free.
     const deadInfectedSlot = InfectedBotSlot.deadByObjID.get(playerObjID);
@@ -10797,6 +11202,8 @@ export function OnPlayerUndeploy(playerObjId: number) {
         LeapTestHarness.onHumanUndeployed(playerObjId);
     }
 
+    CleanupVL7TransitionState(playerObjId);
+
     const undeployedProfile = PlayerProfile._allPlayers.get(playerObjId);
     if (BOT_SURVIVAL_TEST_MODE && undeployedProfile && !undeployedProfile.isAI) {
         BotSurvivalTestHarness.requestRestart(`Player(${playerObjId}) undeployed`);
@@ -10810,6 +11217,11 @@ export function OnPlayerUndeploy(playerObjId: number) {
 }
 
 export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, eventDeathType: mod.DeathType) {
+    const playerObjId = mod.GetObjId(eventPlayer);
+    if (playerObjId > -1) {
+        CleanupVL7TransitionState(playerObjId);
+    }
+
     if (GameHandler.gameState === GameState.EndOfRound) {
         // ignore GH events and automatic team assignments
         console.log('Player was killed by GameHandler. Ignoring...');
@@ -10817,7 +11229,6 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     }
 
     // _deployedPlayers are *supposed to* only get added outside of EndOfRound
-    const playerObjId = mod.GetObjId(eventPlayer);
     if (playerObjId > -1) {
         CleanupPlayerOngoingVisuals(playerObjId);
     }
@@ -11024,9 +11435,11 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
 }
 
 export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
+    const areaTriggerObjId = mod.GetObjId(eventAreaTrigger);
     await mod.Wait(0.15);
+    if (!Helpers.HasValidObjId(eventPlayer)) return;
     const pp = PlayerProfile.Get(eventPlayer);
-    if (mod.GetObjId(eventAreaTrigger) === 9091) {
+    if (areaTriggerObjId === 9091) {
         console.log(`OnPlayerEnterAreaTrigger | Player(${mod.GetObjId(eventPlayer)}) entered vault trigger and is vaulting - "killing player"`);
         pp?.ShowAlphaFeedback(MakeMessage(mod.stringkeys.vault_kill));
         mod.Kill(eventPlayer);
@@ -11050,6 +11463,213 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
 
 }
 
+/**
+ * True only for human survivors. Used by the inverse-901 gas transition behavior.
+ */
+function IsGasAreaSurvivor(player: mod.Player): boolean {
+    if (!Helpers.HasValidObjId(player)) return false;
+    if (SafeIsAISoldier(player)) return false;
+    return mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(SURVIVOR_TEAM);
+}
+
+function IsPlayerInsideGasArea(playerObjId: number): boolean {
+    // Inverse logic: inside 901 trigger means outside gas.
+    return !VL7_TRIGGER_INSIDE_PLAYER_IDS.has(playerObjId);
+}
+
+function EnsureVL7TransitionOverlay(player: mod.Player): mod.UIWidget | undefined {
+    if (!Helpers.HasValidObjId(player)) return undefined;
+    const playerObjId = mod.GetObjId(player);
+    const existingOverlay = VL7_TRANSITION_OVERLAY_BY_PLAYER.get(playerObjId);
+    if (existingOverlay) {
+        return existingOverlay;
+    }
+
+    const componentName = `vl7_transition_overlay_${playerObjId}`;
+    mod.AddUIContainer(
+        componentName,
+        mod.CreateVector(0, 0, 0),
+        mod.CreateVector(3840, 1080, 0),
+        mod.UIAnchor.Center,
+        player,
+    );
+
+    const overlay = mod.FindUIWidgetWithName(componentName) as mod.UIWidget | undefined;
+    if (!overlay) return undefined;
+
+    mod.SetUIWidgetBgFill(overlay, mod.UIBgFill.Solid);
+    mod.SetUIWidgetBgColor(overlay, UI.blackColor);
+    mod.SetUIWidgetBgAlpha(overlay, 0);
+    mod.SetUIWidgetDepth(overlay, mod.UIDepth.AboveGameUI);
+    mod.SetUIWidgetVisible(overlay, false);
+    VL7_TRANSITION_OVERLAY_BY_PLAYER.set(playerObjId, overlay);
+    return overlay;
+}
+
+async function FadeVL7TransitionOverlay(
+    player: mod.Player,
+    disableScreenEffectAtSeconds?: number,
+): Promise<void> {
+    if (!Helpers.HasValidObjId(player)) return;
+    const playerObjId = mod.GetObjId(player);
+    const overlay = EnsureVL7TransitionOverlay(player);
+    if (!overlay) return;
+    const hasDisableTiming = disableScreenEffectAtSeconds !== undefined;
+    let hasAppliedDelayedDisable = !hasDisableTiming;
+
+    const overlayToken = ++VL7_TRANSITION_OVERLAY_TOKEN_COUNTER;
+    VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.set(playerObjId, overlayToken);
+
+    mod.SetUIWidgetBgFill(overlay, mod.UIBgFill.Solid);
+    mod.SetUIWidgetBgColor(overlay, UI.blackColor);
+    mod.SetUIWidgetBgAlpha(overlay, VL7_TRANSITION_OVERLAY_ALPHA);
+    mod.SetUIWidgetDepth(overlay, mod.UIDepth.AboveGameUI);
+    mod.SetUIWidgetVisible(overlay, true);
+
+    const steps = Math.max(
+        1,
+        Math.ceil(VL7_TRANSITION_OVERLAY_FADE_SECONDS / VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS),
+    );
+
+    for (let i = 1; i <= steps; i++) {
+        if (VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.get(playerObjId) !== overlayToken) {
+            return;
+        }
+
+        if (!hasAppliedDelayedDisable) {
+            const elapsedSeconds = (i / steps) * VL7_TRANSITION_OVERLAY_FADE_SECONDS;
+            if (elapsedSeconds >= (disableScreenEffectAtSeconds as number)) {
+                mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
+                hasAppliedDelayedDisable = true;
+            }
+        }
+
+        const alpha = VL7_TRANSITION_OVERLAY_ALPHA * (1 - (i / steps));
+        mod.SetUIWidgetBgAlpha(overlay, alpha);
+        await mod.Wait(VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS);
+    }
+
+    if (VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.get(playerObjId) === overlayToken) {
+        if (!hasAppliedDelayedDisable) {
+            mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
+        }
+        mod.SetUIWidgetBgAlpha(overlay, 0);
+        mod.SetUIWidgetVisible(overlay, false);
+    }
+}
+
+function SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId: number, spawnPosition: mod.Vector): mod.VL7Cloud | undefined {
+    const vl7Cloud = mod.SpawnObject(
+        mod.RuntimeSpawn_Common.VL7Cloud,
+        spawnPosition,
+        ZERO_VEC,
+        mod.CreateVector(VL7_TRANSITION_CLOUD_SCALE, VL7_TRANSITION_CLOUD_SCALE, VL7_TRANSITION_CLOUD_SCALE),
+    ) as mod.VL7Cloud;
+
+    if (mod.GetObjId(vl7Cloud) < 0) {
+        console.log(`SpawnVL7TransitionCloudForPlayerAtPosition | Spawn failed for Player(${playerObjId}).`);
+        return undefined;
+    }
+
+    VL7_TRANSITION_CLOUD_BY_PLAYER.set(playerObjId, vl7Cloud);
+    mod.SetVL7CloudEffects(vl7Cloud, true, false, true);
+    return vl7Cloud;
+}
+
+function ReleaseVL7TransitionCloudForPlayer(playerObjId: number): void {
+    const runtimeCloud = VL7_TRANSITION_CLOUD_BY_PLAYER.get(playerObjId);
+    if (!runtimeCloud) return;
+
+    VL7_TRANSITION_CLOUD_BY_PLAYER.delete(playerObjId);
+
+    try {
+        mod.SetVL7CloudEffects(runtimeCloud, false, false, false);
+    } catch {
+        // Best-effort effect cleanup.
+    }
+
+    try {
+        mod.UnspawnObject(runtimeCloud);
+    } catch {
+        // Best-effort object cleanup.
+    }
+}
+
+function RespawnVL7TransitionCloudForPlayerAtPosition(playerObjId: number, spawnPosition: mod.Vector): mod.VL7Cloud | undefined {
+    ReleaseVL7TransitionCloudForPlayer(playerObjId);
+    return SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId, spawnPosition);
+}
+
+function StopVL7TransitionCloudFollow(playerObjId: number): void {
+    VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.delete(playerObjId);
+    ReleaseVL7TransitionCloudForPlayer(playerObjId);
+}
+
+async function StartVL7TransitionCloudFollow(player: mod.Player): Promise<void> {
+    if (!IsGasAreaSurvivor(player)) return;
+
+    const playerObjId = mod.GetObjId(player);
+    StopVL7TransitionCloudFollow(playerObjId);
+
+    const loopToken = ++VL7_TRANSITION_CLOUD_LOOP_TOKEN_COUNTER;
+    VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.set(playerObjId, loopToken);
+
+    while (true) {
+        if (VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.get(playerObjId) !== loopToken) break;
+        if (!IsGasAreaSurvivor(player)) break;
+        if (!VL7_TRIGGER_INSIDE_PLAYER_IDS.has(playerObjId)) break;
+
+        const playerEyePosition = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const cloudRef = VL7_TRANSITION_CLOUD_RESPAWN_EACH_TICK
+            ? RespawnVL7TransitionCloudForPlayerAtPosition(playerObjId, playerEyePosition)
+            : SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId, playerEyePosition);
+
+        if (!cloudRef) {
+            console.log(`StartVL7TransitionCloudFollow | Lost cloud ref for Player(${playerObjId}).`);
+            break;
+        }
+
+        await mod.Wait(VL7_TRANSITION_CLOUD_BIND_SECONDS);
+    }
+
+    if (VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.get(playerObjId) === loopToken) {
+        VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.delete(playerObjId);
+    }
+    ReleaseVL7TransitionCloudForPlayer(playerObjId);
+}
+
+function CleanupVL7TransitionState(playerObjId: number): void {
+    VL7_TRIGGER_INSIDE_PLAYER_IDS.delete(playerObjId);
+    StopVL7TransitionCloudFollow(playerObjId);
+    VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.delete(playerObjId);
+
+    const overlay = VL7_TRANSITION_OVERLAY_BY_PLAYER.get(playerObjId);
+    if (overlay) {
+        VL7_TRANSITION_OVERLAY_BY_PLAYER.delete(playerObjId);
+        try {
+            mod.DeleteUIWidget(overlay);
+        } catch {
+            // Best-effort widget cleanup.
+        }
+    }
+}
+
+/**
+ * Plays the gasp SFX and performs a quick black overlay fade while toggling survivor VL7 effect.
+ */
+async function applyVL7TransitionEffect(player: mod.Player, enableVL7: boolean): Promise<void> {
+    if (!Helpers.HasValidObjId(player)) return;
+    Helpers.PlaySoundFX(SFX_VL7_TRANSITION_GASP, 1, player);
+
+    if (enableVL7) {
+        mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
+        await FadeVL7TransitionOverlay(player);
+        return;
+    }
+
+    await FadeVL7TransitionOverlay(player, VL7_TRANSITION_DISABLE_OVERLAP_SECONDS);
+}
+
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
     const playersInVehicle = ConvertArray(mod.GetAllPlayersInVehicle(eventVehicle)) as mod.Player[];
     console.log(`OnPlayerEnterVehicle | Player(${mod.GetObjId(eventPlayer)}) attempted to enter a Vehicle(${mod.GetObjId(eventVehicle)})`);
@@ -11058,8 +11678,8 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
         playerProfile.invehicle = true;
     }
     playerProfile?.loadoutDisplayBottom?.Hide();
-    if (playerProfile && !playerProfile.isInfectedTeam) {
-        mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.VL7, false);
+    if (playerProfile && !playerProfile.isAI) {
+        GameHandler.SyncSandstormScreenEffectForPlayer(eventPlayer);
     }
     // attempting to use the mod APIs to fetch players
     for (const player of playersInVehicle) {
@@ -11078,15 +11698,15 @@ export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.V
         playerProfile.invehicle = false;
     }
     playerProfile?.loadoutDisplayBottom?.Show();
-    if (playerProfile && !playerProfile.isInfectedTeam) {
-        mod.EnableScreenEffect(eventPlayer, mod.ScreenEffects.VL7, true);
+    if (playerProfile && !playerProfile.isAI) {
+        GameHandler.SyncSandstormScreenEffectForPlayer(eventPlayer);
     }
 }
 
 async function CleanupVehicleWithDamage(vehicle: mod.Vehicle, delaySeconds: number) {
     await mod.Wait(delaySeconds);
     try {
-        mod.DealDamage(vehicle, 99999);
+        mod.DealDamage(vehicle, 1000);
     } catch {
         try { mod.UnspawnObject(vehicle); } catch { }
     }
@@ -11097,7 +11717,7 @@ async function CleanupVehicleUnspawn(vehicle: mod.Vehicle, delaySeconds: number)
     try {
         try { mod.UnspawnObject(vehicle); } catch { }
     } catch {
-        mod.DealDamage(vehicle, 99999);
+        mod.DealDamage(vehicle, 1000);
     }
 }
 
@@ -11373,9 +11993,8 @@ export async function OnGameModeStarted() {
         ROUND_DURATION = 180;
         GAME_ROUND_LIMIT = 6;
     }
+    GameHandler.StartSandstormTickLoop();
     SpawnTeamVOSoundsAtHQ();
-    // mod.LoadMusic(mod.MusicPackages.Core);
-    // mod.SetMusicParam(mod.MusicParams.Core_Amplitude, 1.8);
 
     gameStateMessageToast.close();
     survivorCountNotificationToast.close();
