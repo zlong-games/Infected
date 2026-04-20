@@ -321,7 +321,7 @@ const SANDSTORM_WARNING_SFX_ID = 2601;
 const SANDSTORM_WARNING_SFX_ATTENUATION = 70;
 const SANDSTORM_WIND_LOOP_SFX_ID = 2602;
 const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 100;
-const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605];
+const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605, 2606, 2607, 2608];
 const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 100;
 const SANDSTORM_LOOP_PRE_VL7_LEAD_SECONDS = 10;
 const SANDSTORM_LOOP_PRE_VL7_FADE_SECONDS = 3;
@@ -5150,7 +5150,7 @@ class GameHandler {
         { id: 1545, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1546, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1547, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
-        { id: 1548, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        // { id: 1548, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1549, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1550, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1551, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
@@ -5159,9 +5159,9 @@ class GameHandler {
         { id: 1554, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1555, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1556, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
-        { id: 1557, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
-        { id: 1558, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
-        { id: 1559, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        // { id: 1557, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        // { id: 1558, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        // { id: 1559, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1560, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1561, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1562, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
@@ -5195,6 +5195,10 @@ class GameHandler {
         { id: 1590, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1591, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1592, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
+        { id: 1601, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1602, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1603, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1604, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
     ];
 
     static sand2_Sfx = [
@@ -5533,7 +5537,7 @@ class GameHandler {
     static SetSandstormWhiteSmokeVfxEnabled(enable: boolean): void {
         if (CURRENT_MAP !== MapNames.SAND2) return;
         for (const vfxEntry of GameHandler.sand2_Vfx) {
-            if (vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L) continue;
+            if (vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L && vfxEntry.object !== mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand) continue;
             try {
                 mod.EnableVFX(mod.GetVFX(vfxEntry.id), enable);
             } catch {
