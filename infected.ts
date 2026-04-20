@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.04.15";
+const VERSION = "1.05.00";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -102,14 +102,14 @@ const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Comm
 const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_EOM_ReinforcementCardReveal_OneShot2D;
 const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_FieldUpgrade_Main_OneShot2D;
 const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Notification_ToasterPopUp_OneShot2D;
-const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_Standoff_ZoneExit_OneShot2D;
+const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Movement_CameraNoise_OneShot2D;
 const VL7_TRANSITION_OVERLAY_ALPHA = 0.9;
 const VL7_TRANSITION_OVERLAY_FADE_SECONDS = 3;
 const VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS = 0.02;
 const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0.35;
-const VL7_TRANSITION_CLOUD_SCALE = 0.2;
-const VL7_TRANSITION_CLOUD_BIND_SECONDS = 0.05;
-const VL7_TRANSITION_CLOUD_RESPAWN_EACH_TICK = true;
+const VL7_TRANSITION_DISTORTION_LEAD_SECONDS = 1;
+const VL7_TRANSITION_DISTORTION_TRAIL_SECONDS = 0.2;
+const VL7_TRANSITION_DISTORTION_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Drone_OutOfRange_Distortion;
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
@@ -173,12 +173,11 @@ const ALPHA_BUFF_STRING_KEYS_NO_LEAP = [
     "alpha_buff_damage_reduction",
 ] as const;
 
-const VL7_TRIGGER_INSIDE_PLAYER_IDS = new Set<number>();
-const VL7_TRANSITION_CLOUD_BY_PLAYER = new Map<number, mod.VL7Cloud>();
-const VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER = new Map<number, number>();
+const VL7_TRANSITION_DISTORTION_BY_PLAYER = new Map<number, mod.VFX>();
+const VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER = new Map<number, number>();
 const VL7_TRANSITION_OVERLAY_BY_PLAYER = new Map<number, mod.UIWidget>();
 const VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER = new Map<number, number>();
-let VL7_TRANSITION_CLOUD_LOOP_TOKEN_COUNTER = 0;
+let VL7_TRANSITION_DISTORTION_TOKEN_COUNTER = 0;
 let VL7_TRANSITION_OVERLAY_TOKEN_COUNTER = 0;
 
 interface Vector3 {
@@ -324,7 +323,13 @@ const SANDSTORM_WIND_LOOP_SFX_ID = 2602;
 const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 100;
 const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605];
 const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 100;
-const SANDSTORM_LOOP_SFX_FADE_SECONDS = 2;
+const SANDSTORM_LOOP_PRE_VL7_LEAD_SECONDS = 10;
+const SANDSTORM_LOOP_PRE_VL7_FADE_SECONDS = 3;
+const SANDSTORM_LOOP_PRE_DISABLE_FADE_LEAD_SECONDS = 10;
+// Runtime enum only exposes the soldier wind loop as a 3D asset; we play it per-player for local mix.
+const SANDSTORM_SOLDIER_WIND_2D_SFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Movement_Wind_SimpleLoop3D;
+const SANDSTORM_SOLDIER_WIND_2D_AMPLITUDE = 0.8;
+const SANDSTORM_LOOP_SFX_FADE_SECONDS = 3;
 const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
 const SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA = 0.15;
 
@@ -2089,7 +2094,7 @@ class UI {
         const widget = mod.FindUIWidgetWithName(componentName) as mod.UIWidget;
         mod.SetUIWidgetBgFill(widget, mod.UIBgFill.Solid);
         mod.SetUIWidgetBgColor(widget, UI.infectedNightGreen);
-        mod.SetUIWidgetBgAlpha(widget, 0.8);
+        mod.SetUIWidgetBgAlpha(widget, 0.5);
         mod.SetUIWidgetDepth(widget, mod.UIDepth.BelowGameUI);
         mod.SetUIWidgetVisible(widget, false);
         return widget;
@@ -4080,6 +4085,8 @@ class PlayerProfile {
             }
         }
 
+        GameHandler.SyncSandstormSoldierWindSfxForPlayer(player);
+
         if (GameHandler.gameState !== GameState.EndOfRound) {
             console.log(`CustomOnPlayerDeployed | Adding PlayerProfile(${playerProfile.playerID}) to _deployedPlayers Map`);
             PlayerProfile._deployedPlayers.set(playerProfile.playerID, playerProfile);
@@ -5129,6 +5136,9 @@ class GameHandler {
         { id: 1502, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_Black_L },
         { id: 1503, object: mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl },
         { id: 1504, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
+        { id: 1505, object: mod.RuntimeSpawn_Common.FX_BASE_Fire_M },
+        { id: 1506, object: mod.RuntimeSpawn_Common.FX_BASE_Fire_M_NoSmoke },
+        { id: 1507, object: mod.RuntimeSpawn_Common.FX_BASE_Fire_L },
         { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
         { id: 1513, object: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_A },
@@ -5281,7 +5291,12 @@ class GameHandler {
     static sandstormWarningSfx?: mod.SFX;
     static sandstormWindLoopSfx?: mod.SFX;
     static sandstormFireLoopSfx: mod.SFX[] = [];
+    static sandstormSoldierWindSfx?: mod.SFX;
+    static sandstormSoldierWindTargets: Map<number, mod.Player> = new Map();
     static sandstormLoopFadeToken: number = 0;
+    static sandstormFireLoopFadeInToken: number = 0;
+    static sandstormFireLoopPreFadeStarted: boolean = false;
+    static sandstormLoopPreDisableFadeStarted: boolean = false;
     static sandstormLoopSfxMovedDeltaByObjId: Map<number, Vector3> = new Map();
     static sandstormTickLoopStarted: boolean = false;
 
@@ -5527,18 +5542,185 @@ class GameHandler {
         }
     }
 
-    static TryPlaySandstormSfxById(sfxId: number, attenuation: number): mod.SFX | undefined {
+    static TryPlaySandstormSfxById(sfxId: number, attenuation: number, amplitude: number = 1): mod.SFX | undefined {
         if (sfxId <= 0) return undefined;
         try {
             const sfx = mod.GetSFX(sfxId);
             if (mod.GetObjId(sfx) < 0) return undefined;
             const sfxPos = mod.GetObjectPosition(sfx);
-            mod.SetSoundAmplitude(sfx, 1);
-            mod.PlaySound(sfx, 1, sfxPos, attenuation);
+            mod.SetSoundAmplitude(sfx, amplitude);
+            mod.PlaySound(sfx, amplitude, sfxPos, attenuation);
             return sfx;
         } catch {
             return undefined;
         }
+    }
+
+    static EnsureSandstormWindLoopSfx(initialAmplitude: number = 1): void {
+        const existingWindLoop = GameHandler.sandstormWindLoopSfx;
+        if (existingWindLoop && mod.GetObjId(existingWindLoop) > -1) {
+            return;
+        }
+
+        const windLoopSfx = GameHandler.TryPlaySandstormSfxById(
+            SANDSTORM_WIND_LOOP_SFX_ID,
+            SANDSTORM_WIND_LOOP_SFX_ATTENUATION,
+            initialAmplitude,
+        );
+
+        if (windLoopSfx) {
+            GameHandler.sandstormWindLoopSfx = windLoopSfx;
+        }
+    }
+
+    static EnsureSandstormFireLoopSfx(initialAmplitude: number = 1): void {
+        GameHandler.sandstormFireLoopSfx = GameHandler.sandstormFireLoopSfx.filter((fireLoopSfx) => {
+            try {
+                return mod.GetObjId(fireLoopSfx) > -1;
+            } catch {
+                return false;
+            }
+        });
+
+        if (GameHandler.sandstormFireLoopSfx.length > 0) return;
+
+        for (const fireLoopSfxId of SANDSTORM_FIRE_LOOP_SFX_IDS) {
+            const fireLoopSfx = GameHandler.TryPlaySandstormSfxById(
+                fireLoopSfxId,
+                SANDSTORM_FIRE_LOOP_SFX_ATTENUATION,
+                initialAmplitude,
+            );
+            if (!fireLoopSfx) continue;
+            GameHandler.sandstormFireLoopSfx.push(fireLoopSfx);
+        }
+    }
+
+    static EnsureSandstormLoopSfx(initialAmplitude: number = 1): void {
+        GameHandler.EnsureSandstormWindLoopSfx(initialAmplitude);
+        GameHandler.EnsureSandstormFireLoopSfx(initialAmplitude);
+    }
+
+    static SetSandstormFireLoopAmplitude(amplitude: number): void {
+        const windLoopSfx = GameHandler.sandstormWindLoopSfx;
+        if (windLoopSfx && mod.GetObjId(windLoopSfx) > -1) {
+            try {
+                mod.SetSoundAmplitude(windLoopSfx, amplitude);
+            } catch {
+                // Best-effort amplitude update.
+            }
+        }
+
+        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
+            try {
+                mod.SetSoundAmplitude(fireLoopSfx, amplitude);
+            } catch {
+                // Best-effort amplitude update.
+            }
+        }
+    }
+
+    static async FadeInSandstormFireLoopSfxBeforeVl7(fadeToken: number): Promise<void> {
+        GameHandler.EnsureSandstormLoopSfx(0);
+        if (GameHandler.GetActiveSandstormLoopSfx().length === 0) return;
+
+        const steps = Math.max(
+            1,
+            Math.ceil(SANDSTORM_LOOP_PRE_VL7_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
+        );
+
+        for (let i = 1; i <= steps; i++) {
+            if (fadeToken !== GameHandler.sandstormFireLoopFadeInToken) return;
+            if (GameHandler.sandstormActive) return;
+
+            const amplitude = i / steps;
+            GameHandler.SetSandstormFireLoopAmplitude(amplitude);
+            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
+        }
+    }
+
+    static EnsureSandstormSoldierWindSfx(): mod.SFX | undefined {
+        if (GameHandler.sandstormSoldierWindSfx && mod.GetObjId(GameHandler.sandstormSoldierWindSfx) > -1) {
+            return GameHandler.sandstormSoldierWindSfx;
+        }
+
+        try {
+            const sfx = mod.SpawnObject(
+                SANDSTORM_SOLDIER_WIND_2D_SFX,
+                POSITION_HQ1,
+                ZERO_VEC,
+            ) as mod.SFX;
+            if (mod.GetObjId(sfx) < 0) return undefined;
+            GameHandler.sandstormSoldierWindSfx = sfx;
+            return sfx;
+        } catch {
+            GameHandler.sandstormSoldierWindSfx = undefined;
+            return undefined;
+        }
+    }
+
+    static StopSandstormSoldierWindSfxForPlayerObjId(playerObjId: number): void {
+        const trackedPlayer = GameHandler.sandstormSoldierWindTargets.get(playerObjId);
+        if (!trackedPlayer) return;
+
+        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
+        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1 && Helpers.HasValidObjId(trackedPlayer)) {
+            try { mod.StopSound(soldierWindSfx, trackedPlayer); } catch { }
+        }
+
+        GameHandler.sandstormSoldierWindTargets.delete(playerObjId);
+    }
+
+    static SyncSandstormSoldierWindSfxForPlayer(player: mod.Player): void {
+        if (!Helpers.HasValidObjId(player)) return;
+        if (SafeIsAISoldier(player)) return;
+
+        const playerObjId = mod.GetObjId(player);
+        if (playerObjId < 0) return;
+
+        if (!GameHandler.sandstormActive) {
+            GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
+            return;
+        }
+
+        const soldierWindSfx = GameHandler.EnsureSandstormSoldierWindSfx();
+        if (!soldierWindSfx) return;
+        if (GameHandler.sandstormSoldierWindTargets.has(playerObjId)) return;
+
+        try {
+            mod.PlaySound(soldierWindSfx, SANDSTORM_SOLDIER_WIND_2D_AMPLITUDE, player);
+            GameHandler.sandstormSoldierWindTargets.set(playerObjId, player);
+        } catch {
+            // Best-effort local wind loop.
+        }
+    }
+
+    static SyncSandstormSoldierWindSfxForAllPlayers(): void {
+        for (const pp of PlayerProfile._allPlayerProfiles) {
+            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
+            GameHandler.SyncSandstormSoldierWindSfxForPlayer(pp.player);
+        }
+
+        for (const [trackedObjId, trackedPlayer] of GameHandler.sandstormSoldierWindTargets) {
+            if (!Helpers.HasValidObjId(trackedPlayer) || mod.GetObjId(trackedPlayer) !== trackedObjId) {
+                GameHandler.sandstormSoldierWindTargets.delete(trackedObjId);
+            }
+        }
+    }
+
+    static StopSandstormSoldierWindSfx(): void {
+        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
+        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
+            for (const [, targetPlayer] of GameHandler.sandstormSoldierWindTargets) {
+                if (!Helpers.HasValidObjId(targetPlayer)) continue;
+                try { mod.StopSound(soldierWindSfx, targetPlayer); } catch { }
+            }
+
+            try { mod.StopSound(soldierWindSfx); } catch { }
+            try { mod.UnspawnObject(soldierWindSfx); } catch { }
+        }
+
+        GameHandler.sandstormSoldierWindSfx = undefined;
+        GameHandler.sandstormSoldierWindTargets.clear();
     }
 
     static GetActiveSandstormLoopSfx(): mod.SFX[] {
@@ -5601,9 +5783,15 @@ class GameHandler {
 
     static async FadeOutSandstormLoopSfxAndStop(fadeToken: number): Promise<void> {
         const loopSfx = GameHandler.GetActiveSandstormLoopSfx();
-        if (loopSfx.length === 0) {
+        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
+        const soldierWindTargets = Array.from(GameHandler.sandstormSoldierWindTargets.values())
+            .filter((targetPlayer) => Helpers.HasValidObjId(targetPlayer));
+
+        if (loopSfx.length === 0 && !soldierWindSfx) {
             GameHandler.sandstormWindLoopSfx = undefined;
             GameHandler.sandstormFireLoopSfx = [];
+            GameHandler.sandstormSoldierWindSfx = undefined;
+            GameHandler.sandstormSoldierWindTargets.clear();
             GameHandler.RestoreSandstormLoopSfxMovedOffsets();
             return;
         }
@@ -5625,6 +5813,16 @@ class GameHandler {
                 }
             }
 
+            if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
+                for (const targetPlayer of soldierWindTargets) {
+                    try {
+                        mod.SetSoundAmplitude(soldierWindSfx, amplitude, targetPlayer);
+                    } catch {
+                        // Best-effort fade.
+                    }
+                }
+            }
+
             await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
         }
 
@@ -5638,13 +5836,26 @@ class GameHandler {
             }
         }
 
+        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
+            for (const targetPlayer of soldierWindTargets) {
+                try { mod.StopSound(soldierWindSfx, targetPlayer); } catch { }
+            }
+            try { mod.StopSound(soldierWindSfx); } catch { }
+            try { mod.UnspawnObject(soldierWindSfx); } catch { }
+        }
+
         GameHandler.sandstormWindLoopSfx = undefined;
         GameHandler.sandstormFireLoopSfx = [];
+        GameHandler.sandstormSoldierWindSfx = undefined;
+        GameHandler.sandstormSoldierWindTargets.clear();
         GameHandler.RestoreSandstormLoopSfxMovedOffsets();
     }
 
     static StopSandstormLoopSfx(): void {
         GameHandler.sandstormLoopFadeToken++;
+        GameHandler.sandstormFireLoopFadeInToken++;
+        GameHandler.sandstormFireLoopPreFadeStarted = false;
+        GameHandler.sandstormLoopPreDisableFadeStarted = false;
         GameHandler.StopSandstormWarningSfx();
 
         if (GameHandler.sandstormWindLoopSfx) {
@@ -5656,6 +5867,7 @@ class GameHandler {
             try { mod.StopSound(fireLoopSfx); } catch { }
         }
         GameHandler.sandstormFireLoopSfx = [];
+        GameHandler.StopSandstormSoldierWindSfx();
         GameHandler.RestoreSandstormLoopSfxMovedOffsets();
     }
 
@@ -5717,6 +5929,9 @@ class GameHandler {
         if (GameHandler.sandstormHasAppearedThisRound) return;
 
         GameHandler.sandstormHasAppearedThisRound = true;
+        GameHandler.sandstormFireLoopFadeInToken++;
+        GameHandler.sandstormFireLoopPreFadeStarted = false;
+        GameHandler.sandstormLoopPreDisableFadeStarted = false;
         GameHandler.sandstormWarningSecondsRemaining = SANDSTORM_WARNING_LEAD_SECONDS;
         GameHandler.SetSandstormWhiteSmokeVfxEnabled(true);
         GameHandler.sandstormWarningSfx = GameHandler.TryPlaySandstormSfxById(
@@ -5732,24 +5947,16 @@ class GameHandler {
         GameHandler.StopSandstormWarningSfx();
         GameHandler.sandstormActive = true;
         GameHandler.sandstormLoopFadeToken++;
+        GameHandler.sandstormFireLoopFadeInToken++;
+        GameHandler.sandstormFireLoopPreFadeStarted = false;
+        GameHandler.sandstormLoopPreDisableFadeStarted = false;
         GameHandler.sandstormActiveSecondsRemaining = Helpers.GetRandomSpawnFromRange(
             SANDSTORM_DURATION_MIN_SECONDS,
             SANDSTORM_DURATION_MAX_SECONDS,
         );
-        GameHandler.sandstormWindLoopSfx = GameHandler.TryPlaySandstormSfxById(
-            SANDSTORM_WIND_LOOP_SFX_ID,
-            SANDSTORM_WIND_LOOP_SFX_ATTENUATION,
-        );
-        GameHandler.sandstormFireLoopSfx = [];
-        for (const fireLoopSfxId of SANDSTORM_FIRE_LOOP_SFX_IDS) {
-            const fireLoopSfx = GameHandler.TryPlaySandstormSfxById(
-                fireLoopSfxId,
-                SANDSTORM_FIRE_LOOP_SFX_ATTENUATION,
-            );
-            if (fireLoopSfx) {
-                GameHandler.sandstormFireLoopSfx.push(fireLoopSfx);
-            }
-        }
+        GameHandler.EnsureSandstormLoopSfx(1);
+        GameHandler.SetSandstormFireLoopAmplitude(1);
+        GameHandler.SyncSandstormSoldierWindSfxForAllPlayers();
         GameHandler.SyncSandstormScreenEffectForAllPlayers(true);
         console.log(`Sandstorm | Active for ${GameHandler.sandstormActiveSecondsRemaining}s.`);
     }
@@ -5759,8 +5966,11 @@ class GameHandler {
         GameHandler.StopSandstormWarningSfx();
         GameHandler.sandstormActive = false;
         GameHandler.sandstormActiveSecondsRemaining = 0;
-        const fadeToken = ++GameHandler.sandstormLoopFadeToken;
-        void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
+        if (!GameHandler.sandstormLoopPreDisableFadeStarted) {
+            const fadeToken = ++GameHandler.sandstormLoopFadeToken;
+            void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
+        }
+        GameHandler.sandstormLoopPreDisableFadeStarted = false;
         GameHandler.SetSandstormWhiteSmokeVfxEnabled(false);
         GameHandler.SyncSandstormScreenEffectForAllPlayers(false, true);
         console.log('Sandstorm | Cleared.');
@@ -5771,6 +5981,17 @@ class GameHandler {
 
         if (GameHandler.sandstormWarningSecondsRemaining > 0) {
             GameHandler.sandstormWarningSecondsRemaining--;
+
+            if (
+                !GameHandler.sandstormFireLoopPreFadeStarted
+                && GameHandler.sandstormWarningSecondsRemaining > 0
+                && GameHandler.sandstormWarningSecondsRemaining <= SANDSTORM_LOOP_PRE_VL7_LEAD_SECONDS
+            ) {
+                GameHandler.sandstormFireLoopPreFadeStarted = true;
+                const fadeToken = ++GameHandler.sandstormFireLoopFadeInToken;
+                void GameHandler.FadeInSandstormFireLoopSfxBeforeVl7(fadeToken);
+            }
+
             if (GameHandler.sandstormWarningSecondsRemaining <= 0) {
                 GameHandler.BeginSandstorm();
             }
@@ -5778,6 +5999,16 @@ class GameHandler {
         }
 
         if (GameHandler.sandstormActive) {
+            if (
+                !GameHandler.sandstormLoopPreDisableFadeStarted
+                && GameHandler.sandstormActiveSecondsRemaining > 0
+                && GameHandler.sandstormActiveSecondsRemaining <= SANDSTORM_LOOP_PRE_DISABLE_FADE_LEAD_SECONDS
+            ) {
+                GameHandler.sandstormLoopPreDisableFadeStarted = true;
+                const fadeToken = ++GameHandler.sandstormLoopFadeToken;
+                void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
+            }
+
             GameHandler.UpdateSandstormLoopSfxDriftTick();
             GameHandler.sandstormActiveSecondsRemaining--;
             if (GameHandler.sandstormActiveSecondsRemaining <= 0) {
@@ -7625,7 +7856,18 @@ function LogBotLifecycle(slot: InfectedBotSlot, stage: string, details?: string)
     console.log(`[BotLifecycle] slot=${slot.slotIndex} bot=${botObjId} stage=${stage} t+${sinceSpawn}${suffix}`);
 }
 
+function EnsureInfectedBotMoveSpeed(slot: InfectedBotSlot, bot: mod.Player, desiredSpeed: mod.MoveSpeed): void {
+    try {
+        mod.AISetMoveSpeed(bot, desiredSpeed);
+        slot.tick.lastMoveSpeed = desiredSpeed;
+    } catch {
+        // Best-effort move-speed command: avoid breaking chase flow if the runtime rejects a write.
+    }
+}
+
 function IssueInfectedBotMove(slot: InfectedBotSlot, bot: mod.Player, destination: mod.Vector, reason: string): void {
+    // Reassert sprint on each movement command to survive runtime behavior resets.
+    EnsureInfectedBotMoveSpeed(slot, bot, mod.MoveSpeed.Sprint);
     mod.AIMoveToBehavior(bot, destination);
     if (!slot.tick.lifecycleFirstMoveIssuedLogged) {
         slot.tick.lifecycleFirstMoveIssuedLogged = true;
@@ -7731,6 +7973,8 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     }
 
     const tick = slot.tick;
+    EnsureInfectedBotMoveSpeed(slot, infectedBot, mod.MoveSpeed.Sprint);
+
     const disableAttacks = INFECTED_AI_HARD_DISABLE_ATTACKS || (BOT_SURVIVAL_TEST_MODE && BOT_SURVIVAL_TEST_DISABLE_ATTACKS);
     if (disableAttacks) {
         SetInfectedBotMeleeAttackEnabled(infectedBot, false);
@@ -7790,11 +8034,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
         tick.lastAreaMoveSpeedMultiplier = undefined;
     }
 
-    const sprintAllowed = mod.GetMatchTimeElapsed() >= 45 ? mod.MoveSpeed.Sprint : mod.MoveSpeed.Run;
     const infectedBotPos = mod.GetSoldierState(infectedBot, mod.SoldierStateVector.GetPosition);
-
-    // mod.AISetMoveSpeed(infectedBot, botProfile?.isAlphaInfected || isTargetInVehicle ? mod.MoveSpeed.Sprint : sprintAllowed);
-    // Keep movement explicit (AIMoveToBehavior reissues) while combat uses gadget start/stop.
 
     // --- Vehicle chase path ---
     if (isTargetInVehicle) {
@@ -10898,6 +11138,8 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
             return;
         }
 
+        EnsureInfectedBotMoveSpeed(slot, eventPlayer, mod.MoveSpeed.Sprint);
+
         const moveFailCount = (slot.tick.moveFailCount ?? 0) + 1;
         LogBotLifecycle(slot, 'OnAIMoveToFailed Called', `count=${moveFailCount}`);
         StopInfectedBotMeleeAttack(slot, eventPlayer);
@@ -10918,6 +11160,7 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
         if (moveFailCount >= 3) {
             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - repeating battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
             mod.AIBattlefieldBehavior(eventPlayer);
+            EnsureInfectedBotMoveSpeed(slot, eventPlayer, mod.MoveSpeed.Sprint);
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS * slot.tick.moveFailCount;
             return;
         }
@@ -11076,6 +11319,7 @@ export async function OnPlayerLeaveGame(playerObjID: number) {
     }
 
     CleanupVL7TransitionState(playerObjID);
+    GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjID);
 
     // Check if this is a dead infected bot's body being cleaned up by the spawner unspawn timer.
     // HandleDeath registers the ObjID here so we start the respawn only after the spawner is free.
@@ -11203,6 +11447,7 @@ export function OnPlayerUndeploy(playerObjId: number) {
     }
 
     CleanupVL7TransitionState(playerObjId);
+    GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
 
     const undeployedProfile = PlayerProfile._allPlayers.get(playerObjId);
     if (BOT_SURVIVAL_TEST_MODE && undeployedProfile && !undeployedProfile.isAI) {
@@ -11220,6 +11465,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     const playerObjId = mod.GetObjId(eventPlayer);
     if (playerObjId > -1) {
         CleanupVL7TransitionState(playerObjId);
+        GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
     }
 
     if (GameHandler.gameState === GameState.EndOfRound) {
@@ -11463,20 +11709,6 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
 
 }
 
-/**
- * True only for human survivors. Used by the inverse-901 gas transition behavior.
- */
-function IsGasAreaSurvivor(player: mod.Player): boolean {
-    if (!Helpers.HasValidObjId(player)) return false;
-    if (SafeIsAISoldier(player)) return false;
-    return mod.GetObjId(mod.GetTeam(player)) === mod.GetObjId(SURVIVOR_TEAM);
-}
-
-function IsPlayerInsideGasArea(playerObjId: number): boolean {
-    // Inverse logic: inside 901 trigger means outside gas.
-    return !VL7_TRIGGER_INSIDE_PLAYER_IDS.has(playerObjId);
-}
-
 function EnsureVL7TransitionOverlay(player: mod.Player): mod.UIWidget | undefined {
     if (!Helpers.HasValidObjId(player)) return undefined;
     const playerObjId = mod.GetObjId(player);
@@ -11558,89 +11790,72 @@ async function FadeVL7TransitionOverlay(
     }
 }
 
-function SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId: number, spawnPosition: mod.Vector): mod.VL7Cloud | undefined {
-    const vl7Cloud = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.VL7Cloud,
-        spawnPosition,
-        ZERO_VEC,
-        mod.CreateVector(VL7_TRANSITION_CLOUD_SCALE, VL7_TRANSITION_CLOUD_SCALE, VL7_TRANSITION_CLOUD_SCALE),
-    ) as mod.VL7Cloud;
+function ReleaseVL7TransitionDistortionForPlayer(playerObjId: number): void {
+    const distortionVfx = VL7_TRANSITION_DISTORTION_BY_PLAYER.get(playerObjId);
+    if (!distortionVfx) return;
 
-    if (mod.GetObjId(vl7Cloud) < 0) {
-        console.log(`SpawnVL7TransitionCloudForPlayerAtPosition | Spawn failed for Player(${playerObjId}).`);
-        return undefined;
-    }
-
-    VL7_TRANSITION_CLOUD_BY_PLAYER.set(playerObjId, vl7Cloud);
-    mod.SetVL7CloudEffects(vl7Cloud, true, false, true);
-    return vl7Cloud;
-}
-
-function ReleaseVL7TransitionCloudForPlayer(playerObjId: number): void {
-    const runtimeCloud = VL7_TRANSITION_CLOUD_BY_PLAYER.get(playerObjId);
-    if (!runtimeCloud) return;
-
-    VL7_TRANSITION_CLOUD_BY_PLAYER.delete(playerObjId);
+    VL7_TRANSITION_DISTORTION_BY_PLAYER.delete(playerObjId);
 
     try {
-        mod.SetVL7CloudEffects(runtimeCloud, false, false, false);
+        mod.EnableVFX(distortionVfx, false);
     } catch {
-        // Best-effort effect cleanup.
+        // Best-effort VFX disable.
     }
 
     try {
-        mod.UnspawnObject(runtimeCloud);
+        mod.UnspawnObject(distortionVfx);
     } catch {
         // Best-effort object cleanup.
     }
 }
 
-function RespawnVL7TransitionCloudForPlayerAtPosition(playerObjId: number, spawnPosition: mod.Vector): mod.VL7Cloud | undefined {
-    ReleaseVL7TransitionCloudForPlayer(playerObjId);
-    return SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId, spawnPosition);
-}
-
-function StopVL7TransitionCloudFollow(playerObjId: number): void {
-    VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.delete(playerObjId);
-    ReleaseVL7TransitionCloudForPlayer(playerObjId);
-}
-
-async function StartVL7TransitionCloudFollow(player: mod.Player): Promise<void> {
-    if (!IsGasAreaSurvivor(player)) return;
+async function BeginVL7TransitionDistortionLead(player: mod.Player): Promise<{ playerObjId: number; token: number } | undefined> {
+    if (!Helpers.HasValidObjId(player)) return undefined;
 
     const playerObjId = mod.GetObjId(player);
-    StopVL7TransitionCloudFollow(playerObjId);
+    const token = ++VL7_TRANSITION_DISTORTION_TOKEN_COUNTER;
+    VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.set(playerObjId, token);
+    ReleaseVL7TransitionDistortionForPlayer(playerObjId);
 
-    const loopToken = ++VL7_TRANSITION_CLOUD_LOOP_TOKEN_COUNTER;
-    VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.set(playerObjId, loopToken);
+    const spawnPosition = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+    const distortionVfx = mod.SpawnObject(
+        VL7_TRANSITION_DISTORTION_VFX,
+        spawnPosition,
+        ZERO_VEC,
+        mod.CreateVector(1, 1, 1),
+    ) as mod.VFX;
 
-    while (true) {
-        if (VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.get(playerObjId) !== loopToken) break;
-        if (!IsGasAreaSurvivor(player)) break;
-        if (!VL7_TRIGGER_INSIDE_PLAYER_IDS.has(playerObjId)) break;
-
-        const playerEyePosition = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
-        const cloudRef = VL7_TRANSITION_CLOUD_RESPAWN_EACH_TICK
-            ? RespawnVL7TransitionCloudForPlayerAtPosition(playerObjId, playerEyePosition)
-            : SpawnVL7TransitionCloudForPlayerAtPosition(playerObjId, playerEyePosition);
-
-        if (!cloudRef) {
-            console.log(`StartVL7TransitionCloudFollow | Lost cloud ref for Player(${playerObjId}).`);
-            break;
+    if (mod.GetObjId(distortionVfx) > -1) {
+        VL7_TRANSITION_DISTORTION_BY_PLAYER.set(playerObjId, distortionVfx);
+        try {
+            mod.EnableVFX(distortionVfx, true);
+        } catch {
+            // Best-effort VFX enable.
         }
-
-        await mod.Wait(VL7_TRANSITION_CLOUD_BIND_SECONDS);
     }
 
-    if (VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.get(playerObjId) === loopToken) {
-        VL7_TRANSITION_CLOUD_LOOP_TOKEN_BY_PLAYER.delete(playerObjId);
+    await mod.Wait(VL7_TRANSITION_DISTORTION_LEAD_SECONDS);
+    if (VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.get(playerObjId) !== token) {
+        return undefined;
     }
-    ReleaseVL7TransitionCloudForPlayer(playerObjId);
+
+    return { playerObjId, token };
+}
+
+function ScheduleVL7TransitionDistortionRelease(playerObjId: number, token: number, delaySeconds: number): void {
+    void (async () => {
+        await mod.Wait(delaySeconds);
+        if (VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.get(playerObjId) !== token) {
+            return;
+        }
+        VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.delete(playerObjId);
+        ReleaseVL7TransitionDistortionForPlayer(playerObjId);
+    })();
 }
 
 function CleanupVL7TransitionState(playerObjId: number): void {
-    VL7_TRIGGER_INSIDE_PLAYER_IDS.delete(playerObjId);
-    StopVL7TransitionCloudFollow(playerObjId);
+    VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.delete(playerObjId);
+    ReleaseVL7TransitionDistortionForPlayer(playerObjId);
     VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.delete(playerObjId);
 
     const overlay = VL7_TRANSITION_OVERLAY_BY_PLAYER.get(playerObjId);
@@ -11655,16 +11870,58 @@ function CleanupVL7TransitionState(playerObjId: number): void {
 }
 
 /**
+ * Lean AI tick: called from OngoingPlayer for AI soldiers only.
+ * Only infected bots run InfectedBotLogicTick; survivor bots run self-managing AIBattlefieldBehavior.
+ */
+function OngoingAI(player: mod.Player, playerObjId: number): void {
+    const slot = InfectedBotSlot.GetByObjID(playerObjId);
+    if (!slot || slot.state !== BotSlotState.Alive) return;
+
+    const now = Date.now() / 1000;
+    if (slot.tick.nextTickAt <= 0) {
+        slot.tick.nextTickAt = now + AI_BOT_SPAWN_TICK_GRACE_SECONDS;
+        return;
+    }
+    if (now < slot.tick.nextTickAt) return;
+    if (!slot.tick.lifecycleFirstOngoingTickLogged) {
+        slot.tick.lifecycleFirstOngoingTickLogged = true;
+        LogBotLifecycle(slot, 'first_ongoing_ai_tick', `behavior=${slot.tick.behavior ?? 'unknown'}`);
+    }
+    slot.tick.nextTickAt = now + AI_BOT_TICK_SECONDS;
+
+    InfectedBotLogicTick(slot);
+}
+
+
+/**
  * Plays the gasp SFX and performs a quick black overlay fade while toggling survivor VL7 effect.
  */
 async function applyVL7TransitionEffect(player: mod.Player, enableVL7: boolean): Promise<void> {
     if (!Helpers.HasValidObjId(player)) return;
     Helpers.PlaySoundFX(SFX_VL7_TRANSITION_GASP, 1, player);
 
+    const distortionPulse = await BeginVL7TransitionDistortionLead(player);
+    if (!Helpers.HasValidObjId(player)) return;
+
     if (enableVL7) {
         mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
+        if (distortionPulse) {
+            ScheduleVL7TransitionDistortionRelease(
+                distortionPulse.playerObjId,
+                distortionPulse.token,
+                VL7_TRANSITION_DISTORTION_TRAIL_SECONDS,
+            );
+        }
         await FadeVL7TransitionOverlay(player);
         return;
+    }
+
+    if (distortionPulse) {
+        ScheduleVL7TransitionDistortionRelease(
+            distortionPulse.playerObjId,
+            distortionPulse.token,
+            VL7_TRANSITION_DISABLE_OVERLAP_SECONDS + VL7_TRANSITION_DISTORTION_TRAIL_SECONDS,
+        );
     }
 
     await FadeVL7TransitionOverlay(player, VL7_TRANSITION_DISABLE_OVERLAP_SECONDS);
@@ -11923,29 +12180,6 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
         tickState.lastLadderAmmo = currentLadderAmmo;
     }
-}
-
-/**
- * Lean AI tick: called from OngoingPlayer for AI soldiers only.
- * Only infected bots run InfectedBotLogicTick; survivor bots run self-managing AIBattlefieldBehavior.
- */
-function OngoingAI(player: mod.Player, playerObjId: number): void {
-    const slot = InfectedBotSlot.GetByObjID(playerObjId);
-    if (!slot || slot.state !== BotSlotState.Alive) return;
-
-    const now = Date.now() / 1000;
-    if (slot.tick.nextTickAt <= 0) {
-        slot.tick.nextTickAt = now + AI_BOT_SPAWN_TICK_GRACE_SECONDS;
-        return;
-    }
-    if (now < slot.tick.nextTickAt) return;
-    if (!slot.tick.lifecycleFirstOngoingTickLogged) {
-        slot.tick.lifecycleFirstOngoingTickLogged = true;
-        LogBotLifecycle(slot, 'first_ongoing_ai_tick', `behavior=${slot.tick.behavior ?? 'unknown'}`);
-    }
-    slot.tick.nextTickAt = now + AI_BOT_TICK_SECONDS;
-
-    InfectedBotLogicTick(slot);
 }
 
 export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
