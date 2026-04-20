@@ -5199,6 +5199,9 @@ class GameHandler {
         { id: 1602, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1603, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1604, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1605, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1606, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1607, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
     ];
 
     static sand2_Sfx = [
@@ -5447,7 +5450,9 @@ class GameHandler {
         });
         if (vfxToActivate.length > 0) {
             for (const vfxEntry of vfxToActivate) {
-                const enableByDefault = vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L;
+                const enableByDefault =
+                    vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L
+                    && vfxEntry.object !== mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand;
                 mod.EnableVFX(mod.GetVFX(vfxEntry.id), enableByDefault);
             }
         }
