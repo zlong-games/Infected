@@ -331,7 +331,6 @@ const SANDSTORM_SOLDIER_WIND_2D_SFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_
 const SANDSTORM_SOLDIER_WIND_2D_AMPLITUDE = 0.8;
 const SANDSTORM_LOOP_SFX_FADE_SECONDS = 3;
 const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
-const SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA = 0.15;
 
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
@@ -4072,20 +4071,18 @@ class PlayerProfile {
         }
         if (!playerProfile.isInfectedTeam) {
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, false);
-            GameHandler.SyncSandstormScreenEffectForPlayer(player);
+            Sandstorm.SyncSandstormScreenEffectForPlayer(player);
             playerProfile.gameCountdownUI?.Close();
         }
 
         if (playerProfile.isInfectedTeam) {
             InitializePlayerEquipment(player, playerProfile);
             mod.EnableScreenEffect(player, mod.ScreenEffects.Stealth, true);
-            GameHandler.SyncSandstormScreenEffectForPlayer(player);
+            Sandstorm.SyncSandstormScreenEffectForPlayer(player);
             if (playerProfile.isAlphaInfected) {
                 ShowAlphaInfectedIndicator(player);
             }
         }
-
-        GameHandler.SyncSandstormSoldierWindSfxForPlayer(player);
 
         if (GameHandler.gameState !== GameState.EndOfRound) {
             console.log(`CustomOnPlayerDeployed | Adding PlayerProfile(${playerProfile.playerID}) to _deployedPlayers Map`);
@@ -5040,6 +5037,457 @@ enum GameState {
     GameOver
 }
 
+class Sandstorm {
+    static sandstormRollTimeRemaining: number = -1;
+    static sandstormRollResolved: boolean = false;
+    static sandstormHasAppearedThisRound: boolean = false;
+    static sandstormWarningSecondsRemaining: number = 0;
+    static sandstormActive: boolean = false;
+    static sandstormActiveSecondsRemaining: number = 0;
+    static sandstormWarningSfx?: mod.SFX;
+    static sandstormWindLoopSfx?: mod.SFX;
+    static sandstormFireLoopSfx: mod.SFX[] = [];
+    static sandstormSoldierWindSfx?: mod.SFX;
+    static sandstormSoldierWindTargets: Map<number, mod.Player> = new Map();
+    static sandstormLoopFadeToken: number = 0;
+    static sandstormFireLoopFadeInToken: number = 0;
+    static sandstormFireLoopPreFadeStarted: boolean = false;
+    static sandstormLoopPreDisableFadeStarted: boolean = false;
+    static sandstormTickLoopStarted: boolean = false;
+
+    static IsSandstormMapEligible(): boolean {
+        return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE;
+    }
+
+    static IsLmsActiveForSandstormChance(): boolean {
+        if (GameHandler.survivorsCount === 1) return true;
+        return PlayerProfile._allPlayerProfiles.some(pp =>
+            !pp.isAI
+            && !pp.isInfectedTeam
+            && pp.isLastManStanding
+            && Helpers.HasValidObjId(pp.player)
+            && SafeIsAlive(pp.player)
+        );
+    }
+
+    static SyncSandstormScreenEffectForPlayer(
+        player: mod.Player,
+        useTransitionOnEnable: boolean = false,
+        useTransitionOnDisable: boolean = false,
+    ): void {
+        if (!Helpers.HasValidObjId(player)) return;
+        if (SafeIsAISoldier(player)) return;
+
+        if (Sandstorm.sandstormActive) {
+            if (useTransitionOnEnable) {
+                void applyVL7TransitionEffect(player, true);
+            } else {
+                mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
+            }
+            return;
+        }
+
+        if (useTransitionOnDisable) {
+            void applyVL7TransitionEffect(player, false);
+            return;
+        }
+
+        mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
+    }
+
+    static SyncSandstormScreenEffectForAllPlayers(
+        useTransitionOnEnable: boolean = false,
+        useTransitionOnDisable: boolean = false,
+    ): void {
+        for (const pp of PlayerProfile._allPlayerProfiles) {
+            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
+            Sandstorm.SyncSandstormScreenEffectForPlayer(pp.player, useTransitionOnEnable, useTransitionOnDisable);
+        }
+    }
+
+    static SetSandstormWhiteSmokeVfxEnabled(enable: boolean): void {
+        if (CURRENT_MAP !== MapNames.SAND2) return;
+        for (const vfxEntry of GameHandler.sand2_Vfx) {
+            if (vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L && vfxEntry.object !== mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand) continue;
+            try {
+                mod.EnableVFX(mod.GetVFX(vfxEntry.id), enable);
+            } catch {
+                // Best-effort VFX toggle; IDs may not exist in all map versions.
+            }
+        }
+    }
+
+    static TryPlaySandstormSfxById(sfxId: number, attenuation: number, amplitude: number = 1): mod.SFX | undefined {
+        if (sfxId <= 0) return undefined;
+        try {
+            const sfx = mod.GetSFX(sfxId);
+            if (mod.GetObjId(sfx) < 0) return undefined;
+            const sfxPos = mod.GetObjectPosition(sfx);
+            mod.SetSoundAmplitude(sfx, amplitude);
+            mod.PlaySound(sfx, amplitude, sfxPos, attenuation);
+            return sfx;
+        } catch {
+            return undefined;
+        }
+    }
+
+    static EnsureSandstormWindLoopSfx(initialAmplitude: number = 1): void {
+        const existingWindLoop = Sandstorm.sandstormWindLoopSfx;
+        if (existingWindLoop && mod.GetObjId(existingWindLoop) > -1) {
+            return;
+        }
+
+        const windLoopSfx = Sandstorm.TryPlaySandstormSfxById(
+            SANDSTORM_WIND_LOOP_SFX_ID,
+            SANDSTORM_WIND_LOOP_SFX_ATTENUATION,
+            initialAmplitude,
+        );
+
+        if (windLoopSfx) {
+            Sandstorm.sandstormWindLoopSfx = windLoopSfx;
+        }
+    }
+
+    static EnsureSandstormFireLoopSfx(initialAmplitude: number = 1): void {
+        Sandstorm.sandstormFireLoopSfx = Sandstorm.sandstormFireLoopSfx.filter((fireLoopSfx) => {
+            try {
+                return mod.GetObjId(fireLoopSfx) > -1;
+            } catch {
+                return false;
+            }
+        });
+
+        if (Sandstorm.sandstormFireLoopSfx.length > 0) return;
+
+        for (const fireLoopSfxId of SANDSTORM_FIRE_LOOP_SFX_IDS) {
+            const fireLoopSfx = Sandstorm.TryPlaySandstormSfxById(
+                fireLoopSfxId,
+                SANDSTORM_FIRE_LOOP_SFX_ATTENUATION,
+                initialAmplitude,
+            );
+            if (!fireLoopSfx) continue;
+            Sandstorm.sandstormFireLoopSfx.push(fireLoopSfx);
+        }
+    }
+
+    static EnsureSandstormLoopSfx(initialAmplitude: number = 1): void {
+        Sandstorm.EnsureSandstormWindLoopSfx(initialAmplitude);
+        Sandstorm.EnsureSandstormFireLoopSfx(initialAmplitude);
+    }
+
+    static SetSandstormFireLoopAmplitude(amplitude: number): void {
+        const windLoopSfx = Sandstorm.sandstormWindLoopSfx;
+        if (windLoopSfx && mod.GetObjId(windLoopSfx) > -1) {
+            try {
+                mod.SetSoundAmplitude(windLoopSfx, amplitude);
+            } catch {
+                // Best-effort amplitude update.
+            }
+        }
+
+        for (const fireLoopSfx of Sandstorm.sandstormFireLoopSfx) {
+            try {
+                mod.SetSoundAmplitude(fireLoopSfx, amplitude);
+            } catch {
+                // Best-effort amplitude update.
+            }
+        }
+    }
+
+    static async FadeInSandstormFireLoopSfxBeforeVl7(fadeToken: number): Promise<void> {
+        Sandstorm.EnsureSandstormLoopSfx(0);
+        if (Sandstorm.GetActiveSandstormLoopSfx().length === 0) return;
+
+        const steps = Math.max(
+            1,
+            Math.ceil(SANDSTORM_LOOP_PRE_VL7_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
+        );
+
+        for (let i = 1; i <= steps; i++) {
+            if (fadeToken !== Sandstorm.sandstormFireLoopFadeInToken) return;
+            if (Sandstorm.sandstormActive) return;
+
+            const amplitude = i / steps;
+            Sandstorm.SetSandstormFireLoopAmplitude(amplitude);
+            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
+        }
+    }
+
+    static GetActiveSandstormLoopSfx(): mod.SFX[] {
+        const loopSfx: mod.SFX[] = [];
+        if (Sandstorm.sandstormWindLoopSfx) {
+            loopSfx.push(Sandstorm.sandstormWindLoopSfx);
+        }
+        for (const fireLoopSfx of Sandstorm.sandstormFireLoopSfx) {
+            loopSfx.push(fireLoopSfx);
+        }
+        return loopSfx.filter((sfx) => mod.GetObjId(sfx) > -1);
+    }
+
+    static StopSandstormWarningSfx(): void {
+        if (!Sandstorm.sandstormWarningSfx) return;
+        try { mod.StopSound(Sandstorm.sandstormWarningSfx); } catch { }
+        Sandstorm.sandstormWarningSfx = undefined;
+    }
+
+    static async FadeOutSandstormLoopSfxAndStop(fadeToken: number): Promise<void> {
+        const loopSfx = Sandstorm.GetActiveSandstormLoopSfx();
+        const soldierWindSfx = Sandstorm.sandstormSoldierWindSfx;
+        const soldierWindTargets = Array.from(Sandstorm.sandstormSoldierWindTargets.values())
+            .filter((targetPlayer) => Helpers.HasValidObjId(targetPlayer));
+
+        if (loopSfx.length === 0 && !soldierWindSfx) {
+            Sandstorm.sandstormWindLoopSfx = undefined;
+            Sandstorm.sandstormFireLoopSfx = [];
+            Sandstorm.sandstormSoldierWindSfx = undefined;
+            Sandstorm.sandstormSoldierWindTargets.clear();
+            return;
+        }
+
+        const steps = Math.max(
+            1,
+            Math.ceil(SANDSTORM_LOOP_SFX_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
+        );
+
+        for (let i = 1; i <= steps; i++) {
+            if (fadeToken !== Sandstorm.sandstormLoopFadeToken) return;
+
+            const amplitude = Math.max(0, 1 - (i / steps));
+            for (const sfx of loopSfx) {
+                try {
+                    mod.SetSoundAmplitude(sfx, amplitude);
+                } catch {
+                    // Best-effort fade.
+                }
+            }
+
+            if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
+                for (const targetPlayer of soldierWindTargets) {
+                    try {
+                        mod.SetSoundAmplitude(soldierWindSfx, amplitude, targetPlayer);
+                    } catch {
+                        // Best-effort fade.
+                    }
+                }
+            }
+
+            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
+        }
+
+        if (fadeToken !== Sandstorm.sandstormLoopFadeToken) return;
+
+        for (const sfx of loopSfx) {
+            try {
+                mod.StopSound(sfx);
+            } catch {
+                // Best-effort stop.
+            }
+        }
+
+        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
+            for (const targetPlayer of soldierWindTargets) {
+                try { mod.StopSound(soldierWindSfx, targetPlayer); } catch { }
+            }
+            try { mod.StopSound(soldierWindSfx); } catch { }
+            try { mod.UnspawnObject(soldierWindSfx); } catch { }
+        }
+
+        Sandstorm.sandstormWindLoopSfx = undefined;
+        Sandstorm.sandstormFireLoopSfx = [];
+        Sandstorm.sandstormSoldierWindSfx = undefined;
+        Sandstorm.sandstormSoldierWindTargets.clear();
+    }
+
+    static StopSandstormLoopSfx(): void {
+        Sandstorm.sandstormLoopFadeToken++;
+        Sandstorm.sandstormFireLoopFadeInToken++;
+        Sandstorm.sandstormFireLoopPreFadeStarted = false;
+        Sandstorm.sandstormLoopPreDisableFadeStarted = false;
+        Sandstorm.StopSandstormWarningSfx();
+
+        if (Sandstorm.sandstormWindLoopSfx) {
+            try { mod.StopSound(Sandstorm.sandstormWindLoopSfx); } catch { }
+            Sandstorm.sandstormWindLoopSfx = undefined;
+        }
+
+        for (const fireLoopSfx of Sandstorm.sandstormFireLoopSfx) {
+            try { mod.StopSound(fireLoopSfx); } catch { }
+        }
+        Sandstorm.sandstormFireLoopSfx = [];
+    }
+
+    static ResetSandstormRoundState(): void {
+        Sandstorm.sandstormRollTimeRemaining = -1;
+        Sandstorm.sandstormRollResolved = true;
+        Sandstorm.sandstormHasAppearedThisRound = false;
+        Sandstorm.sandstormWarningSecondsRemaining = 0;
+        Sandstorm.sandstormActive = false;
+        Sandstorm.sandstormActiveSecondsRemaining = 0;
+        Sandstorm.StopSandstormLoopSfx();
+        Sandstorm.SetSandstormWhiteSmokeVfxEnabled(false);
+        Sandstorm.SyncSandstormScreenEffectForAllPlayers(false);
+    }
+
+    static StartSandstormTickLoop(): void {
+        if (Sandstorm.sandstormTickLoopStarted) return;
+        Sandstorm.sandstormTickLoopStarted = true;
+
+        (async () => {
+            while (GameHandler.gameState !== GameState.GameOver) {
+                Sandstorm.UpdateSandstormEventTick();
+                await mod.Wait(1);
+            }
+            Sandstorm.sandstormTickLoopStarted = false;
+        })();
+    }
+
+    static InitializeSandstormEventForRound(): void {
+        if (!Sandstorm.IsSandstormMapEligible()) {
+            Sandstorm.ResetSandstormRoundState();
+            return;
+        }
+
+        if (Sandstorm.sandstormWarningSecondsRemaining > 0 || Sandstorm.sandstormActive) {
+            Sandstorm.sandstormRollTimeRemaining = -1;
+            Sandstorm.sandstormRollResolved = true;
+            Sandstorm.sandstormHasAppearedThisRound = true;
+            console.log('Sandstorm | Carryover active at round start; skipping new roll this round.');
+            return;
+        }
+
+        const minRemaining = SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS + 1;
+        const maxRemaining = Math.max(minRemaining, GameHandler.roundTimeRemaining - 1);
+        if (maxRemaining <= minRemaining) {
+            Sandstorm.sandstormRollTimeRemaining = -1;
+            Sandstorm.sandstormRollResolved = true;
+            Sandstorm.sandstormHasAppearedThisRound = false;
+            return;
+        }
+
+        Sandstorm.sandstormRollResolved = false;
+        Sandstorm.sandstormHasAppearedThisRound = false;
+        Sandstorm.sandstormRollTimeRemaining = Helpers.GetRandomSpawnFromRange(minRemaining, maxRemaining);
+        console.log(`Sandstorm | Roll scheduled at <=${Sandstorm.sandstormRollTimeRemaining}s remaining.`);
+    }
+
+    static StartSandstormWarning(): void {
+        if (Sandstorm.sandstormHasAppearedThisRound) return;
+
+        Sandstorm.sandstormHasAppearedThisRound = true;
+        Sandstorm.sandstormFireLoopFadeInToken++;
+        Sandstorm.sandstormFireLoopPreFadeStarted = false;
+        Sandstorm.sandstormLoopPreDisableFadeStarted = false;
+        Sandstorm.sandstormWarningSecondsRemaining = SANDSTORM_WARNING_LEAD_SECONDS;
+        Sandstorm.SetSandstormWhiteSmokeVfxEnabled(true);
+        Sandstorm.sandstormWarningSfx = Sandstorm.TryPlaySandstormSfxById(
+            SANDSTORM_WARNING_SFX_ID,
+            SANDSTORM_WARNING_SFX_ATTENUATION,
+        );
+        void GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.sandstorm_warning));
+        console.log(`Sandstorm | Warning started (${SANDSTORM_WARNING_LEAD_SECONDS}s lead).`);
+    }
+
+    static BeginSandstorm(): void {
+        Sandstorm.sandstormWarningSecondsRemaining = 0;
+        Sandstorm.StopSandstormWarningSfx();
+        Sandstorm.sandstormActive = true;
+        Sandstorm.sandstormLoopFadeToken++;
+        Sandstorm.sandstormFireLoopFadeInToken++;
+        Sandstorm.sandstormFireLoopPreFadeStarted = false;
+        Sandstorm.sandstormLoopPreDisableFadeStarted = false;
+        Sandstorm.sandstormActiveSecondsRemaining = Helpers.GetRandomSpawnFromRange(
+            SANDSTORM_DURATION_MIN_SECONDS,
+            SANDSTORM_DURATION_MAX_SECONDS,
+        );
+        Sandstorm.EnsureSandstormLoopSfx(1);
+        Sandstorm.SetSandstormFireLoopAmplitude(1);
+        Sandstorm.SyncSandstormScreenEffectForAllPlayers(true);
+        console.log(`Sandstorm | Active for ${Sandstorm.sandstormActiveSecondsRemaining}s.`);
+    }
+
+    static EndSandstorm(): void {
+        Sandstorm.sandstormWarningSecondsRemaining = 0;
+        Sandstorm.StopSandstormWarningSfx();
+        Sandstorm.sandstormActive = false;
+        Sandstorm.sandstormActiveSecondsRemaining = 0;
+        if (!Sandstorm.sandstormLoopPreDisableFadeStarted) {
+            const fadeToken = ++Sandstorm.sandstormLoopFadeToken;
+            void Sandstorm.FadeOutSandstormLoopSfxAndStop(fadeToken);
+        }
+        Sandstorm.sandstormLoopPreDisableFadeStarted = false;
+        Sandstorm.SetSandstormWhiteSmokeVfxEnabled(false);
+        Sandstorm.SyncSandstormScreenEffectForAllPlayers(false, true);
+        console.log('Sandstorm | Cleared.');
+    }
+
+    static UpdateSandstormEventTick(): void {
+        if (!Sandstorm.IsSandstormMapEligible()) return;
+
+        if (Sandstorm.sandstormWarningSecondsRemaining > 0) {
+            Sandstorm.sandstormWarningSecondsRemaining--;
+
+            if (
+                !Sandstorm.sandstormFireLoopPreFadeStarted
+                && Sandstorm.sandstormWarningSecondsRemaining > 0
+                && Sandstorm.sandstormWarningSecondsRemaining <= SANDSTORM_LOOP_PRE_VL7_LEAD_SECONDS
+            ) {
+                Sandstorm.sandstormFireLoopPreFadeStarted = true;
+                const fadeToken = ++Sandstorm.sandstormFireLoopFadeInToken;
+                void Sandstorm.FadeInSandstormFireLoopSfxBeforeVl7(fadeToken);
+            }
+
+            if (Sandstorm.sandstormWarningSecondsRemaining <= 0) {
+                Sandstorm.BeginSandstorm();
+            }
+            return;
+        }
+
+        if (Sandstorm.sandstormActive) {
+            if (
+                !Sandstorm.sandstormLoopPreDisableFadeStarted
+                && Sandstorm.sandstormActiveSecondsRemaining > 0
+                && Sandstorm.sandstormActiveSecondsRemaining <= SANDSTORM_LOOP_PRE_DISABLE_FADE_LEAD_SECONDS
+            ) {
+                Sandstorm.sandstormLoopPreDisableFadeStarted = true;
+                const fadeToken = ++Sandstorm.sandstormLoopFadeToken;
+                void Sandstorm.FadeOutSandstormLoopSfxAndStop(fadeToken);
+            }
+
+            Sandstorm.sandstormActiveSecondsRemaining--;
+            if (Sandstorm.sandstormActiveSecondsRemaining <= 0) {
+                Sandstorm.EndSandstorm();
+            }
+            return;
+        }
+
+        if (GameHandler.gameState !== GameState.GameRoundIsRunning) return;
+
+        if (Sandstorm.sandstormRollResolved || Sandstorm.sandstormHasAppearedThisRound) return;
+        if (GameHandler.roundTimeRemaining <= SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS) {
+            Sandstorm.sandstormRollResolved = true;
+            console.log('Sandstorm | No roll: round time too low.');
+            return;
+        }
+        if (Sandstorm.sandstormRollTimeRemaining < 0) {
+            Sandstorm.sandstormRollResolved = true;
+            return;
+        }
+        if (GameHandler.roundTimeRemaining > Sandstorm.sandstormRollTimeRemaining) return;
+
+        Sandstorm.sandstormRollResolved = true;
+        const isLms = Sandstorm.IsLmsActiveForSandstormChance();
+        const chance = isLms ? SANDSTORM_CHANCE_LMS : SANDSTORM_CHANCE_DEFAULT;
+        const roll = Math.random();
+        console.log(`Sandstorm | Roll=${roll.toFixed(3)} chance=${chance.toFixed(2)} lms=${isLms}`);
+
+        if (roll <= chance) {
+            Sandstorm.StartSandstormWarning();
+        } else {
+            console.log('Sandstorm | Not triggered this round.');
+        }
+    }
+}
+
 class GameHandler {
     static lmsMusicLoaded: boolean = false;
     static lmsMusicPlaying: boolean = false;
@@ -5202,6 +5650,7 @@ class GameHandler {
         { id: 1605, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1606, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1607, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1608, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
     ];
 
     static sand2_Sfx = [
@@ -5288,24 +5737,6 @@ class GameHandler {
     static infectedSpawnMultiplier: number = 1.0;
     /** True once the parachute spawner pool has been unlocked (first time 2+ survivors survive). */
     static parachuteSpawnersEnabled: boolean = false;
-
-    static sandstormRollTimeRemaining: number = -1;
-    static sandstormRollResolved: boolean = false;
-    static sandstormHasAppearedThisRound: boolean = false;
-    static sandstormWarningSecondsRemaining: number = 0;
-    static sandstormActive: boolean = false;
-    static sandstormActiveSecondsRemaining: number = 0;
-    static sandstormWarningSfx?: mod.SFX;
-    static sandstormWindLoopSfx?: mod.SFX;
-    static sandstormFireLoopSfx: mod.SFX[] = [];
-    static sandstormSoldierWindSfx?: mod.SFX;
-    static sandstormSoldierWindTargets: Map<number, mod.Player> = new Map();
-    static sandstormLoopFadeToken: number = 0;
-    static sandstormFireLoopFadeInToken: number = 0;
-    static sandstormFireLoopPreFadeStarted: boolean = false;
-    static sandstormLoopPreDisableFadeStarted: boolean = false;
-    static sandstormLoopSfxMovedDeltaByObjId: Map<number, Vector3> = new Map();
-    static sandstormTickLoopStarted: boolean = false;
 
     // Recent infected increment events (for detecting accidental double-increments)
     // Each entry: { t: timestamp_ms, source: string, playerID?: number }
@@ -5487,570 +5918,6 @@ class GameHandler {
 
         this.SpawnFX(mapSelection);
         this.EnableSFX(mapSelection);
-    }
-
-    static IsSandstormMapEligible(): boolean {
-        return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE;
-    }
-
-    static IsLmsActiveForSandstormChance(): boolean {
-        if (GameHandler.survivorsCount === 1) return true;
-        return PlayerProfile._allPlayerProfiles.some(pp =>
-            !pp.isAI
-            && !pp.isInfectedTeam
-            && pp.isLastManStanding
-            && Helpers.HasValidObjId(pp.player)
-            && SafeIsAlive(pp.player)
-        );
-    }
-
-    static SyncSandstormScreenEffectForPlayer(
-        player: mod.Player,
-        useTransitionOnEnable: boolean = false,
-        useTransitionOnDisable: boolean = false,
-    ): void {
-        if (!Helpers.HasValidObjId(player)) return;
-        if (SafeIsAISoldier(player)) return;
-
-        if (GameHandler.sandstormActive) {
-            if (useTransitionOnEnable) {
-                void applyVL7TransitionEffect(player, true);
-            } else {
-                mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, true);
-            }
-            return;
-        }
-
-        if (useTransitionOnDisable) {
-            void applyVL7TransitionEffect(player, false);
-            return;
-        }
-
-        mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
-    }
-
-    static SyncSandstormScreenEffectForAllPlayers(
-        useTransitionOnEnable: boolean = false,
-        useTransitionOnDisable: boolean = false,
-    ): void {
-        for (const pp of PlayerProfile._allPlayerProfiles) {
-            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
-            GameHandler.SyncSandstormScreenEffectForPlayer(pp.player, useTransitionOnEnable, useTransitionOnDisable);
-        }
-    }
-
-    static SetSandstormWhiteSmokeVfxEnabled(enable: boolean): void {
-        if (CURRENT_MAP !== MapNames.SAND2) return;
-        for (const vfxEntry of GameHandler.sand2_Vfx) {
-            if (vfxEntry.object !== mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L && vfxEntry.object !== mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand) continue;
-            try {
-                mod.EnableVFX(mod.GetVFX(vfxEntry.id), enable);
-            } catch {
-                // Best-effort VFX toggle; IDs may not exist in all map versions.
-            }
-        }
-    }
-
-    static TryPlaySandstormSfxById(sfxId: number, attenuation: number, amplitude: number = 1): mod.SFX | undefined {
-        if (sfxId <= 0) return undefined;
-        try {
-            const sfx = mod.GetSFX(sfxId);
-            if (mod.GetObjId(sfx) < 0) return undefined;
-            const sfxPos = mod.GetObjectPosition(sfx);
-            mod.SetSoundAmplitude(sfx, amplitude);
-            mod.PlaySound(sfx, amplitude, sfxPos, attenuation);
-            return sfx;
-        } catch {
-            return undefined;
-        }
-    }
-
-    static EnsureSandstormWindLoopSfx(initialAmplitude: number = 1): void {
-        const existingWindLoop = GameHandler.sandstormWindLoopSfx;
-        if (existingWindLoop && mod.GetObjId(existingWindLoop) > -1) {
-            return;
-        }
-
-        const windLoopSfx = GameHandler.TryPlaySandstormSfxById(
-            SANDSTORM_WIND_LOOP_SFX_ID,
-            SANDSTORM_WIND_LOOP_SFX_ATTENUATION,
-            initialAmplitude,
-        );
-
-        if (windLoopSfx) {
-            GameHandler.sandstormWindLoopSfx = windLoopSfx;
-        }
-    }
-
-    static EnsureSandstormFireLoopSfx(initialAmplitude: number = 1): void {
-        GameHandler.sandstormFireLoopSfx = GameHandler.sandstormFireLoopSfx.filter((fireLoopSfx) => {
-            try {
-                return mod.GetObjId(fireLoopSfx) > -1;
-            } catch {
-                return false;
-            }
-        });
-
-        if (GameHandler.sandstormFireLoopSfx.length > 0) return;
-
-        for (const fireLoopSfxId of SANDSTORM_FIRE_LOOP_SFX_IDS) {
-            const fireLoopSfx = GameHandler.TryPlaySandstormSfxById(
-                fireLoopSfxId,
-                SANDSTORM_FIRE_LOOP_SFX_ATTENUATION,
-                initialAmplitude,
-            );
-            if (!fireLoopSfx) continue;
-            GameHandler.sandstormFireLoopSfx.push(fireLoopSfx);
-        }
-    }
-
-    static EnsureSandstormLoopSfx(initialAmplitude: number = 1): void {
-        GameHandler.EnsureSandstormWindLoopSfx(initialAmplitude);
-        GameHandler.EnsureSandstormFireLoopSfx(initialAmplitude);
-    }
-
-    static SetSandstormFireLoopAmplitude(amplitude: number): void {
-        const windLoopSfx = GameHandler.sandstormWindLoopSfx;
-        if (windLoopSfx && mod.GetObjId(windLoopSfx) > -1) {
-            try {
-                mod.SetSoundAmplitude(windLoopSfx, amplitude);
-            } catch {
-                // Best-effort amplitude update.
-            }
-        }
-
-        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
-            try {
-                mod.SetSoundAmplitude(fireLoopSfx, amplitude);
-            } catch {
-                // Best-effort amplitude update.
-            }
-        }
-    }
-
-    static async FadeInSandstormFireLoopSfxBeforeVl7(fadeToken: number): Promise<void> {
-        GameHandler.EnsureSandstormLoopSfx(0);
-        if (GameHandler.GetActiveSandstormLoopSfx().length === 0) return;
-
-        const steps = Math.max(
-            1,
-            Math.ceil(SANDSTORM_LOOP_PRE_VL7_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
-        );
-
-        for (let i = 1; i <= steps; i++) {
-            if (fadeToken !== GameHandler.sandstormFireLoopFadeInToken) return;
-            if (GameHandler.sandstormActive) return;
-
-            const amplitude = i / steps;
-            GameHandler.SetSandstormFireLoopAmplitude(amplitude);
-            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
-        }
-    }
-
-    static EnsureSandstormSoldierWindSfx(): mod.SFX | undefined {
-        if (GameHandler.sandstormSoldierWindSfx && mod.GetObjId(GameHandler.sandstormSoldierWindSfx) > -1) {
-            return GameHandler.sandstormSoldierWindSfx;
-        }
-
-        try {
-            const sfx = mod.SpawnObject(
-                SANDSTORM_SOLDIER_WIND_2D_SFX,
-                POSITION_HQ1,
-                ZERO_VEC,
-            ) as mod.SFX;
-            if (mod.GetObjId(sfx) < 0) return undefined;
-            GameHandler.sandstormSoldierWindSfx = sfx;
-            return sfx;
-        } catch {
-            GameHandler.sandstormSoldierWindSfx = undefined;
-            return undefined;
-        }
-    }
-
-    static StopSandstormSoldierWindSfxForPlayerObjId(playerObjId: number): void {
-        const trackedPlayer = GameHandler.sandstormSoldierWindTargets.get(playerObjId);
-        if (!trackedPlayer) return;
-
-        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
-        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1 && Helpers.HasValidObjId(trackedPlayer)) {
-            try { mod.StopSound(soldierWindSfx, trackedPlayer); } catch { }
-        }
-
-        GameHandler.sandstormSoldierWindTargets.delete(playerObjId);
-    }
-
-    static SyncSandstormSoldierWindSfxForPlayer(player: mod.Player): void {
-        if (!Helpers.HasValidObjId(player)) return;
-        if (SafeIsAISoldier(player)) return;
-
-        const playerObjId = mod.GetObjId(player);
-        if (playerObjId < 0) return;
-
-        if (!GameHandler.sandstormActive) {
-            GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
-            return;
-        }
-
-        const soldierWindSfx = GameHandler.EnsureSandstormSoldierWindSfx();
-        if (!soldierWindSfx) return;
-        if (GameHandler.sandstormSoldierWindTargets.has(playerObjId)) return;
-
-        try {
-            mod.PlaySound(soldierWindSfx, SANDSTORM_SOLDIER_WIND_2D_AMPLITUDE, player);
-            GameHandler.sandstormSoldierWindTargets.set(playerObjId, player);
-        } catch {
-            // Best-effort local wind loop.
-        }
-    }
-
-    static SyncSandstormSoldierWindSfxForAllPlayers(): void {
-        for (const pp of PlayerProfile._allPlayerProfiles) {
-            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
-            GameHandler.SyncSandstormSoldierWindSfxForPlayer(pp.player);
-        }
-
-        for (const [trackedObjId, trackedPlayer] of GameHandler.sandstormSoldierWindTargets) {
-            if (!Helpers.HasValidObjId(trackedPlayer) || mod.GetObjId(trackedPlayer) !== trackedObjId) {
-                GameHandler.sandstormSoldierWindTargets.delete(trackedObjId);
-            }
-        }
-    }
-
-    static StopSandstormSoldierWindSfx(): void {
-        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
-        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
-            for (const [, targetPlayer] of GameHandler.sandstormSoldierWindTargets) {
-                if (!Helpers.HasValidObjId(targetPlayer)) continue;
-                try { mod.StopSound(soldierWindSfx, targetPlayer); } catch { }
-            }
-
-            try { mod.StopSound(soldierWindSfx); } catch { }
-            try { mod.UnspawnObject(soldierWindSfx); } catch { }
-        }
-
-        GameHandler.sandstormSoldierWindSfx = undefined;
-        GameHandler.sandstormSoldierWindTargets.clear();
-    }
-
-    static GetActiveSandstormLoopSfx(): mod.SFX[] {
-        const loopSfx: mod.SFX[] = [];
-        if (GameHandler.sandstormWindLoopSfx) {
-            loopSfx.push(GameHandler.sandstormWindLoopSfx);
-        }
-        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
-            loopSfx.push(fireLoopSfx);
-        }
-        return loopSfx.filter((sfx) => mod.GetObjId(sfx) > -1);
-    }
-
-    static StopSandstormWarningSfx(): void {
-        if (!GameHandler.sandstormWarningSfx) return;
-        try { mod.StopSound(GameHandler.sandstormWarningSfx); } catch { }
-        GameHandler.sandstormWarningSfx = undefined;
-    }
-
-    static UpdateSandstormLoopSfxDriftTick(): void {
-        const loopSfx = GameHandler.GetActiveSandstormLoopSfx();
-        if (loopSfx.length === 0) return;
-
-        for (const sfx of loopSfx) {
-            const deltaX = (Math.random() * 2 - 1) * SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA;
-            const deltaZ = (Math.random() * 2 - 1) * SANDSTORM_LOOP_SFX_DRIFT_MAX_DELTA;
-            if (Math.abs(deltaX) < 0.0001 && Math.abs(deltaZ) < 0.0001) continue;
-
-            try {
-                mod.MoveObject(sfx, mod.CreateVector(deltaX, 0, deltaZ));
-                const sfxObjId = mod.GetObjId(sfx);
-                if (sfxObjId < 0) continue;
-                const existing = GameHandler.sandstormLoopSfxMovedDeltaByObjId.get(sfxObjId) ?? { x: 0, y: 0, z: 0 };
-                GameHandler.sandstormLoopSfxMovedDeltaByObjId.set(sfxObjId, {
-                    x: existing.x + deltaX,
-                    y: existing.y,
-                    z: existing.z + deltaZ,
-                });
-            } catch {
-                // Best-effort movement for ambience only.
-            }
-        }
-    }
-
-    static RestoreSandstormLoopSfxMovedOffsets(): void {
-        for (const [sfxObjId, movedDelta] of GameHandler.sandstormLoopSfxMovedDeltaByObjId) {
-            if (!movedDelta) continue;
-            if (Math.abs(movedDelta.x) < 0.0001 && Math.abs(movedDelta.y) < 0.0001 && Math.abs(movedDelta.z) < 0.0001) continue;
-
-            try {
-                const sfx = mod.GetSFX(sfxObjId);
-                if (mod.GetObjId(sfx) < 0) continue;
-                mod.MoveObject(sfx, mod.CreateVector(-movedDelta.x, -movedDelta.y, -movedDelta.z));
-            } catch {
-                // Best-effort restore.
-            }
-        }
-        GameHandler.sandstormLoopSfxMovedDeltaByObjId.clear();
-    }
-
-    static async FadeOutSandstormLoopSfxAndStop(fadeToken: number): Promise<void> {
-        const loopSfx = GameHandler.GetActiveSandstormLoopSfx();
-        const soldierWindSfx = GameHandler.sandstormSoldierWindSfx;
-        const soldierWindTargets = Array.from(GameHandler.sandstormSoldierWindTargets.values())
-            .filter((targetPlayer) => Helpers.HasValidObjId(targetPlayer));
-
-        if (loopSfx.length === 0 && !soldierWindSfx) {
-            GameHandler.sandstormWindLoopSfx = undefined;
-            GameHandler.sandstormFireLoopSfx = [];
-            GameHandler.sandstormSoldierWindSfx = undefined;
-            GameHandler.sandstormSoldierWindTargets.clear();
-            GameHandler.RestoreSandstormLoopSfxMovedOffsets();
-            return;
-        }
-
-        const steps = Math.max(
-            1,
-            Math.ceil(SANDSTORM_LOOP_SFX_FADE_SECONDS / SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS),
-        );
-
-        for (let i = 1; i <= steps; i++) {
-            if (fadeToken !== GameHandler.sandstormLoopFadeToken) return;
-
-            const amplitude = Math.max(0, 1 - (i / steps));
-            for (const sfx of loopSfx) {
-                try {
-                    mod.SetSoundAmplitude(sfx, amplitude);
-                } catch {
-                    // Best-effort fade.
-                }
-            }
-
-            if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
-                for (const targetPlayer of soldierWindTargets) {
-                    try {
-                        mod.SetSoundAmplitude(soldierWindSfx, amplitude, targetPlayer);
-                    } catch {
-                        // Best-effort fade.
-                    }
-                }
-            }
-
-            await mod.Wait(SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS);
-        }
-
-        if (fadeToken !== GameHandler.sandstormLoopFadeToken) return;
-
-        for (const sfx of loopSfx) {
-            try {
-                mod.StopSound(sfx);
-            } catch {
-                // Best-effort stop.
-            }
-        }
-
-        if (soldierWindSfx && mod.GetObjId(soldierWindSfx) > -1) {
-            for (const targetPlayer of soldierWindTargets) {
-                try { mod.StopSound(soldierWindSfx, targetPlayer); } catch { }
-            }
-            try { mod.StopSound(soldierWindSfx); } catch { }
-            try { mod.UnspawnObject(soldierWindSfx); } catch { }
-        }
-
-        GameHandler.sandstormWindLoopSfx = undefined;
-        GameHandler.sandstormFireLoopSfx = [];
-        GameHandler.sandstormSoldierWindSfx = undefined;
-        GameHandler.sandstormSoldierWindTargets.clear();
-        GameHandler.RestoreSandstormLoopSfxMovedOffsets();
-    }
-
-    static StopSandstormLoopSfx(): void {
-        GameHandler.sandstormLoopFadeToken++;
-        GameHandler.sandstormFireLoopFadeInToken++;
-        GameHandler.sandstormFireLoopPreFadeStarted = false;
-        GameHandler.sandstormLoopPreDisableFadeStarted = false;
-        GameHandler.StopSandstormWarningSfx();
-
-        if (GameHandler.sandstormWindLoopSfx) {
-            try { mod.StopSound(GameHandler.sandstormWindLoopSfx); } catch { }
-            GameHandler.sandstormWindLoopSfx = undefined;
-        }
-
-        for (const fireLoopSfx of GameHandler.sandstormFireLoopSfx) {
-            try { mod.StopSound(fireLoopSfx); } catch { }
-        }
-        GameHandler.sandstormFireLoopSfx = [];
-        GameHandler.StopSandstormSoldierWindSfx();
-        GameHandler.RestoreSandstormLoopSfxMovedOffsets();
-    }
-
-    static ResetSandstormRoundState(): void {
-        GameHandler.sandstormRollTimeRemaining = -1;
-        GameHandler.sandstormRollResolved = true;
-        GameHandler.sandstormHasAppearedThisRound = false;
-        GameHandler.sandstormWarningSecondsRemaining = 0;
-        GameHandler.sandstormActive = false;
-        GameHandler.sandstormActiveSecondsRemaining = 0;
-        GameHandler.StopSandstormLoopSfx();
-        GameHandler.SetSandstormWhiteSmokeVfxEnabled(false);
-        GameHandler.SyncSandstormScreenEffectForAllPlayers(false);
-    }
-
-    static StartSandstormTickLoop(): void {
-        if (GameHandler.sandstormTickLoopStarted) return;
-        GameHandler.sandstormTickLoopStarted = true;
-
-        (async () => {
-            while (GameHandler.gameState !== GameState.GameOver) {
-                GameHandler.UpdateSandstormEventTick();
-                await mod.Wait(1);
-            }
-            GameHandler.sandstormTickLoopStarted = false;
-        })();
-    }
-
-    static InitializeSandstormEventForRound(): void {
-        if (!GameHandler.IsSandstormMapEligible()) {
-            GameHandler.ResetSandstormRoundState();
-            return;
-        }
-
-        if (GameHandler.sandstormWarningSecondsRemaining > 0 || GameHandler.sandstormActive) {
-            GameHandler.sandstormRollTimeRemaining = -1;
-            GameHandler.sandstormRollResolved = true;
-            GameHandler.sandstormHasAppearedThisRound = true;
-            console.log('Sandstorm | Carryover active at round start; skipping new roll this round.');
-            return;
-        }
-
-        const minRemaining = SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS + 1;
-        const maxRemaining = Math.max(minRemaining, GameHandler.roundTimeRemaining - 1);
-        if (maxRemaining <= minRemaining) {
-            GameHandler.sandstormRollTimeRemaining = -1;
-            GameHandler.sandstormRollResolved = true;
-            GameHandler.sandstormHasAppearedThisRound = false;
-            return;
-        }
-
-        GameHandler.sandstormRollResolved = false;
-        GameHandler.sandstormHasAppearedThisRound = false;
-        GameHandler.sandstormRollTimeRemaining = Helpers.GetRandomSpawnFromRange(minRemaining, maxRemaining);
-        console.log(`Sandstorm | Roll scheduled at <=${GameHandler.sandstormRollTimeRemaining}s remaining.`);
-    }
-
-    static StartSandstormWarning(): void {
-        if (GameHandler.sandstormHasAppearedThisRound) return;
-
-        GameHandler.sandstormHasAppearedThisRound = true;
-        GameHandler.sandstormFireLoopFadeInToken++;
-        GameHandler.sandstormFireLoopPreFadeStarted = false;
-        GameHandler.sandstormLoopPreDisableFadeStarted = false;
-        GameHandler.sandstormWarningSecondsRemaining = SANDSTORM_WARNING_LEAD_SECONDS;
-        GameHandler.SetSandstormWhiteSmokeVfxEnabled(true);
-        GameHandler.sandstormWarningSfx = GameHandler.TryPlaySandstormSfxById(
-            SANDSTORM_WARNING_SFX_ID,
-            SANDSTORM_WARNING_SFX_ATTENUATION,
-        );
-        void GameHandler.DisplayGameStateNotification(MakeMessage(mod.stringkeys.sandstorm_warning));
-        console.log(`Sandstorm | Warning started (${SANDSTORM_WARNING_LEAD_SECONDS}s lead).`);
-    }
-
-    static BeginSandstorm(): void {
-        GameHandler.sandstormWarningSecondsRemaining = 0;
-        GameHandler.StopSandstormWarningSfx();
-        GameHandler.sandstormActive = true;
-        GameHandler.sandstormLoopFadeToken++;
-        GameHandler.sandstormFireLoopFadeInToken++;
-        GameHandler.sandstormFireLoopPreFadeStarted = false;
-        GameHandler.sandstormLoopPreDisableFadeStarted = false;
-        GameHandler.sandstormActiveSecondsRemaining = Helpers.GetRandomSpawnFromRange(
-            SANDSTORM_DURATION_MIN_SECONDS,
-            SANDSTORM_DURATION_MAX_SECONDS,
-        );
-        GameHandler.EnsureSandstormLoopSfx(1);
-        GameHandler.SetSandstormFireLoopAmplitude(1);
-        GameHandler.SyncSandstormSoldierWindSfxForAllPlayers();
-        GameHandler.SyncSandstormScreenEffectForAllPlayers(true);
-        console.log(`Sandstorm | Active for ${GameHandler.sandstormActiveSecondsRemaining}s.`);
-    }
-
-    static EndSandstorm(): void {
-        GameHandler.sandstormWarningSecondsRemaining = 0;
-        GameHandler.StopSandstormWarningSfx();
-        GameHandler.sandstormActive = false;
-        GameHandler.sandstormActiveSecondsRemaining = 0;
-        if (!GameHandler.sandstormLoopPreDisableFadeStarted) {
-            const fadeToken = ++GameHandler.sandstormLoopFadeToken;
-            void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
-        }
-        GameHandler.sandstormLoopPreDisableFadeStarted = false;
-        GameHandler.SetSandstormWhiteSmokeVfxEnabled(false);
-        GameHandler.SyncSandstormScreenEffectForAllPlayers(false, true);
-        console.log('Sandstorm | Cleared.');
-    }
-
-    static UpdateSandstormEventTick(): void {
-        if (!GameHandler.IsSandstormMapEligible()) return;
-
-        if (GameHandler.sandstormWarningSecondsRemaining > 0) {
-            GameHandler.sandstormWarningSecondsRemaining--;
-
-            if (
-                !GameHandler.sandstormFireLoopPreFadeStarted
-                && GameHandler.sandstormWarningSecondsRemaining > 0
-                && GameHandler.sandstormWarningSecondsRemaining <= SANDSTORM_LOOP_PRE_VL7_LEAD_SECONDS
-            ) {
-                GameHandler.sandstormFireLoopPreFadeStarted = true;
-                const fadeToken = ++GameHandler.sandstormFireLoopFadeInToken;
-                void GameHandler.FadeInSandstormFireLoopSfxBeforeVl7(fadeToken);
-            }
-
-            if (GameHandler.sandstormWarningSecondsRemaining <= 0) {
-                GameHandler.BeginSandstorm();
-            }
-            return;
-        }
-
-        if (GameHandler.sandstormActive) {
-            if (
-                !GameHandler.sandstormLoopPreDisableFadeStarted
-                && GameHandler.sandstormActiveSecondsRemaining > 0
-                && GameHandler.sandstormActiveSecondsRemaining <= SANDSTORM_LOOP_PRE_DISABLE_FADE_LEAD_SECONDS
-            ) {
-                GameHandler.sandstormLoopPreDisableFadeStarted = true;
-                const fadeToken = ++GameHandler.sandstormLoopFadeToken;
-                void GameHandler.FadeOutSandstormLoopSfxAndStop(fadeToken);
-            }
-
-            GameHandler.UpdateSandstormLoopSfxDriftTick();
-            GameHandler.sandstormActiveSecondsRemaining--;
-            if (GameHandler.sandstormActiveSecondsRemaining <= 0) {
-                GameHandler.EndSandstorm();
-            }
-            return;
-        }
-
-        if (GameHandler.gameState !== GameState.GameRoundIsRunning) return;
-
-        if (GameHandler.sandstormRollResolved || GameHandler.sandstormHasAppearedThisRound) return;
-        if (GameHandler.roundTimeRemaining <= SANDSTORM_MIN_ROUND_TIME_REMAINING_SECONDS) {
-            GameHandler.sandstormRollResolved = true;
-            console.log('Sandstorm | No roll: round time too low.');
-            return;
-        }
-        if (GameHandler.sandstormRollTimeRemaining < 0) {
-            GameHandler.sandstormRollResolved = true;
-            return;
-        }
-        if (GameHandler.roundTimeRemaining > GameHandler.sandstormRollTimeRemaining) return;
-
-        GameHandler.sandstormRollResolved = true;
-        const isLms = GameHandler.IsLmsActiveForSandstormChance();
-        const chance = isLms ? SANDSTORM_CHANCE_LMS : SANDSTORM_CHANCE_DEFAULT;
-        const roll = Math.random();
-        console.log(`Sandstorm | Roll=${roll.toFixed(3)} chance=${chance.toFixed(2)} lms=${isLms}`);
-
-        if (roll <= chance) {
-            GameHandler.StartSandstormWarning();
-        } else {
-            console.log('Sandstorm | Not triggered this round.');
-        }
     }
 
     static async SuspendWinChecksFor(seconds: number) {
@@ -6825,7 +6692,7 @@ class GameHandler {
         await this.RoundStartCountdown();
         console.log('Game is starting. Current Round: ' + GameHandler.currentRound);
         this.gameState = GameState.GameRoundIsRunning;
-        GameHandler.InitializeSandstormEventForRound();
+        Sandstorm.InitializeSandstormEventForRound();
 
         for (let playerProfile of PlayerProfile._allPlayerProfiles) {
             if (playerProfile.isAI) continue;
@@ -11328,7 +11195,6 @@ export async function OnPlayerLeaveGame(playerObjID: number) {
     }
 
     CleanupVL7TransitionState(playerObjID);
-    GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjID);
 
     // Check if this is a dead infected bot's body being cleaned up by the spawner unspawn timer.
     // HandleDeath registers the ObjID here so we start the respawn only after the spawner is free.
@@ -11456,7 +11322,6 @@ export function OnPlayerUndeploy(playerObjId: number) {
     }
 
     CleanupVL7TransitionState(playerObjId);
-    GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
 
     const undeployedProfile = PlayerProfile._allPlayers.get(playerObjId);
     if (BOT_SURVIVAL_TEST_MODE && undeployedProfile && !undeployedProfile.isAI) {
@@ -11474,7 +11339,6 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     const playerObjId = mod.GetObjId(eventPlayer);
     if (playerObjId > -1) {
         CleanupVL7TransitionState(playerObjId);
-        GameHandler.StopSandstormSoldierWindSfxForPlayerObjId(playerObjId);
     }
 
     if (GameHandler.gameState === GameState.EndOfRound) {
@@ -11945,7 +11809,7 @@ export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.
     }
     playerProfile?.loadoutDisplayBottom?.Hide();
     if (playerProfile && !playerProfile.isAI) {
-        GameHandler.SyncSandstormScreenEffectForPlayer(eventPlayer);
+        Sandstorm.SyncSandstormScreenEffectForPlayer(eventPlayer);
     }
     // attempting to use the mod APIs to fetch players
     for (const player of playersInVehicle) {
@@ -11965,7 +11829,7 @@ export function OnPlayerExitVehicle(eventPlayer: mod.Player, eventVehicle: mod.V
     }
     playerProfile?.loadoutDisplayBottom?.Show();
     if (playerProfile && !playerProfile.isAI) {
-        GameHandler.SyncSandstormScreenEffectForPlayer(eventPlayer);
+        Sandstorm.SyncSandstormScreenEffectForPlayer(eventPlayer);
     }
 }
 
@@ -12236,7 +12100,7 @@ export async function OnGameModeStarted() {
         ROUND_DURATION = 180;
         GAME_ROUND_LIMIT = 6;
     }
-    GameHandler.StartSandstormTickLoop();
+    Sandstorm.StartSandstormTickLoop();
     SpawnTeamVOSoundsAtHQ();
 
     gameStateMessageToast.close();
