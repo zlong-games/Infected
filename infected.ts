@@ -105,8 +105,9 @@ const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX
 const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Movement_CameraNoise_OneShot2D;
 const VL7_TRANSITION_OVERLAY_ALPHA = 0.9;
 const VL7_TRANSITION_OVERLAY_FADE_SECONDS = 3;
+const VL7_TRANSITION_DISABLE_OVERLAY_FADE_SECONDS = 1;
 const VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS = 0.02;
-const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0.35;
+const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0;
 const VL7_TRANSITION_DISTORTION_LEAD_SECONDS = 1;
 const VL7_TRANSITION_DISTORTION_TRAIL_SECONDS = 0.2;
 const VL7_TRANSITION_DISTORTION_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Drone_OutOfRange_Distortion;
@@ -319,14 +320,15 @@ const SANDSTORM_CHANCE_DEFAULT = 0.9;
 // Reserve these IDs in Godot for sandstorm warning/loop sounds.
 const SANDSTORM_WARNING_SFX_ID = 2601;
 const SANDSTORM_WARNING_SFX_ATTENUATION = 80;
-const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2612, 2613];
-const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 50;
-const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605, 2606, 2607, 2608];
-const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 50;
+const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2612, 2613, 2614];
+const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 60;
+const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605, 2606, 2607, 2608, 2609, 2610];
+const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 55;
 const SANDSTORM_LOOP_AUDIO_RAMP_SECONDS = 10;
+const SANDSTORM_JETWASH_WARNING_LEAD_SECONDS = 1;
 const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
 const SANDSTORM_LOOP_SFX_PLAY_STAGGER_SECONDS = 0.06;
-const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0;
+const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0.02;
 
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
@@ -1676,6 +1678,7 @@ class UI {
     static battlefieldYellowBg = mod.CreateVector(0.741, 0.729, 0.031);
     static infectedNightGreen = mod.CreateVector(0.01, 0.02, 0.01);
     static blackColor = mod.CreateVector(0, 0, 0); // pure black
+    static darkAmberColor = mod.CreateVector(0.29, 0.157, 0.012);
     static gradientAlpha: number = 0.04;
     static showingAlert: boolean = false;
 
@@ -5442,7 +5445,6 @@ class Sandstorm {
         Sandstorm.sandstormActiveSecondsRemaining = 0;
         Sandstorm.sandstormFireLoopFadeInToken++;
         Sandstorm.SetSandstormJetwashVfxEnabled(false);
-        Sandstorm.SetSandstormWhiteSmokeVfxEnabled(false);
         const fadeToken = ++Sandstorm.sandstormLoopFadeToken;
 
         void (async () => {
@@ -5452,6 +5454,7 @@ class Sandstorm {
             Sandstorm.sandstormActive = false;
             Sandstorm.sandstormClearing = false;
             Sandstorm.SyncSandstormScreenEffectForAllPlayers(false, true);
+            Sandstorm.SetSandstormWhiteSmokeVfxEnabled(false);
             console.log('Sandstorm | Cleared.');
         })();
 
@@ -5463,6 +5466,11 @@ class Sandstorm {
 
         if (Sandstorm.sandstormWarningSecondsRemaining > 0) {
             Sandstorm.sandstormWarningSecondsRemaining--;
+
+            if (Sandstorm.sandstormWarningSecondsRemaining > 0
+                && Sandstorm.sandstormWarningSecondsRemaining <= SANDSTORM_JETWASH_WARNING_LEAD_SECONDS) {
+                Sandstorm.SetSandstormJetwashVfxEnabled(true);
+            }
 
             if (Sandstorm.sandstormWarningSecondsRemaining <= 0 && !Sandstorm.sandstormActive) {
                 Sandstorm.BeginSandstorm();
@@ -5673,6 +5681,8 @@ class GameHandler {
         { id: 1606, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1607, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
         { id: 1608, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1609, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
+        { id: 1610, object: mod.RuntimeSpawn_Common.FX_Airplane_Jetwash_Sand },
     ];
 
     static sand2_Sfx = [
@@ -11636,6 +11646,8 @@ function EnsureVL7TransitionOverlay(player: mod.Player): mod.UIWidget | undefine
 async function FadeVL7TransitionOverlay(
     player: mod.Player,
     disableScreenEffectAtSeconds?: number,
+    overlayColor: mod.Vector = UI.blackColor,
+    fadeDurationSeconds: number = VL7_TRANSITION_OVERLAY_FADE_SECONDS,
 ): Promise<void> {
     if (!Helpers.HasValidObjId(player)) return;
     const playerObjId = mod.GetObjId(player);
@@ -11648,14 +11660,14 @@ async function FadeVL7TransitionOverlay(
     VL7_TRANSITION_OVERLAY_TOKEN_BY_PLAYER.set(playerObjId, overlayToken);
 
     mod.SetUIWidgetBgFill(overlay, mod.UIBgFill.Solid);
-    mod.SetUIWidgetBgColor(overlay, UI.blackColor);
+    mod.SetUIWidgetBgColor(overlay, overlayColor);
     mod.SetUIWidgetBgAlpha(overlay, VL7_TRANSITION_OVERLAY_ALPHA);
     mod.SetUIWidgetDepth(overlay, mod.UIDepth.AboveGameUI);
     mod.SetUIWidgetVisible(overlay, true);
 
     const steps = Math.max(
         1,
-        Math.ceil(VL7_TRANSITION_OVERLAY_FADE_SECONDS / VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS),
+        Math.ceil(fadeDurationSeconds / VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS),
     );
 
     for (let i = 1; i <= steps; i++) {
@@ -11664,7 +11676,7 @@ async function FadeVL7TransitionOverlay(
         }
 
         if (!hasAppliedDelayedDisable) {
-            const elapsedSeconds = (i / steps) * VL7_TRANSITION_OVERLAY_FADE_SECONDS;
+            const elapsedSeconds = (i / steps) * fadeDurationSeconds;
             if (elapsedSeconds >= (disableScreenEffectAtSeconds as number)) {
                 mod.EnableScreenEffect(player, mod.ScreenEffects.VL7, false);
                 hasAppliedDelayedDisable = true;
@@ -11789,7 +11801,7 @@ function OngoingAI(player: mod.Player, playerObjId: number): void {
 
 
 /**
- * Plays the gasp SFX and performs a quick black overlay fade while toggling survivor VL7 effect.
+ * Plays the gasp SFX and performs a quick overlay fade while toggling survivor VL7 effect.
  */
 async function applyVL7TransitionEffect(player: mod.Player, enableVL7: boolean): Promise<void> {
     if (!Helpers.HasValidObjId(player)) return;
@@ -11819,7 +11831,12 @@ async function applyVL7TransitionEffect(player: mod.Player, enableVL7: boolean):
         );
     }
 
-    await FadeVL7TransitionOverlay(player, VL7_TRANSITION_DISABLE_OVERLAP_SECONDS);
+    await FadeVL7TransitionOverlay(
+        player,
+        VL7_TRANSITION_DISABLE_OVERLAP_SECONDS,
+        UI.darkAmberColor,
+        VL7_TRANSITION_DISABLE_OVERLAY_FADE_SECONDS,
+    );
 }
 
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, eventVehicle: mod.Vehicle) {
