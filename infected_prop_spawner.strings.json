@@ -1,0 +1,9 @@
+{
+  "prop_spawner_ready": "Portal prop spawner ready. Aim to place a prop.",
+  "prop_spawner_spawned": "Prop spawned.",
+  "prop_spawner_no_surface": "No valid surface in range.",
+  "prop_spawner_preview_crate_01_a": "Next prop: Crate 01 A",
+  "prop_spawner_preview_sandbags_01_256x60": "Next prop: Sandbags 01 256x60",
+  "prop_spawner_preview_barreloilexplosive_01": "Next prop: Barrel Oil Explosive 01",
+  "prop_spawner_preview_unknown": "Next prop: Unknown"
+}
