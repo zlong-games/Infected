@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.05.09";
+const VERSION = "1.06.03";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -26,6 +26,7 @@ let BOT_SURVIVAL_TEST_DESIRED_INFECTED_BOTS = 0;
 const BOT_SURVIVAL_TEST_VEHICLE_RESPAWN_DELAY_SECONDS = 1.0;
 
 const LOADOUT_SELECTION_TIME = 40;
+const PROP_PLACEMENT_TIME = 25;        // extra seconds survivors have to place a fortification prop
 const GAME_COUNTDOWN_TIME = FAST_START ? 5 : LOADOUT_SELECTION_TIME;
 const WAIT_FOR_SPAWN_TIMEOUT = 3;
 
@@ -102,6 +103,8 @@ const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Comm
 const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_EOM_ReinforcementCardReveal_OneShot2D;
 const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_FieldUpgrade_Main_OneShot2D;
 const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Notification_ToasterPopUp_OneShot2D;
+const SFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Deploy_Screen_ActionSuccess_OneShot2D;
+const VFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Impact_SafeImpact_Generic;
 const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Movement_CameraNoise_OneShot2D;
 const VL7_TRANSITION_OVERLAY_ALPHA = 0.9;
 const VL7_TRANSITION_OVERLAY_FADE_SECONDS = 3;
@@ -2705,6 +2708,7 @@ class GameCountdown {
 
     private ShouldShowCountdownPopup(): boolean {
         if (GameHandler.gameState !== GameState.GameStartCountdown) return false;
+        if (GameHandler.propPlacementPhaseActive) return true; // show for all players during prop phase
         if (this._PlayerProfile.isAlphaInfected) return true;
         return !!this._PlayerProfile.loadoutSelectionUI?.HasSelected();
     }
@@ -2722,6 +2726,13 @@ class GameCountdown {
         const subheaderWidget = mod.FindUIWidgetWithName(`${this.uiID}_subheader_${this._PlayerProfile.playerID}`);
 
         if (!subheaderWidget) return;
+
+        if (GameHandler.propPlacementPhaseActive) {
+            const { placed, total } = PropSpawner.GetPlacementStatus();
+            mod.SetUITextLabel(subheaderWidget, MakeMessage(mod.stringkeys.prop_spawner_countdown, placed, total));
+            mod.SetUITextColor(subheaderWidget, this._PlayerProfile.isInfectedTeam || this._PlayerProfile.isAlphaInfected ? UI.battlefieldRed : UI.allyBlue);
+            return;
+        }
 
         const { readyHumans, totalSelectingHumans } = this.GetReadyCountState();
         if (totalSelectingHumans > 0) {
@@ -5736,6 +5747,7 @@ class GameHandler {
 
     // game states
     static gameState = GameState.PreGame
+    static propPlacementPhaseActive: boolean = false;
     static currentRound: number = 1;
     static survivorsRoundsWon: number = 0;
     /**
@@ -6062,8 +6074,9 @@ class GameHandler {
                 const selectingSurvivors = humanSurvivors.filter(pp => !pp.isAlphaInfected);
                 const allSelected = selectingSurvivors.length === 0 || selectingSurvivors.every(pp => pp.loadoutSelectionUI?.HasSelected());
 
-                if (allSelected && this.countdownTimeRemaining > 5) {
-                    this.countdownTimeRemaining = 5;
+                if (allSelected && this.countdownTimeRemaining > 0) {
+                    this.countdownTimeRemaining = 0;
+                    break;
                 }
 
                 // Update loadout menu timer for players still selecting
@@ -6577,6 +6590,7 @@ class GameHandler {
 
     static async EndRoundCleanup() {
         console.log(`"EoR" | Starting End Round Cleanup`);
+        PropSpawner.CleanupAllObjects();
         // GameHandler.StopLastManStandingMusic();
         if (GameHandler.gameState === GameState.GameOver)
             return;
@@ -6724,6 +6738,7 @@ class GameHandler {
 
         this.RestrictAllInputsAllPlayers(true);
         await this.RoundStartCountdown();
+        await PropSpawner.RunPhase();
         console.log('Game is starting. Current Round: ' + GameHandler.currentRound);
         this.gameState = GameState.GameRoundIsRunning;
         Sandstorm.InitializeSandstormEventForRound();
@@ -11364,6 +11379,8 @@ export function OnPlayerUndeploy(playerObjId: number) {
 
     CleanupPlayerOngoingVisuals(playerObjId);
     CleanupLeapStateByObjId(playerObjId);
+    const undeployedPlayer = PlayerProfile._allPlayers.get(playerObjId)?.player;
+    if (undeployedPlayer) PropSpawner.CleanupPlayer(undeployedPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11386,6 +11403,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         CleanupPlayerOngoingVisuals(playerObjId);
     }
     CleanupLeapSystem(eventPlayer);
+    PropSpawner.CleanupPlayer(eventPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11977,6 +11995,11 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     if (!IsPlayerDeployed(eventPlayer)) return;
 
+    // PropSpawner preview tick for human survivors during placement phase
+    if (!isAISoldier && GameHandler.propPlacementPhaseActive) {
+        PropSpawner.OngoingTick(eventPlayer);
+    }
+
     if (!isAISoldier) {
         // Safety net: if leap is unlocked and this deployed alpha is missing state,
         // initialize leap here so crouch charge detection can start immediately.
@@ -12096,16 +12119,354 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     }
 }
 
+// ============================================================
+// PropSpawner -- pre-round survivor fortification
+// ============================================================
+
+const PROP_SPAWNER_MAX_DISTANCE = 10;
+const PROP_SPAWNER_PREVIEW_TICK_INTERVAL = 3;
+const PROP_SPAWNER_MIN_FLOOR_NORMAL_Y = 0.5;
+const PROP_SPAWNER_ZERO_VEC = mod.CreateVector(0, 0, 0);
+const PROP_SPAWNER_ONE_VEC = mod.CreateVector(1, 1, 1);
+
+interface PropSpawnerConfig {
+    prop: mod.RuntimeSpawn_Common | mod.RuntimeSpawn_Sand;
+    forwardOffset: number;
+    rightOffset: number;
+}
+
+const PROP_SPAWNER_POOL: PropSpawnerConfig[] = [
+    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 1 },
+    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 1 },
+    { prop: mod.RuntimeSpawn_Sand.CratePallet_01, forwardOffset: 0, rightOffset: 0 },
+];
+
+class PropSpawner {
+    static readonly _assignedProp: Map<number, PropSpawnerConfig> = new Map();
+    static readonly _raycastInFlight: Set<number> = new Set();
+    static readonly _raycastPurpose: Map<number, "preview" | "spawn"> = new Map();
+    static readonly _previewTick: Map<number, number> = new Map();
+    static readonly _hasPlaced: Set<number> = new Set();
+    static readonly _gadgetAiming: Set<number> = new Set();
+    static readonly _previewIcons: Map<number, mod.WorldIcon> = new Map();
+    static readonly _allPlacedObjects: mod.Object[] = [];
+    static _survivorsInPhase: mod.Player[] = [];
+
+    static GetPlacementStatus(): { placed: number; total: number } {
+        return { placed: PropSpawner._hasPlaced.size, total: PropSpawner._survivorsInPhase.length };
+    }
+
+    static HasRaycastInFlight(id: number): boolean {
+        return PropSpawner._raycastInFlight.has(id);
+    }
+
+    static AllSurvivorsPlaced(): boolean {
+        if (PropSpawner._survivorsInPhase.length === 0) return false;
+        return PropSpawner._survivorsInPhase.every(p => PropSpawner._hasPlaced.has(mod.GetObjId(p)));
+    }
+
+    static async RunPhase(): Promise<void> {
+        const humanSurvivors = PlayerProfile._allPlayerProfiles
+            .filter(pp => !pp.isAI && !pp.isInfectedTeam && !pp.isAlphaInfected)
+            .map(pp => pp.player)
+            .filter(p => Helpers.HasValidObjId(p));
+
+        if (humanSurvivors.length === 0) return;
+
+        PropSpawner._survivorsInPhase = humanSurvivors;
+        GameHandler.propPlacementPhaseActive = true;
+        GameHandler.countdownTimeRemaining = PROP_PLACEMENT_TIME;
+
+        for (const player of humanSurvivors) {
+            const id = mod.GetObjId(player);
+            const config = PROP_SPAWNER_POOL[Math.floor(Math.random() * PROP_SPAWNER_POOL.length)];
+            PropSpawner._assignedProp.set(id, config);
+            try { mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+            try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
+            PropSpawner._SpawnPreviewIcon(player);
+        }
+
+        GameCountdown.GlobalUpdate();
+
+        while (GameHandler.countdownTimeRemaining > 0) {
+            if (PropSpawner.AllSurvivorsPlaced()) break;
+            const timeText = Helpers.FormatTime(GameHandler.countdownTimeRemaining);
+            GameCountdown.GlobalTickDown(timeText[0], timeText[1], timeText[2]);
+            if (GameHandler.countdownTimeRemaining <= 5) {
+                Helpers.PlaySoundFX(SFX_ROUND_COUNTDOWN, 1);
+            }
+            await mod.Wait(1);
+            GameHandler.countdownTimeRemaining--;
+        }
+
+        GameCountdown.GlobalClose();
+        GameHandler.propPlacementPhaseActive = false;
+
+        // Restore each survivor's actual gadget
+        for (const player of humanSurvivors) {
+            const id = mod.GetObjId(player);
+            PropSpawner._HidePreviewIcon(id);
+            PropSpawner._CleanupPreviewIcon(id);
+            PropSpawner._CleanupPlayerState(id);
+            if (!Helpers.HasValidObjId(player)) continue;
+            try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+            const pp = PlayerProfile.Get(player);
+            const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
+            if (gadgetItem?.gadget) {
+                try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
+            }
+        }
+        PropSpawner._hasPlaced.clear();
+        PropSpawner._survivorsInPhase = [];
+    }
+
+    static CleanupAllObjects(): void {
+        for (const obj of PropSpawner._allPlacedObjects) {
+            try { mod.UnspawnObject(obj); } catch { }
+        }
+        PropSpawner._allPlacedObjects.length = 0;
+    }
+
+    static CleanupPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        PropSpawner._HidePreviewIcon(id);
+        PropSpawner._CleanupPreviewIcon(id);
+        PropSpawner._CleanupPlayerState(id);
+    }
+
+    private static _SpawnPreviewIcon(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (PropSpawner._previewIcons.has(id)) return;
+        const pos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+        PropSpawner._previewIcons.set(id, icon);
+    }
+
+    private static _CleanupPlayerState(id: number): void {
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+        PropSpawner._previewTick.delete(id);
+        PropSpawner._gadgetAiming.delete(id);
+        PropSpawner._assignedProp.delete(id);
+    }
+
+    private static _HidePreviewIcon(id: number): void {
+        const icon = PropSpawner._previewIcons.get(id);
+        if (icon) {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
+    }
+
+    private static _CleanupPreviewIcon(id: number): void {
+        const icon = PropSpawner._previewIcons.get(id);
+        if (icon) {
+            try { mod.UnspawnObject(icon as unknown as mod.Object); } catch { }
+            PropSpawner._previewIcons.delete(id);
+        }
+    }
+
+    private static _GetPropPreviewMessage(config: PropSpawnerConfig): mod.Message {
+        switch (config.prop) {
+            case mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_barrierconcretewall_01_192x320);
+            case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_barricadeboardswood_01_B);
+            case mod.RuntimeSpawn_Sand.CratePallet_01:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_cratepallet_01);
+            default:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_unknown);
+        }
+    }
+
+    private static _ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const icon = PropSpawner._previewIcons.get(id);
+        if (!icon) return;
+        const config = PropSpawner._assignedProp.get(id);
+        if (!config) return;
+        mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
+        mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+        mod.SetWorldIconPosition(icon, pos);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
+        const id = mod.GetObjId(player);
+        const icon = PropSpawner._previewIcons.get(id);
+        if (!icon) return;
+        mod.SetWorldIconText(icon, message);
+        mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
+        mod.SetWorldIconPosition(icon, pos);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _GetRaycastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const start = mod.Add(eyePos, facing);
+        const end = mod.Add(start, mod.Multiply(facing, PROP_SPAWNER_MAX_DISTANCE));
+        return { start, end };
+    }
+
+    private static _ApplyHorizontalOffset(position: mod.Vector, player: mod.Player, config: PropSpawnerConfig): mod.Vector {
+        if (config.forwardOffset === 0 && config.rightOffset === 0) return position;
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const facingH = mod.Normalize(mod.CreateVector(mod.XComponentOf(facing), 0, mod.ZComponentOf(facing)));
+        const right = mod.CreateVector(mod.ZComponentOf(facingH), 0, -mod.XComponentOf(facingH));
+        let result = position;
+        if (config.forwardOffset !== 0) result = mod.Add(result, mod.Multiply(facingH, config.forwardOffset));
+        if (config.rightOffset !== 0) result = mod.Add(result, mod.Multiply(right, config.rightOffset));
+        return result;
+    }
+
+    private static _GetFacingPlayerRotation(player: mod.Player): mod.Vector {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const yaw = Math.atan2(-mod.XComponentOf(facing), -mod.ZComponentOf(facing));
+        return mod.CreateVector(0, yaw, 0);
+    }
+
+    static OnAimStart(player: mod.Player): void {
+        if (!GameHandler.propPlacementPhaseActive) return;
+        const id = mod.GetObjId(player);
+        if (!PropSpawner._assignedProp.has(id)) return;
+        PropSpawner._gadgetAiming.add(id);
+    }
+
+    static OnAimStop(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        PropSpawner._gadgetAiming.delete(id);
+        PropSpawner._HidePreviewIcon(id);
+    }
+
+    static OnFireStart(player: mod.Player): void {
+        if (!GameHandler.propPlacementPhaseActive) return;
+        const id = mod.GetObjId(player);
+        if (!PropSpawner._assignedProp.has(id)) return;
+        if (PropSpawner._hasPlaced.has(id)) return;
+        if (PropSpawner._raycastInFlight.has(id)) {
+            PropSpawner._raycastPurpose.set(id, "spawn");
+        } else {
+            const { start, end } = PropSpawner._GetRaycastVectors(player);
+            PropSpawner._raycastInFlight.add(id);
+            PropSpawner._raycastPurpose.set(id, "spawn");
+            mod.RayCast(player, start, end);
+        }
+    }
+
+    static OnFireStop(player: mod.Player): void {
+        // No-op: icon stays visible until next raycast result updates it
+    }
+
+    static OngoingTick(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (PropSpawner._hasPlaced.has(id)) return;
+        if (PropSpawner._raycastInFlight.has(id)) return;
+        // Ensure the portal gadget stays equipped
+        try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
+        const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
+        PropSpawner._previewTick.set(id, tick);
+        if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL !== 0) return;
+        const { start, end } = PropSpawner._GetRaycastVectors(player);
+        PropSpawner._raycastInFlight.add(id);
+        PropSpawner._raycastPurpose.set(id, "preview");
+        mod.RayCast(player, start, end);
+    }
+
+    static OnRayCastHit(player: mod.Player, point: mod.Vector, normal: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const purpose = PropSpawner._raycastPurpose.get(id);
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+
+        const isFloor = mod.YComponentOf(normal) >= PROP_SPAWNER_MIN_FLOOR_NORMAL_Y;
+
+        if (purpose === "spawn") {
+            if (!isFloor) {
+                PropSpawner._ShowPreviewIconError(player, point, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+                return;
+            }
+            const config = PropSpawner._assignedProp.get(id);
+            if (!config) return;
+            const spawnPos = PropSpawner._ApplyHorizontalOffset(point, player, config);
+            const spawnRot = PropSpawner._GetFacingPlayerRotation(player);
+            const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, PROP_SPAWNER_ONE_VEC);
+            if (prop) {
+                PropSpawner._hasPlaced.add(id);
+                PropSpawner._HidePreviewIcon(id);
+                PropSpawner._allPlacedObjects.push(prop);
+                // SFX for placing player, VFX at placement position
+                Helpers.PlaySoundFX(SFX_PROP_PLACED, 1, player);
+                const placementVfx = mod.SpawnObject(VFX_PROP_PLACED, spawnPos, PROP_SPAWNER_ZERO_VEC, PROP_SPAWNER_ONE_VEC) as mod.VFX;
+                if (placementVfx) mod.EnableVFX(placementVfx, true);
+                // Immediately restore the player's real gadget
+                try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+                const pp = PlayerProfile.Get(player);
+                const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
+                if (gadgetItem?.gadget) {
+                    try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
+                }
+                PropSpawner._CleanupPreviewIcon(id);
+                PropSpawner._CleanupPlayerState(id);
+            }
+        } else {
+            if (isFloor) {
+                PropSpawner._ShowPreviewIconValid(player, point);
+            } else {
+                PropSpawner._ShowPreviewIconError(player, point, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+            }
+        }
+    }
+
+    static OnRayCastMissed(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+        const { end } = PropSpawner._GetRaycastVectors(player);
+        PropSpawner._ShowPreviewIconError(player, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+    }
+}
+
 export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
-    HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+        PropSpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else {
+        HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+    }
 }
 
 export function OnRayCastMissed(eventPlayer: mod.Player) {
-    HandleLeapRayCastMissed(eventPlayer);
+    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+        PropSpawner.OnRayCastMissed(eventPlayer);
+    } else {
+        HandleLeapRayCastMissed(eventPlayer);
+    }
+}
+
+export function OnPortalGadgetAimStart(player: mod.Player): void {
+    PropSpawner.OnAimStart(player);
+}
+
+export function OnPortalGadgetAimStop(player: mod.Player): void {
+    PropSpawner.OnAimStop(player);
+}
+
+export function OnPortalGadgetFireStart(player: mod.Player): void {
+    PropSpawner.OnFireStart(player);
+}
+
+export function OnPortalGadgetFireStop(player: mod.Player): void {
+    PropSpawner.OnFireStop(player);
 }
 
 export async function OnGameModeStarted() {
-    mod.EnableAllPlayerDeploy(false);
     mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
 
     // ---- BOT SURVIVAL TEST MODE: no rounds/timers, ramp infected bot population ----
