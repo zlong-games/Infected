@@ -1,389 +1,356 @@
+﻿// ============================================================
+// infected_prop_spawner.ts standalone prop spawner test
+// Will be merged into infected.ts after testing.
+// ============================================================
+
+mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
+
+// ---- Types -----------------------------------------------------------------
+
+type SpawnableProp = mod.RuntimeSpawn_Common | mod.RuntimeSpawn_Sand;
+
+interface PropConfig {
+    prop: SpawnableProp;
+    // Horizontal offsets applied in world-space relative to the player's facing direction.
+    // Positive forwardOffset shifts the spawn position forward along the player's facing.
+    // Positive rightOffset shifts the spawn position to the right of the player's facing.
+    forwardOffset: number;
+    rightOffset: number;
+}
+
+// ---- Config ----------------------------------------------------------------
+
+const MAX_SPAWN_DISTANCE = 10;   // metres; also used as the raycast end distance
+const PREVIEW_TICK_INTERVAL = 3;   // fire a preview raycast every N OngoingPlayer ticks
+const MIN_FLOOR_NORMAL_Y = 0.5; // reject surfaces whose Y normal is below this (walls/ceilings)
 
 const ZERO_VEC = mod.CreateVector(0, 0, 0);
 const ONE_VEC = mod.CreateVector(1, 1, 1);
-const MAX_RAYCAST_DISTANCE = 120;
-const SURFACE_OFFSET = 0.2;
-const MAX_TRACKED_PROPS = 64;
-const PREVIEW_RAYCAST_EVERY_TICKS = 3;
-const PREVIEW_ICON_COLOR = mod.CreateVector(0.2, 1, 0.2);
 
-type RayCastAction = "preview" | "spawn";
-
-const SPAWNABLE_PROPS: mod.RuntimeSpawn_Common[] = [
-    mod.RuntimeSpawn_Common.Crate_01_A,
-    mod.RuntimeSpawn_Common.SandBags_01_256x60,
-    mod.RuntimeSpawn_Common.BarrelOilExplosive_01,
+// Per-prop placement config. Tune forwardOffset / rightOffset to align each prop's
+// visual centre with the player's aim point.
+const PROP_CONFIGS: PropConfig[] = [
+    {
+        prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320,
+        forwardOffset: 0,
+        rightOffset: 1,
+    },
+    {
+        prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B,
+        forwardOffset: 0,
+        rightOffset: 1,
+    },
+    {
+        prop: mod.RuntimeSpawn_Sand.CratePallet_01,
+        forwardOffset: 0,
+        rightOffset: 0,
+    },
 ];
 
+// ---- Per-player state ------------------------------------------------------
+
+// Index into PROP_CONFIGS for the next prop to spawn (cycles after each use)
 const playerPropIndex: Map<number, number> = new Map();
-const spawnedProps: mod.Object[] = [];
+
+// Whether a raycast is currently in flight for this player
+const playerRaycastInFlight: Set<number> = new Set();
+
+// What the in-flight raycast was fired for
+const playerRaycastPurpose: Map<number, "preview" | "spawn"> = new Map();
+
+// Tick counter used to throttle preview raycasts
+const playerPreviewTick: Map<number, number> = new Map();
+
+// Players who have already used their one spawn this round
+const playerHasSpawned: Set<number> = new Set();
+
+// Players currently aiming with the portal gadget (enables preview raycasts)
+const playerGadgetAiming: Set<number> = new Set();
+
+// Per-player world icon for the placement preview
 const playerPreviewIcons: Map<number, mod.WorldIcon> = new Map();
-const playerRayCastActionQueue: Map<number, RayCastAction[]> = new Map();
-const aimingPlayers: Set<number> = new Set();
-const playerPreviewTickCounter: Map<number, number> = new Map();
 
-function ShowMessage(player: mod.Player, message: mod.Message): void {
-    mod.DisplayHighlightedWorldLogMessage(message, player);
+// Objects spawned by each player, kept for cleanup
+const playerSpawnedObjects: Map<number, mod.Object[]> = new Map();
+
+// ---- Helpers ---------------------------------------------------------------
+
+function GetPlayerId(player: mod.Player): number {
+    return mod.GetObjId(player);
 }
 
-function IsPlayerReferenceValid(player: mod.Player | undefined): boolean {
-    if (!player) {
-        return false;
-    }
-
-    try {
-        return mod.GetObjId(player) > -1;
-    } catch {
-        return false;
-    }
+function GetPropConfig(player: mod.Player): PropConfig {
+    const id = GetPlayerId(player);
+    const idx = playerPropIndex.get(id) ?? 0;
+    return PROP_CONFIGS[idx % PROP_CONFIGS.length];
 }
 
-function SafeGetSoldierStateVector(
-    player: mod.Player | undefined,
-    state: mod.SoldierStateVector,
-): mod.Vector | undefined {
-    if (!IsPlayerReferenceValid(player)) {
-        return undefined;
-    }
-
-    try {
-        return mod.GetSoldierState(player as mod.Player, state);
-    } catch {
-        return undefined;
-    }
-}
-
-function GetRayCastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } | undefined {
-    const facingDirectionRaw = SafeGetSoldierStateVector(player, mod.SoldierStateVector.GetFacingDirection);
-    const eyePosition = SafeGetSoldierStateVector(player, mod.SoldierStateVector.EyePosition);
-    if (!facingDirectionRaw || !eyePosition) {
-        return undefined;
-    }
-
-    const facingDirection = mod.Normalize(facingDirectionRaw);
-    const start = mod.Add(eyePosition, facingDirection);
-    const end = mod.Add(start, mod.Multiply(facingDirection, MAX_RAYCAST_DISTANCE));
-
+function GetRaycastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } {
+    const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+    const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+    // Offset the start 1 unit forward to avoid self-collision with the player geometry
+    const start = mod.Add(eyePos, facing);
+    const end = mod.Add(start, mod.Multiply(facing, MAX_SPAWN_DISTANCE));
     return { start, end };
 }
 
-function QueueRayCastAction(playerId: number, action: RayCastAction): boolean {
-    const queue = playerRayCastActionQueue.get(playerId) ?? [];
-
-    if (action === "preview" && queue[queue.length - 1] === "preview") {
-        return false;
-    }
-
-    queue.push(action);
-
-    if (queue.length > 8) {
-        queue.splice(0, queue.length - 8);
-    }
-
-    playerRayCastActionQueue.set(playerId, queue);
-    return true;
-}
-
-function DequeueRayCastAction(playerId: number): RayCastAction | undefined {
-    const queue = playerRayCastActionQueue.get(playerId);
-    if (!queue || queue.length === 0) {
-        return undefined;
-    }
-
-    const action = queue.shift();
-    if (queue.length === 0) {
-        playerRayCastActionQueue.delete(playerId);
-    }
-
-    return action;
-}
-
-function RemoveQueuedPreviewActions(playerId: number): void {
-    const queue = playerRayCastActionQueue.get(playerId);
-    if (!queue || queue.length === 0) {
-        return;
-    }
-
-    const filteredQueue = queue.filter(action => action === "spawn");
-    if (filteredQueue.length === 0) {
-        playerRayCastActionQueue.delete(playerId);
-        return;
-    }
-
-    playerRayCastActionQueue.set(playerId, filteredQueue);
-}
-
-function GetOrCreatePreviewIcon(player: mod.Player): mod.WorldIcon | undefined {
-    const playerId = mod.GetObjId(player);
-    const existingIcon = playerPreviewIcons.get(playerId);
-    if (existingIcon) {
-        return existingIcon;
-    }
-
-    try {
-        const spawnedIcon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, ZERO_VEC, ZERO_VEC) as mod.WorldIcon;
-        mod.SetWorldIconOwner(spawnedIcon, player);
-        mod.SetWorldIconImage(spawnedIcon, mod.WorldIconImages.Triangle);
-        mod.SetWorldIconColor(spawnedIcon, PREVIEW_ICON_COLOR);
-        mod.EnableWorldIconText(spawnedIcon, false);
-        mod.EnableWorldIconImage(spawnedIcon, false);
-        playerPreviewIcons.set(playerId, spawnedIcon);
-        return spawnedIcon;
-    } catch {
-        return undefined;
-    }
-}
-
-function HidePreviewIconForPlayerId(playerId: number): void {
-    const previewIcon = playerPreviewIcons.get(playerId);
-    if (!previewIcon) {
-        return;
-    }
-
-    try {
-        mod.EnableWorldIconImage(previewIcon, false);
-        mod.EnableWorldIconText(previewIcon, false);
-    } catch {
-        // Ignore invalid icon handles during cleanup.
-    }
-}
-
-function UpdatePreviewForPlayer(player: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector): void {
-    const previewIcon = GetOrCreatePreviewIcon(player);
-    if (!previewIcon) {
-        return;
-    }
-
-    const previewPosition = mod.Add(eventPoint, mod.Multiply(eventNormal, SURFACE_OFFSET));
-
-    try {
-        mod.SetWorldIconPosition(previewIcon, previewPosition);
-        mod.EnableWorldIconImage(previewIcon, true);
-        mod.EnableWorldIconText(previewIcon, false);
-    } catch {
-        // Ignore invalid icon handles during update.
-    }
-}
-
-function CleanupPlayerPreviewState(playerId: number, unspawnPreviewIcon: boolean): void {
-    aimingPlayers.delete(playerId);
-    playerPreviewTickCounter.delete(playerId);
-    playerRayCastActionQueue.delete(playerId);
-
-    const previewIcon = playerPreviewIcons.get(playerId);
-    if (!previewIcon) {
-        return;
-    }
-
-    if (!unspawnPreviewIcon) {
-        HidePreviewIconForPlayerId(playerId);
-        return;
-    }
-
-    try {
-        mod.UnspawnObject(previewIcon as mod.Object);
-    } catch {
-        // Ignore icons that are already gone.
-    }
-
-    playerPreviewIcons.delete(playerId);
-}
-
-function TryRayCastFromPlayer(player: mod.Player, action: RayCastAction): void {
-    if (!IsPlayerReferenceValid(player)) {
-        return;
-    }
-
-    const rayCastVectors = GetRayCastVectors(player);
-    if (!rayCastVectors) {
-        return;
-    }
-
-    const playerId = mod.GetObjId(player);
-    if (!QueueRayCastAction(playerId, action)) {
-        return;
-    }
-
-    mod.RayCast(player, rayCastVectors.start, rayCastVectors.end);
-}
-
-function GetCurrentProp(player: mod.Player): mod.RuntimeSpawn_Common {
-    const playerId = mod.GetObjId(player);
-    const currentIndex = playerPropIndex.get(playerId) ?? 0;
-    return SPAWNABLE_PROPS[currentIndex];
-}
-
-function GetPropPreviewMessage(prop: mod.RuntimeSpawn_Common): mod.Message {
+function GetPropPreviewMessage(prop: SpawnableProp): mod.Message {
     switch (prop) {
-        case mod.RuntimeSpawn_Common.Crate_01_A:
-            return mod.Message(mod.stringkeys.prop_spawner_preview_crate_01_a);
-        case mod.RuntimeSpawn_Common.SandBags_01_256x60:
-            return mod.Message(mod.stringkeys.prop_spawner_preview_sandbags_01_256x60);
-        case mod.RuntimeSpawn_Common.BarrelOilExplosive_01:
-            return mod.Message(mod.stringkeys.prop_spawner_preview_barreloilexplosive_01);
+        case mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320:
+            return mod.Message(mod.stringkeys.prop_spawner_preview_barrierconcretewall_01_192x320);
+        case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
+            return mod.Message(mod.stringkeys.prop_spawner_preview_barricadeboardswood_01_B);
+        case mod.RuntimeSpawn_Sand.CratePallet_01:
+            return mod.Message(mod.stringkeys.prop_spawner_preview_cratepallet_01);
         default:
             return mod.Message(mod.stringkeys.prop_spawner_preview_unknown);
     }
 }
 
-function ShowCurrentPropPreviewMessage(player: mod.Player): void {
-    const nextProp = GetCurrentProp(player);
-    ShowMessage(player, GetPropPreviewMessage(nextProp));
+function GetOrCreatePreviewIcon(player: mod.Player): mod.WorldIcon | undefined {
+    return playerPreviewIcons.get(GetPlayerId(player));
 }
 
-function GetNextProp(player: mod.Player): mod.RuntimeSpawn_Common {
-    const playerId = mod.GetObjId(player);
-    const currentIndex = playerPropIndex.get(playerId) ?? 0;
-    const nextIndex = (currentIndex + 1) % SPAWNABLE_PROPS.length;
-
-    playerPropIndex.set(playerId, nextIndex);
-    return SPAWNABLE_PROPS[currentIndex];
+function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
+    if (!playerGadgetAiming.has(GetPlayerId(player))) return;
+    const icon = GetOrCreatePreviewIcon(player);
+    if (!icon) return;
+    mod.SetWorldIconText(icon, GetPropPreviewMessage(GetPropConfig(player).prop));
+    mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+    mod.SetWorldIconPosition(icon, pos);
+    mod.EnableWorldIconImage(icon, true);
+    mod.EnableWorldIconText(icon, true);
 }
 
-function TrackSpawnedProp(prop: mod.Object): void {
-    spawnedProps.push(prop);
+function ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
+    if (!playerGadgetAiming.has(GetPlayerId(player))) return;
+    const icon = GetOrCreatePreviewIcon(player);
+    if (!icon) return;
+    mod.SetWorldIconText(icon, message);
+    mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
+    mod.SetWorldIconPosition(icon, pos);
+    mod.EnableWorldIconImage(icon, true);
+    mod.EnableWorldIconText(icon, true);
+}
 
-    while (spawnedProps.length > MAX_TRACKED_PROPS) {
-        const oldestProp = spawnedProps.shift();
-        if (!oldestProp) {
-            break;
-        }
-
-        try {
-            mod.UnspawnObject(oldestProp);
-        } catch {
-            // Ignore objects that are already gone.
-        }
+function HidePreviewIcon(player: mod.Player): void {
+    const icon = playerPreviewIcons.get(GetPlayerId(player));
+    if (icon) {
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
     }
 }
 
-export function OnPlayerDeployed(player: mod.Player) {
-    if (!IsPlayerReferenceValid(player)) {
-        return;
+// Apply per-prop horizontal offsets to align the spawn position with the aim point.
+function ApplyHorizontalOffset(position: mod.Vector, player: mod.Player, config: PropConfig): mod.Vector {
+    if (config.forwardOffset === 0 && config.rightOffset === 0) return position;
+
+    const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+    // Flatten facing to the horizontal plane so vertical aim angle does not skew offsets
+    const facingH = mod.Normalize(mod.CreateVector(
+        mod.XComponentOf(facing),
+        0,
+        mod.ZComponentOf(facing)
+    ));
+    // Right vector = 90 deg CW rotation of facingH around the Y axis
+    const right = mod.CreateVector(mod.ZComponentOf(facingH), 0, -mod.XComponentOf(facingH));
+
+    let result = position;
+    if (config.forwardOffset !== 0) {
+        result = mod.Add(result, mod.Multiply(facingH, config.forwardOffset));
+    }
+    if (config.rightOffset !== 0) {
+        result = mod.Add(result, mod.Multiply(right, config.rightOffset));
+    }
+    return result;
+}
+
+// Returns a rotation vector (radians) that makes the prop face back toward the player.
+function GetFacingPlayerRotation(player: mod.Player): mod.Vector {
+    const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+    const fx = mod.XComponentOf(facing);
+    const fz = mod.ZComponentOf(facing);
+    // Negate to point the prop's front face back at the player
+    const yaw = Math.atan2(-fx, -fz);
+    return mod.CreateVector(0, yaw, 0);
+}
+
+function CleanupPlayerObjects(player: mod.Player): void {
+    const id = GetPlayerId(player);
+
+    const objects = playerSpawnedObjects.get(id);
+    if (objects) {
+        for (const obj of objects) {
+            try { mod.UnspawnObject(obj); } catch { }
+        }
+        playerSpawnedObjects.delete(id);
     }
 
+    const icon = playerPreviewIcons.get(id);
+    if (icon) {
+        try { mod.UnspawnObject(icon as unknown as mod.Object); } catch { }
+        playerPreviewIcons.delete(id);
+    }
+}
+
+function ResetPlayerState(player: mod.Player): void {
+    const id = GetPlayerId(player);
+    playerPropIndex.delete(id);
+    playerRaycastInFlight.delete(id);
+    playerRaycastPurpose.delete(id);
+    playerPreviewTick.delete(id);
+    playerHasSpawned.delete(id);
+    playerGadgetAiming.delete(id);
+}
+
+// ---- Event handlers --------------------------------------------------------
+
+export function OnGameModeStarted(): void {
+    // New round: clear spawn usage so everyone gets a fresh spawn.
+    // Spawned objects are cleaned up per-player in OnPlayerDied / OnPlayerUndeploy.
+    playerHasSpawned.clear();
+}
+
+export function OnPlayerDeployed(player: mod.Player): void {
     mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget);
-    ShowMessage(player, mod.Message(mod.stringkeys.prop_spawner_ready));
+
+    // Pre-spawn the preview icon at the player's position so SpawnObject
+    // receives a valid world position
+    const spawnPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const id = GetPlayerId(player);
+    const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, spawnPos, ZERO_VEC) as mod.WorldIcon;
+    if (icon) {
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+        playerPreviewIcons.set(id, icon);
+    }
 }
 
-export function OnGoingPlayer(player: mod.Player) {
-    if (!IsPlayerReferenceValid(player) || !mod.IsPlayerValid(player)) {
-        return;
-    }
-
-    if (!mod.HasEquipment(player, mod.Gadgets.Misc_PortalGadget)) {
-        mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget);
-    }
-
-    const playerId = mod.GetObjId(player);
-    if (!aimingPlayers.has(playerId)) {
-        return;
-    }
-
-    const tickCount = (playerPreviewTickCounter.get(playerId) ?? 0) + 1;
-    playerPreviewTickCounter.set(playerId, tickCount);
-
-    if (tickCount % PREVIEW_RAYCAST_EVERY_TICKS !== 0) {
-        return;
-    }
-
-    TryRayCastFromPlayer(player, "preview");
-}
-
-export function OnPortalGadgetAimStart(player: mod.Player) {
-    if (!IsPlayerReferenceValid(player)) {
-        return;
-    }
-
-    const playerId = mod.GetObjId(player);
-    aimingPlayers.add(playerId);
-    playerPreviewTickCounter.set(playerId, 0);
-    ShowCurrentPropPreviewMessage(player);
-    TryRayCastFromPlayer(player, "preview");
+export function OnPortalGadgetAimStart(player: mod.Player): void {
+    playerGadgetAiming.add(GetPlayerId(player));
+    // Icon becomes visible on next preview raycast result
 }
 
 export function OnPortalGadgetAimStop(player: mod.Player): void {
-    if (!IsPlayerReferenceValid(player)) {
-        return;
-    }
-
-    const playerId = mod.GetObjId(player);
-    aimingPlayers.delete(playerId);
-    playerPreviewTickCounter.delete(playerId);
-    RemoveQueuedPreviewActions(playerId);
-    HidePreviewIconForPlayerId(playerId);
+    playerGadgetAiming.delete(GetPlayerId(player));
+    HidePreviewIcon(player);
 }
 
-export function OnPortalGadgetFireStart(player: mod.Player) {
-    TryRayCastFromPlayer(player, "spawn");
+export function OnPortalGadgetFireStop(player: mod.Player): void {
+    // If the gadget is not being aimed after firing, ensure icon is hidden
+    if (!playerGadgetAiming.has(GetPlayerId(player))) {
+        HidePreviewIcon(player);
+    }
 }
 
-export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector): void {
-    if (!IsPlayerReferenceValid(eventPlayer)) {
-        return;
+export function OnPortalGadgetFireStart(player: mod.Player): void {
+    const id = GetPlayerId(player);
+    if (playerRaycastInFlight.has(id)) {
+        // A preview raycast is already in flight -- upgrade it to a spawn so its
+        // OnRayCastHit result is used for placement instead of discarded.
+        playerRaycastPurpose.set(id, "spawn");
+    } else {
+        const { start, end } = GetRaycastVectors(player);
+        playerRaycastInFlight.add(id);
+        playerRaycastPurpose.set(id, "spawn");
+        mod.RayCast(player, start, end);
     }
-
-    const playerId = mod.GetObjId(eventPlayer);
-    const rayCastAction = DequeueRayCastAction(playerId);
-    if (!rayCastAction) {
-        return;
-    }
-
-    if (rayCastAction === "preview") {
-        UpdatePreviewForPlayer(eventPlayer, eventPoint, eventNormal);
-        return;
-    }
-
-    const propToSpawn = GetNextProp(eventPlayer);
-    const spawnPosition = mod.Add(eventPoint, mod.Multiply(eventNormal, SURFACE_OFFSET));
-    const spawnedProp = mod.SpawnObject(propToSpawn, spawnPosition, ZERO_VEC, ONE_VEC) as mod.Object;
-
-    TrackSpawnedProp(spawnedProp);
-
-    if (aimingPlayers.has(playerId)) {
-        UpdatePreviewForPlayer(eventPlayer, eventPoint, eventNormal);
-    }
-
-    ShowMessage(eventPlayer, mod.Message(mod.stringkeys.prop_spawner_spawned));
-    ShowCurrentPropPreviewMessage(eventPlayer);
-}
-
-export function OnRayCastMissed(eventPlayer: mod.Player): void {
-    if (!IsPlayerReferenceValid(eventPlayer)) {
-        return;
-    }
-
-    const playerId = mod.GetObjId(eventPlayer);
-    const rayCastAction = DequeueRayCastAction(playerId);
-    if (!rayCastAction) {
-        return;
-    }
-
-    if (rayCastAction === "preview") {
-        HidePreviewIconForPlayerId(playerId);
-        return;
-    }
-
-    ShowMessage(eventPlayer, mod.Message(mod.stringkeys.prop_spawner_no_surface));
-}
-
-export function OnPlayerUndeploy(playerObjId: number): void {
-    CleanupPlayerPreviewState(playerObjId, false);
-}
-
-export function OnPlayerDied(eventPlayer: mod.Player): void {
-    if (!IsPlayerReferenceValid(eventPlayer)) {
-        return;
-    }
-
-    CleanupPlayerPreviewState(mod.GetObjId(eventPlayer), false);
-}
-
-export function OnPlayerLeaveGame(eventPlayerID: number): void {
-    CleanupPlayerPreviewState(eventPlayerID, true);
-    playerPropIndex.delete(eventPlayerID);
 }
 
 export function OngoingPlayer(player: mod.Player): void {
-    OnGoingPlayer(player);
+    const id = GetPlayerId(player);
+    if (!playerGadgetAiming.has(id)) {
+        HidePreviewIcon(player);
+        return;
+    }
+    if (playerRaycastInFlight.has(id)) return; // never stack raycasts
+
+    const tick = (playerPreviewTick.get(id) ?? 0) + 1;
+    playerPreviewTick.set(id, tick);
+    if (tick % PREVIEW_TICK_INTERVAL !== 0) return;
+
+    const { start, end } = GetRaycastVectors(player);
+    playerRaycastInFlight.add(id);
+    playerRaycastPurpose.set(id, "preview");
+    mod.RayCast(player, start, end);
+}
+
+// Engine may emit either casing; route both to the same handler.
+export function OnGoingPlayer(player: mod.Player): void {
+    OngoingPlayer(player);
+}
+
+export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector): void {
+    const id = GetPlayerId(eventPlayer);
+    const purpose = playerRaycastPurpose.get(id);
+    playerRaycastInFlight.delete(id);
+    playerRaycastPurpose.delete(id);
+
+    const isFloor = mod.YComponentOf(eventNormal) >= MIN_FLOOR_NORMAL_Y;
+
+    if (purpose === "spawn") {
+        if (!isFloor) {
+            // Placement rejected: surface is a wall or ceiling
+            ShowPreviewIconError(eventPlayer, eventPoint, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+            return;
+        }
+
+        const config = GetPropConfig(eventPlayer);
+        const spawnPos = ApplyHorizontalOffset(eventPoint, eventPlayer, config);
+        const spawnRot = GetFacingPlayerRotation(eventPlayer);
+        const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, ONE_VEC);
+
+        if (prop) {
+            // Advance to the next prop in the rotation
+            const currentIdx = playerPropIndex.get(id) ?? 0;
+            playerPropIndex.set(id, currentIdx + 1);
+
+            HidePreviewIcon(eventPlayer);
+
+            const list = playerSpawnedObjects.get(id) ?? [];
+            list.push(prop);
+            playerSpawnedObjects.set(id, list);
+        }
+    } else {
+        // Preview: update icon position and validity
+        if (isFloor) {
+            ShowPreviewIconValid(eventPlayer, eventPoint);
+        } else {
+            ShowPreviewIconError(eventPlayer, eventPoint, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+        }
+    }
+}
+
+export function OnRayCastMissed(eventPlayer: mod.Player): void {
+    const id = GetPlayerId(eventPlayer);
+    const purpose = playerRaycastPurpose.get(id);
+    playerRaycastInFlight.delete(id);
+    playerRaycastPurpose.delete(id);
+
+    if (purpose === "spawn") {
+        // Out of range or no surface within MAX_SPAWN_DISTANCE
+        const { end } = GetRaycastVectors(eventPlayer);
+        ShowPreviewIconError(eventPlayer, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+    } else {
+        // Preview: show error icon at the raycast end point
+        const { end } = GetRaycastVectors(eventPlayer);
+        ShowPreviewIconError(eventPlayer, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+    }
+}
+
+export function OnPlayerDied(
+    eventPlayer: mod.Player,
+    eventOtherPlayer: mod.Player,
+    eventDeathType: mod.DeathType,
+    eventWeaponUnlock: mod.WeaponUnlock
+): void {
+    CleanupPlayerObjects(eventPlayer);
+    ResetPlayerState(eventPlayer);
+}
+
+export function OnPlayerUndeploy(eventPlayer: mod.Player): void {
+    CleanupPlayerObjects(eventPlayer);
+    ResetPlayerState(eventPlayer);
 }

@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.05.05";
+const VERSION = "1.05.09";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -111,6 +111,8 @@ const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0;
 const VL7_TRANSITION_DISTORTION_LEAD_SECONDS = 1;
 const VL7_TRANSITION_DISTORTION_TRAIL_SECONDS = 0.2;
 const VL7_TRANSITION_DISTORTION_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Drone_OutOfRange_Distortion;
+const VL7_CLOUD_OBJECT = mod.GetVL7Cloud(1470);
+mod.SetVL7CloudEffects(VL7_CLOUD_OBJECT, true, false, false);
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
@@ -319,13 +321,13 @@ const SANDSTORM_CHANCE_LMS = 0.75;
 const SANDSTORM_CHANCE_DEFAULT = 0.9;
 // Reserve these IDs in Godot for sandstorm warning/loop sounds.
 const SANDSTORM_WARNING_SFX_ID = 2601;
-const SANDSTORM_WARNING_SFX_ATTENUATION = 80;
-const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2612, 2613, 2614];
-const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 60;
+const SANDSTORM_WARNING_SFX_ATTENUATION = 100;
+const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2620, 2621, 2622];
+const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 90;
 const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605, 2606, 2607, 2608, 2609, 2610];
-const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 55;
+const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 100;
 const SANDSTORM_LOOP_AUDIO_RAMP_SECONDS = 10;
-const SANDSTORM_JETWASH_WARNING_LEAD_SECONDS = 1;
+const SANDSTORM_JETWASH_WARNING_LEAD_SECONDS = 0.25;
 const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
 const SANDSTORM_LOOP_SFX_PLAY_STAGGER_SECONDS = 0.06;
 const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0.02;
