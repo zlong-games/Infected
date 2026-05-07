@@ -4,5 +4,6 @@
   "prop_spawner_preview_cratepallet_01": "Crate Pallet",
   "prop_spawner_preview_unknown": "Next prop: Unknown",
   "prop_spawner_invalid_surface": "Invalid surface",
-  "prop_spawner_out_of_range": "Out of range"
+  "prop_spawner_out_of_range": "Out of range",
+  "prop_spawner_toggle_to_extend": "Toggle Laser to extend props"
 }

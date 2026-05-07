@@ -37,7 +37,7 @@ const SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_ATMine_Pickup_OneS
 const SFX_RATCHET       = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
 
 // ---- Ratchet tuning --------------------------------------------------------
-const LINE_RATCHET_DEG  = 1;    // degrees of aim sweep per ratchet notch
+const LINE_RATCHET_DEG  = 3;    // degrees of aim sweep per ratchet notch
 const RATCHET_BASE_AMP  = 0.5;  // amplitude of the first notch in a bracket
 const RATCHET_AMP_STEP  = 0.15; // amplitude added per successive notch
 const RATCHET_MAX_AMP   = 0.85; // amplitude ceiling
@@ -121,6 +121,17 @@ const playerLineCursorPos: Map<number, mod.Vector> = new Map();
 // Ratchet sound state: angle (radians) at the last notch fire, and escalating notch index.
 const playerRatchetAngle: Map<number, number> = new Map();
 const playerRatchetNotch: Map<number, number> = new Map();
+
+// State of the most recent line cursor raycast result.
+const playerLineCursorState: Map<number, "valid" | "invalid_surface" | "out_of_range"> = new Map();
+
+// Per-player status/instruction world icon shown during line-drag mode.
+const playerStatusIcons: Map<number, mod.WorldIcon> = new Map();
+
+// Players in line mode whose aim updates are frozen (stopped aiming after placing anchor).
+const playerLineFrozen: Set<number> = new Set();
+
+
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -357,6 +368,40 @@ function HideLinePreviews(player: mod.Player): void {
     playerLineCount.set(id, 1);
 }
 
+// ---- Line-mode status icon ------------------------------------------------
+
+function GetLineModeStatusPos(anchorPos: mod.Vector): mod.Vector {
+    return mod.CreateVector(
+        mod.XComponentOf(anchorPos),
+        mod.YComponentOf(anchorPos) + 1.5,
+        mod.ZComponentOf(anchorPos)
+    );
+}
+
+function ShowStatusIcon(player: mod.Player, pos: mod.Vector, message: mod.Message, color: mod.Vector): void {
+    const id = GetPlayerId(player);
+    let icon = playerStatusIcons.get(id);
+    if (!icon) {
+        icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        playerStatusIcons.set(id, icon);
+    }
+    mod.SetWorldIconText(icon, message);
+    mod.SetWorldIconColor(icon, color);
+    mod.SetWorldIconPosition(icon, pos);
+    mod.SetWorldIconOwner(icon, player);
+    mod.EnableWorldIconImage(icon, true);
+    mod.EnableWorldIconText(icon, true);
+}
+
+function HideStatusIcon(player: mod.Player): void {
+    const icon = playerStatusIcons.get(GetPlayerId(player));
+    if (!icon) return;
+    mod.EnableWorldIconImage(icon, false);
+    mod.EnableWorldIconText(icon, false);
+}
+
 // Rotate the anchor prop so it is perpendicular to the line direction,
 // choosing the perpendicular that faces toward the player.
 // The line direction is stored separately in playerLineDir for use at finalize.
@@ -451,7 +496,9 @@ function FinalizeLinePlacement(player: mod.Player): void {
     playerLineCursorPos.delete(id);
     playerRatchetAngle.delete(id);
     playerRatchetNotch.delete(id);
+    playerLineFrozen.delete(id);
     HideLinePreviews(player);
+    HideStatusIcon(player);
 
     // Advance prop rotation cycle once for the whole row
     const currentIdx = playerPropIndex.get(id) ?? 0;
@@ -480,7 +527,9 @@ function CancelLinePlacement(player: mod.Player): void {
     playerLineCursorPos.delete(id);
     playerRatchetAngle.delete(id);
     playerRatchetNotch.delete(id);
+    playerLineFrozen.delete(id);
     HideLinePreviews(player);
+    HideStatusIcon(player);
     HidePreviewIcon(player);
 }
 
@@ -508,6 +557,12 @@ function CleanupPlayerObjects(player: mod.Player): void {
         }
         playerLinePreviewIcons.delete(id);
     }
+
+    const statusIcon = playerStatusIcons.get(id);
+    if (statusIcon) {
+        try { mod.UnspawnObject(statusIcon as unknown as mod.Object); } catch { }
+        playerStatusIcons.delete(id);
+    }
 }
 
 function ResetPlayerState(player: mod.Player): void {
@@ -525,6 +580,8 @@ function ResetPlayerState(player: mod.Player): void {
     playerRatchetAngle.delete(id);
     playerRatchetNotch.delete(id);
     playerLineCount.delete(id);
+    playerLineCursorState.delete(id);
+    playerLineFrozen.delete(id);
 }
 
 // ---- Event handlers --------------------------------------------------------
@@ -553,16 +610,14 @@ export function OnPlayerDeployed(player: mod.Player): void {
     // Line preview icons are spawned lazily in UpdateLinePreviews on first use.
 }
 
-// Tactical Device button (toggle laser/light): cancels anchor placement in line mode.
+// Tactical Device button (toggle laser/light): toggles line-mode extension freeze.
 export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
     const id = GetPlayerId(player);
-    // Downgrade any in-flight spawn raycast so OnRayCastHit won't enter line mode
-    // after the cancel clears state.
-    if (playerRaycastPurpose.get(id) === "spawn") {
-        playerRaycastPurpose.set(id, "preview");
-    }
-    if (playerLineMode.has(id)) {
-        CancelLinePlacement(player);
+    if (!playerLineMode.has(id)) return;
+    if (playerLineFrozen.has(id)) {
+        playerLineFrozen.delete(id);
+    } else {
+        playerLineFrozen.add(id);
     }
 }
 
@@ -600,6 +655,12 @@ export function OngoingPlayer(player: mod.Player): void {
         // Fall back to aim-direction projection when no valid floor hit is available.
         const anchorPos = playerLineAnchorPos.get(id);
         if (anchorPos) {
+            if (playerLineFrozen.has(id)) {
+                // Player stopped aiming: freeze rotation/extension updates.
+                // Existing preview icons stay in their current state.
+                return;
+            }
+
             // Fire a throttled raycast to get a precise ground cursor.
             if (!playerRaycastInFlight.has(id)) {
                 const tick = (playerPreviewTick.get(id) ?? 0) + 1;
@@ -635,47 +696,70 @@ export function OngoingPlayer(player: mod.Player): void {
                     try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
                 }
                 HideLinePreviews(player);
+                ShowStatusIcon(player, cursorPos,
+                    mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                    mod.CreateVector(0.8, 0.8, 1.0));
             } else {
                 // Cursor is far enough - engage line drag.
                 const lineDir = ComputeLineDirection(anchorPos, cursorPos);
                 if (lineDir) {
                     const config = GetPropConfig(player);
-                    RotateAnchorProp(player, lineDir);
-                    const facingYaw = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
-                    const effectiveStep = ComputeEffectiveStep(lineDir, facingYaw, config);
-                    const count = ComputeLineCount(anchorPos, cursorPos, effectiveStep);
-                    const prevRatchetCount = playerLineCount.get(id) ?? 1;
-                    UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
+                    const cursorState = playerLineCursorState.get(id);
+                    const statusPos = cursorPos;
 
-                    // Ratchet: ticking SFX every LINE_RATCHET_DEG of aim sweep.
-                    // Volume escalates within each prop count bracket, resets on bracket change.
-                    const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
-                    if (count !== prevRatchetCount) {
-                        // Bracket changed - anchor to current angle and reset notch volume
-                        playerRatchetAngle.set(id, lineYaw);
-                        playerRatchetNotch.set(id, 0);
+                    if (cursorState === "invalid_surface" || cursorState === "out_of_range") {
+                        // Freeze rotation - keep last valid facing, hide child previews.
+                        HideLinePreviews(player);
+                        const errorMsg = cursorState === "invalid_surface"
+                            ? mod.Message(mod.stringkeys.prop_spawner_invalid_surface)
+                            : mod.Message(mod.stringkeys.prop_spawner_out_of_range);
+                        ShowStatusIcon(player, statusPos, errorMsg, mod.CreateVector(1, 0.35, 0));
                     } else {
-                        const lastRatchetAngle = playerRatchetAngle.get(id);
-                        if (lastRatchetAngle === undefined) {
+                        RotateAnchorProp(player, lineDir);
+                        const facingYaw = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
+                        const effectiveStep = ComputeEffectiveStep(lineDir, facingYaw, config);
+                        const count = ComputeLineCount(anchorPos, cursorPos, effectiveStep);
+                        const prevRatchetCount = playerLineCount.get(id) ?? 1;
+                        UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
+ 
+                        if (count === 1) {
+                            ShowStatusIcon(player, statusPos,
+                                mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                                mod.CreateVector(0.8, 0.8, 1.0));
+                        } else {
+                            HideStatusIcon(player);
+                        }
+
+                        // Ratchet: ticking SFX every LINE_RATCHET_DEG of aim sweep.
+                        // Volume escalates within each prop count bracket, resets on bracket change.
+                        const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+                        if (count !== prevRatchetCount) {
+                            // Bracket changed - anchor to current angle and reset notch volume
                             playerRatchetAngle.set(id, lineYaw);
                             playerRatchetNotch.set(id, 0);
                         } else {
-                            const delta = SmallestAngleDelta(lastRatchetAngle, lineYaw);
-                            if (delta >= LINE_RATCHET_DEG * (Math.PI / 180)) {
+                            const lastRatchetAngle = playerRatchetAngle.get(id);
+                            if (lastRatchetAngle === undefined) {
                                 playerRatchetAngle.set(id, lineYaw);
-                                const notch = (playerRatchetNotch.get(id) ?? 0) + 1;
-                                playerRatchetNotch.set(id, notch);
-                                const amp = Math.min(RATCHET_BASE_AMP + notch * RATCHET_AMP_STEP, RATCHET_MAX_AMP);
-                                // Sound at the last visible preview icon position, or cursor if none
-                                const ratchetSlot = count - 1;
-                                const ratchetPos = ratchetSlot > 0
-                                    ? mod.CreateVector(
-                                        mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * ratchetSlot * effectiveStep,
-                                        mod.YComponentOf(anchorPos),
-                                        mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * ratchetSlot * effectiveStep
-                                      )
-                                    : cursorPos;
-                                PlaySFX3DAtPos(SFX_RATCHET, amp, ratchetPos);
+                                playerRatchetNotch.set(id, 0);
+                            } else {
+                                const delta = SmallestAngleDelta(lastRatchetAngle, lineYaw);
+                                if (delta >= LINE_RATCHET_DEG * (Math.PI / 180)) {
+                                    playerRatchetAngle.set(id, lineYaw);
+                                    const notch = (playerRatchetNotch.get(id) ?? 0) + 1;
+                                    playerRatchetNotch.set(id, notch);
+                                    const amp = Math.min(RATCHET_BASE_AMP + notch * RATCHET_AMP_STEP, RATCHET_MAX_AMP);
+                                    // Sound at the last visible preview icon position, or cursor if none
+                                    const ratchetSlot = count - 1;
+                                    const ratchetPos = ratchetSlot > 0
+                                        ? mod.CreateVector(
+                                            mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * ratchetSlot * effectiveStep,
+                                            mod.YComponentOf(anchorPos),
+                                            mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * ratchetSlot * effectiveStep
+                                          )
+                                        : cursorPos;
+                                    PlaySFX3DAtPos(SFX_RATCHET, amp, ratchetPos);
+                                }
                             }
                         }
                     }
@@ -748,9 +832,10 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
         const anchorPos = playerLineAnchorPos.get(id);
         if (isFloor && anchorPos && HorizontalDistance(anchorPos, eventPoint) <= LINE_CURSOR_MAX_DIST) {
             playerLineCursorPos.set(id, eventPoint);
+            playerLineCursorState.set(id, "valid");
         } else {
-            // Invalid surface (wall/ceiling, too far, or no anchor): clear cached cursor.
             playerLineCursorPos.delete(id);
+            playerLineCursorState.set(id, isFloor ? "out_of_range" : "invalid_surface");
         }
     } else {
         // Preview: update icon position and validity
@@ -773,8 +858,9 @@ export function OnRayCastMissed(eventPlayer: mod.Player): void {
         const { end } = GetRaycastVectors(eventPlayer);
         ShowPreviewIconError(eventPlayer, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
     } else if (purpose === "line_cursor") {
-        // Missed: clear cached cursor so aim-direction fallback is used.
+        // Missed: clear cached cursor and record out-of-range state.
         playerLineCursorPos.delete(id);
+        playerLineCursorState.set(id, "out_of_range");
     } else {
         // Preview: show error icon at the raycast end point
         const { end } = GetRaycastVectors(eventPlayer);

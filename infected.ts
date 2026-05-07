@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.03";
+const VERSION = "1.06.10";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -12128,29 +12128,61 @@ const PROP_SPAWNER_PREVIEW_TICK_INTERVAL = 3;
 const PROP_SPAWNER_MIN_FLOOR_NORMAL_Y = 0.5;
 const PROP_SPAWNER_ZERO_VEC = mod.CreateVector(0, 0, 0);
 const PROP_SPAWNER_ONE_VEC = mod.CreateVector(1, 1, 1);
+const PROP_SPAWNER_MAX_LINE_PROPS = 3;
+const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 5;
+const PROP_SPAWNER_LINE_DRAG_MIN_DIST = 2.0;
+const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Sand;
+const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
+const PROP_SPAWNER_SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_ATMine_Pickup_OneShot3D;
+const PROP_SPAWNER_SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
+const PROP_SPAWNER_LINE_RATCHET_DEG = 1;
+const PROP_SPAWNER_RATCHET_BASE_AMP = 0.5;
+const PROP_SPAWNER_RATCHET_AMP_STEP = 0.15;
+const PROP_SPAWNER_RATCHET_MAX_AMP = 0.85;
+const PROP_SPAWNER_RATCHET_ATTEN = 30;
 
 interface PropSpawnerConfig {
     prop: mod.RuntimeSpawn_Common | mod.RuntimeSpawn_Sand;
     forwardOffset: number;
     rightOffset: number;
+    width: number;
+    depth: number;
 }
 
 const PROP_SPAWNER_POOL: PropSpawnerConfig[] = [
-    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 1 },
-    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 1 },
-    { prop: mod.RuntimeSpawn_Sand.CratePallet_01, forwardOffset: 0, rightOffset: 0 },
+    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 0, width: 1.92, depth: 0.3 },
+    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 0, width: 1.0, depth: 0.2 },
+    { prop: mod.RuntimeSpawn_Sand.CratePallet_01, forwardOffset: 0, rightOffset: 0, width: 2.0, depth: 1.0 },
 ];
 
 class PropSpawner {
-    static readonly _assignedProp: Map<number, PropSpawnerConfig> = new Map();
+    static readonly _propIndex: Map<number, number> = new Map();
     static readonly _raycastInFlight: Set<number> = new Set();
-    static readonly _raycastPurpose: Map<number, "preview" | "spawn"> = new Map();
+    static readonly _raycastPurpose: Map<number, "preview" | "spawn" | "line_cursor"> = new Map();
     static readonly _previewTick: Map<number, number> = new Map();
     static readonly _hasPlaced: Set<number> = new Set();
-    static readonly _gadgetAiming: Set<number> = new Set();
     static readonly _previewIcons: Map<number, mod.WorldIcon> = new Map();
     static readonly _allPlacedObjects: mod.Object[] = [];
     static _survivorsInPhase: mod.Player[] = [];
+    static readonly _playerSpawnedObjects: Map<number, mod.Object[]> = new Map();
+    static readonly _lineMode: Set<number> = new Set();
+    static readonly _lineAnchorPos: Map<number, mod.Vector> = new Map();
+    static readonly _lineAnchorRot: Map<number, mod.Vector> = new Map();
+    static readonly _linePreviewIcons: Map<number, mod.WorldIcon[]> = new Map();
+    static readonly _lineCount: Map<number, number> = new Map();
+    static readonly _lineDir: Map<number, mod.Vector> = new Map();
+    static readonly _lineCursorPos: Map<number, mod.Vector> = new Map();
+    static readonly _ratchetAngle: Map<number, number> = new Map();
+    static readonly _ratchetNotch: Map<number, number> = new Map();
+    static readonly _graceMode: Set<number> = new Set();
+    static readonly _lineCursorState: Map<number, "valid" | "invalid_surface" | "out_of_range"> = new Map();
+    static readonly _statusIcons: Map<number, mod.WorldIcon> = new Map();
+
+    // Players in line mode whose updates are frozen (stopped aiming after placing anchor).
+    static readonly _lineFrozen: Set<number> = new Set();
+
+    // Tracks that the fire-induced AimStop after placing the root prop has been consumed.
+    static readonly _lineModeFirstAimStopConsumed: Set<number> = new Set();
 
     static GetPlacementStatus(): { placed: number; total: number } {
         return { placed: PropSpawner._hasPlaced.size, total: PropSpawner._survivorsInPhase.length };
@@ -12179,8 +12211,7 @@ class PropSpawner {
 
         for (const player of humanSurvivors) {
             const id = mod.GetObjId(player);
-            const config = PROP_SPAWNER_POOL[Math.floor(Math.random() * PROP_SPAWNER_POOL.length)];
-            PropSpawner._assignedProp.set(id, config);
+            PropSpawner._propIndex.set(id, 0);
             try { mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
             try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
             PropSpawner._SpawnPreviewIcon(player);
@@ -12202,18 +12233,19 @@ class PropSpawner {
         GameCountdown.GlobalClose();
         GameHandler.propPlacementPhaseActive = false;
 
-        // Restore each survivor's actual gadget
+        // For each survivor: players who are mid-placement (in line mode) get a grace
+        // period to finalize; all others have their gadget stripped immediately.
         for (const player of humanSurvivors) {
             const id = mod.GetObjId(player);
-            PropSpawner._HidePreviewIcon(id);
-            PropSpawner._CleanupPreviewIcon(id);
-            PropSpawner._CleanupPlayerState(id);
-            if (!Helpers.HasValidObjId(player)) continue;
-            try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
-            const pp = PlayerProfile.Get(player);
-            const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
-            if (gadgetItem?.gadget) {
-                try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
+            if (PropSpawner._lineMode.has(id)) {
+                // Still dragging out a line -- let them finalize via the next fire input.
+                PropSpawner._graceMode.add(id);
+            } else {
+                // Already placed, or ran out of time without starting -- strip gadget now.
+                PropSpawner._HidePreviewIcon(id);
+                PropSpawner._CleanupPreviewIcon(id);
+                PropSpawner._CleanupPlayerState(id);
+                if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
             }
         }
         PropSpawner._hasPlaced.clear();
@@ -12229,6 +12261,30 @@ class PropSpawner {
 
     static CleanupPlayer(player: mod.Player): void {
         const id = mod.GetObjId(player);
+        // Cancel any active line placement (unspawn in-progress anchor prop)
+        if (PropSpawner._lineMode.has(id)) {
+            const objects = PropSpawner._playerSpawnedObjects.get(id);
+            if (objects) {
+                for (const obj of objects) {
+                    try { mod.UnspawnObject(obj); } catch { }
+                }
+                PropSpawner._playerSpawnedObjects.delete(id);
+            }
+        }
+        // Clean up line preview icons
+        const lineIcons = PropSpawner._linePreviewIcons.get(id);
+        if (lineIcons) {
+            for (const li of lineIcons) {
+                try { mod.UnspawnObject(li as unknown as mod.Object); } catch { }
+            }
+            PropSpawner._linePreviewIcons.delete(id);
+        }
+        // Clean up status icon
+        const statusIcon = PropSpawner._statusIcons.get(id);
+        if (statusIcon) {
+            try { mod.UnspawnObject(statusIcon as unknown as mod.Object); } catch { }
+            PropSpawner._statusIcons.delete(id);
+        }
         PropSpawner._HidePreviewIcon(id);
         PropSpawner._CleanupPreviewIcon(id);
         PropSpawner._CleanupPlayerState(id);
@@ -12251,8 +12307,19 @@ class PropSpawner {
         PropSpawner._raycastInFlight.delete(id);
         PropSpawner._raycastPurpose.delete(id);
         PropSpawner._previewTick.delete(id);
-        PropSpawner._gadgetAiming.delete(id);
-        PropSpawner._assignedProp.delete(id);
+        PropSpawner._propIndex.delete(id);
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._lineCount.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._graceMode.delete(id);
+        PropSpawner._lineCursorState.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        PropSpawner._lineModeFirstAimStopConsumed.delete(id);
     }
 
     private static _HidePreviewIcon(id: number): void {
@@ -12288,11 +12355,11 @@ class PropSpawner {
         const id = mod.GetObjId(player);
         const icon = PropSpawner._previewIcons.get(id);
         if (!icon) return;
-        const config = PropSpawner._assignedProp.get(id);
-        if (!config) return;
+        const config = PropSpawner._GetPropConfig(id);
         mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
         mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
         mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
         mod.EnableWorldIconImage(icon, true);
         mod.EnableWorldIconText(icon, true);
     }
@@ -12304,6 +12371,7 @@ class PropSpawner {
         mod.SetWorldIconText(icon, message);
         mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
         mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
         mod.EnableWorldIconImage(icon, true);
         mod.EnableWorldIconText(icon, true);
     }
@@ -12334,23 +12402,34 @@ class PropSpawner {
     }
 
     static OnAimStart(player: mod.Player): void {
-        if (!GameHandler.propPlacementPhaseActive) return;
-        const id = mod.GetObjId(player);
-        if (!PropSpawner._assignedProp.has(id)) return;
-        PropSpawner._gadgetAiming.add(id);
+        PropSpawner._lineFrozen.delete(mod.GetObjId(player));
     }
 
     static OnAimStop(player: mod.Player): void {
         const id = mod.GetObjId(player);
-        PropSpawner._gadgetAiming.delete(id);
-        PropSpawner._HidePreviewIcon(id);
+        if (PropSpawner._lineMode.has(id)) {
+            if (!PropSpawner._lineModeFirstAimStopConsumed.has(id)) {
+                // Fire-induced AimStop from placing the root prop - absorb it.
+                PropSpawner._lineModeFirstAimStopConsumed.add(id);
+            } else {
+                // Real ADS release: freeze line updates.
+                PropSpawner._lineFrozen.add(id);
+            }
+        } else if (GameHandler.propPlacementPhaseActive) {
+            PropSpawner._HidePreviewIcon(id);
+        }
     }
 
     static OnFireStart(player: mod.Player): void {
-        if (!GameHandler.propPlacementPhaseActive) return;
         const id = mod.GetObjId(player);
-        if (!PropSpawner._assignedProp.has(id)) return;
+        const inGrace = PropSpawner._graceMode.has(id);
+        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
+        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
         if (PropSpawner._hasPlaced.has(id)) return;
+        if (PropSpawner._lineMode.has(id)) {
+            PropSpawner._FinalizeLinePlacement(player);
+            return;
+        }
         if (PropSpawner._raycastInFlight.has(id)) {
             PropSpawner._raycastPurpose.set(id, "spawn");
         } else {
@@ -12366,10 +12445,116 @@ class PropSpawner {
     }
 
     static OngoingTick(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
         const id = mod.GetObjId(player);
-        if (PropSpawner._hasPlaced.has(id)) return;
+        const inGrace = PropSpawner._graceMode.has(id);
+        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
+        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
+
+        if (PropSpawner._lineMode.has(id)) {
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            if (anchorPos) {
+                if (PropSpawner._lineFrozen.has(id)) {
+                    // Player stopped aiming: freeze rotation/extension updates.
+                    return;
+                }
+
+                if (!PropSpawner._raycastInFlight.has(id)) {
+                    const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
+                    PropSpawner._previewTick.set(id, tick);
+                    if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL === 0) {
+                        const { start, end } = PropSpawner._GetRaycastVectors(player);
+                        PropSpawner._raycastInFlight.add(id);
+                        PropSpawner._raycastPurpose.set(id, "line_cursor");
+                        mod.RayCast(player, start, end);
+                    }
+                }
+                const cachedCursor = PropSpawner._lineCursorPos.get(id);
+                const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+                const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+                const cursorPos = cachedCursor ?? mod.Add(eyePos, mod.Multiply(facing, PROP_SPAWNER_LINE_CURSOR_MAX_DIST));
+                const dist = PropSpawner._HorizontalDistance(anchorPos, cursorPos);
+                if (dist < PROP_SPAWNER_LINE_DRAG_MIN_DIST) {
+                    const objects = PropSpawner._playerSpawnedObjects.get(id);
+                    if (objects && objects.length > 0) {
+                        const anchor = objects[objects.length - 1];
+                        const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+                        const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+                        const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+                        const yaw = Math.atan2(toPx, toPz);
+                        const rot = mod.CreateVector(0, yaw, 0);
+                        PropSpawner._lineAnchorRot.set(id, rot);
+                        try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
+                    }
+                    PropSpawner._HideLinePreviews(player);
+                    PropSpawner._ShowStatusIcon(player, cursorPos,
+                        mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                        mod.CreateVector(0.8, 0.8, 1.0));
+                } else {
+                    const lineDir = PropSpawner._ComputeLineDirection(anchorPos, cursorPos);
+                    if (lineDir) {
+                        const config = PropSpawner._GetPropConfig(id);
+                        const cursorState = PropSpawner._lineCursorState.get(id);
+                        const statusPos = cursorPos;
+
+                        if (cursorState === "invalid_surface" || cursorState === "out_of_range") {
+                            PropSpawner._HideLinePreviews(player);
+                            const errorMsg = cursorState === "invalid_surface"
+                                ? mod.Message(mod.stringkeys.prop_spawner_invalid_surface)
+                                : mod.Message(mod.stringkeys.prop_spawner_out_of_range);
+                            PropSpawner._ShowStatusIcon(player, statusPos, errorMsg, mod.CreateVector(1, 0.35, 0));
+                        } else {
+                            PropSpawner._RotateAnchorProp(player, lineDir);
+                            const facingYaw = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
+                            const effectiveStep = PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config);
+                            const count = PropSpawner._ComputeLineCount(anchorPos, cursorPos, effectiveStep);
+                            const prevRatchetCount = PropSpawner._lineCount.get(id) ?? 1;
+                            PropSpawner._UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
+
+                            if (count === 1) {
+                                PropSpawner._ShowStatusIcon(player, statusPos,
+                                    mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                                    mod.CreateVector(0.8, 0.8, 1.0));
+                            } else {
+                                PropSpawner._HideStatusIcon(id);
+                            }
+
+                            const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+                            if (count !== prevRatchetCount) {
+                                PropSpawner._ratchetAngle.set(id, lineYaw);
+                                PropSpawner._ratchetNotch.set(id, 0);
+                            } else {
+                                const lastRatchetAngle = PropSpawner._ratchetAngle.get(id);
+                                if (lastRatchetAngle === undefined) {
+                                    PropSpawner._ratchetAngle.set(id, lineYaw);
+                                    PropSpawner._ratchetNotch.set(id, 0);
+                                } else {
+                                    const delta = PropSpawner._SmallestAngleDelta(lastRatchetAngle, lineYaw);
+                                    if (delta >= PROP_SPAWNER_LINE_RATCHET_DEG * (Math.PI / 180)) {
+                                        PropSpawner._ratchetAngle.set(id, lineYaw);
+                                        const notch = (PropSpawner._ratchetNotch.get(id) ?? 0) + 1;
+                                        PropSpawner._ratchetNotch.set(id, notch);
+                                        const amp = Math.min(PROP_SPAWNER_RATCHET_BASE_AMP + notch * PROP_SPAWNER_RATCHET_AMP_STEP, PROP_SPAWNER_RATCHET_MAX_AMP);
+                                        const ratchetSlot = count - 1;
+                                        const ratchetPos = ratchetSlot > 0
+                                            ? mod.CreateVector(
+                                                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * ratchetSlot * effectiveStep,
+                                                mod.YComponentOf(anchorPos),
+                                                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * ratchetSlot * effectiveStep
+                                            )
+                                            : cursorPos;
+                                        PropSpawner._PlaySFX3DAtPos(PROP_SPAWNER_SFX_RATCHET, amp, ratchetPos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         if (PropSpawner._raycastInFlight.has(id)) return;
-        // Ensure the portal gadget stays equipped
         try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
         const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
         PropSpawner._previewTick.set(id, tick);
@@ -12393,28 +12578,32 @@ class PropSpawner {
                 PropSpawner._ShowPreviewIconError(player, point, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
                 return;
             }
-            const config = PropSpawner._assignedProp.get(id);
-            if (!config) return;
+            const config = PropSpawner._GetPropConfig(id);
             const spawnPos = PropSpawner._ApplyHorizontalOffset(point, player, config);
             const spawnRot = PropSpawner._GetFacingPlayerRotation(player);
             const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, PROP_SPAWNER_ONE_VEC);
             if (prop) {
-                PropSpawner._hasPlaced.add(id);
+                PropSpawner._lineMode.add(id);
+                PropSpawner._lineAnchorPos.set(id, spawnPos);
+                PropSpawner._lineAnchorRot.set(id, spawnRot);
+                PropSpawner._lineCount.set(id, 1);
+                const list = PropSpawner._playerSpawnedObjects.get(id) ?? [];
+                list.push(prop);
+                PropSpawner._playerSpawnedObjects.set(id, list);
+                const anchorVfx = mod.SpawnObject(PROP_SPAWNER_VFX_ANCHOR_LAUNCH, spawnPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (anchorVfx) mod.EnableVFX(anchorVfx, true);
+                PropSpawner._ratchetAngle.delete(id);
+                PropSpawner._ratchetNotch.set(id, 0);
                 PropSpawner._HidePreviewIcon(id);
-                PropSpawner._allPlacedObjects.push(prop);
-                // SFX for placing player, VFX at placement position
-                Helpers.PlaySoundFX(SFX_PROP_PLACED, 1, player);
-                const placementVfx = mod.SpawnObject(VFX_PROP_PLACED, spawnPos, PROP_SPAWNER_ZERO_VEC, PROP_SPAWNER_ONE_VEC) as mod.VFX;
-                if (placementVfx) mod.EnableVFX(placementVfx, true);
-                // Immediately restore the player's real gadget
-                try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
-                const pp = PlayerProfile.Get(player);
-                const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
-                if (gadgetItem?.gadget) {
-                    try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
-                }
-                PropSpawner._CleanupPreviewIcon(id);
-                PropSpawner._CleanupPlayerState(id);
+            }
+        } else if (purpose === "line_cursor") {
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            if (isFloor && anchorPos && PropSpawner._HorizontalDistance(anchorPos, point) <= PROP_SPAWNER_LINE_CURSOR_MAX_DIST) {
+                PropSpawner._lineCursorPos.set(id, point);
+                PropSpawner._lineCursorState.set(id, "valid");
+            } else {
+                PropSpawner._lineCursorPos.delete(id);
+                PropSpawner._lineCursorState.set(id, isFloor ? "out_of_range" : "invalid_surface");
             }
         } else {
             if (isFloor) {
@@ -12427,10 +12616,318 @@ class PropSpawner {
 
     static OnRayCastMissed(player: mod.Player): void {
         const id = mod.GetObjId(player);
+        const purpose = PropSpawner._raycastPurpose.get(id);
         PropSpawner._raycastInFlight.delete(id);
         PropSpawner._raycastPurpose.delete(id);
-        const { end } = PropSpawner._GetRaycastVectors(player);
-        PropSpawner._ShowPreviewIconError(player, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+        if (purpose === "line_cursor") {
+            PropSpawner._lineCursorPos.delete(id);
+            PropSpawner._lineCursorState.set(id, "out_of_range");
+        } else {
+            const { end } = PropSpawner._GetRaycastVectors(player);
+            PropSpawner._ShowPreviewIconError(player, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+        }
+    }
+
+    static OnLaserToggle(player: mod.Player, _eventBoolean: boolean): void {
+        const id = mod.GetObjId(player);
+        if (!GameHandler.propPlacementPhaseActive && !PropSpawner._graceMode.has(id)) return;
+        if (PropSpawner._raycastPurpose.get(id) === "spawn") {
+            PropSpawner._raycastPurpose.set(id, "preview");
+        }
+        if (PropSpawner._lineMode.has(id)) {
+            PropSpawner._CancelLinePlacement(player);
+        }
+    }
+
+    private static _GetPropConfig(id: number): PropSpawnerConfig {
+        const idx = PropSpawner._propIndex.get(id) ?? 0;
+        return PROP_SPAWNER_POOL[idx % PROP_SPAWNER_POOL.length];
+    }
+
+    private static _ComputeLineDirection(anchorPos: mod.Vector, cursorPos: mod.Vector): mod.Vector | undefined {
+        const dx = mod.XComponentOf(cursorPos) - mod.XComponentOf(anchorPos);
+        const dz = mod.ZComponentOf(cursorPos) - mod.ZComponentOf(anchorPos);
+        const len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 0.001) return undefined;
+        return mod.CreateVector(dx / len, 0, dz / len);
+    }
+
+    private static _HorizontalDistance(a: mod.Vector, b: mod.Vector): number {
+        const dx = mod.XComponentOf(b) - mod.XComponentOf(a);
+        const dz = mod.ZComponentOf(b) - mod.ZComponentOf(a);
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static _ComputeEffectiveStep(lineDir: mod.Vector, facingYaw: number, config: PropSpawnerConfig): number {
+        const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+        const angle = facingYaw - lineYaw;
+        return config.width * Math.abs(Math.sin(angle)) + config.depth * Math.abs(Math.cos(angle));
+    }
+
+    private static _ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiveStep: number): number {
+        const dist = PropSpawner._HorizontalDistance(anchorPos, cursorPos);
+        const additional = Math.min(Math.floor(dist / effectiveStep), PROP_SPAWNER_MAX_LINE_PROPS - 1);
+        return 1 + additional;
+    }
+
+    private static _SmallestAngleDelta(a: number, b: number): number {
+        let d = b - a;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        return Math.abs(d);
+    }
+
+    private static _PlaySFX2DForPlayer(sfx: mod.RuntimeSpawn_Common, amplitude: number, player: mod.Player, pos: mod.Vector): void {
+        const sfxObj = mod.SpawnObject(sfx, pos, PROP_SPAWNER_ZERO_VEC) as mod.SFX;
+        if (sfxObj) mod.PlaySound(sfxObj, amplitude, player);
+    }
+
+    private static _PlaySFX3DAtPos(sfx: mod.RuntimeSpawn_Common, amplitude: number, pos: mod.Vector): void {
+        const sfxObj = mod.SpawnObject(sfx, pos, PROP_SPAWNER_ZERO_VEC) as mod.SFX;
+        if (sfxObj) mod.PlaySound(sfxObj, amplitude, pos, PROP_SPAWNER_RATCHET_ATTEN);
+    }
+
+    private static _UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
+        const id = mod.GetObjId(player);
+        const config = PropSpawner._GetPropConfig(id);
+        let icons = PropSpawner._linePreviewIcons.get(id);
+        if (!icons) {
+            icons = [];
+            PropSpawner._linePreviewIcons.set(id, icons);
+        }
+        while (icons.length < PROP_SPAWNER_MAX_LINE_PROPS - 1) {
+            const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, anchorPos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+            if (!icon) break;
+            mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+            mod.SetWorldIconOwner(icon, player);
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+            icons.push(icon);
+        }
+        for (let i = 0; i < icons.length; i++) {
+            const slotIndex = i + 1;
+            const icon = icons[i];
+            if (slotIndex < count) {
+                const offset = slotIndex * effectiveStep;
+                const pos = mod.CreateVector(
+                    mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                    mod.YComponentOf(anchorPos),
+                    mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+                );
+                mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
+                mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+                mod.SetWorldIconPosition(icon, pos);
+                mod.SetWorldIconOwner(icon, player);
+                mod.EnableWorldIconImage(icon, true);
+                mod.EnableWorldIconText(icon, true);
+            } else {
+                mod.EnableWorldIconImage(icon, false);
+                mod.EnableWorldIconText(icon, false);
+            }
+        }
+        const prevCount = PropSpawner._lineCount.get(id) ?? 1;
+        if (count > prevCount) {
+            const newSlotOffset = (count - 1) * effectiveStep;
+            const newSlotPos = mod.CreateVector(
+                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * newSlotOffset,
+                mod.YComponentOf(anchorPos),
+                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * newSlotOffset
+            );
+            PropSpawner._PlaySFX2DForPlayer(PROP_SPAWNER_SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
+        }
+        PropSpawner._lineCount.set(id, count);
+    }
+
+    private static _HideLinePreviews(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const icons = PropSpawner._linePreviewIcons.get(id);
+        if (!icons) return;
+        for (const icon of icons) {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
+        PropSpawner._lineCount.set(id, 1);
+    }
+
+    private static _GetLineModeStatusPos(anchorPos: mod.Vector): mod.Vector {
+        return mod.CreateVector(
+            mod.XComponentOf(anchorPos),
+            mod.YComponentOf(anchorPos) + 1.5,
+            mod.ZComponentOf(anchorPos)
+        );
+    }
+
+    private static _ShowStatusIcon(player: mod.Player, pos: mod.Vector, message: mod.Message, color: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        let icon = PropSpawner._statusIcons.get(id);
+        if (!icon) {
+            icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+            if (!icon) return;
+            mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+            PropSpawner._statusIcons.set(id, icon);
+        }
+        mod.SetWorldIconText(icon, message);
+        mod.SetWorldIconColor(icon, color);
+        mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _HideStatusIcon(id: number): void {
+        const icon = PropSpawner._statusIcons.get(id);
+        if (!icon) return;
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+    }
+
+    private static _RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const objects = PropSpawner._playerSpawnedObjects.get(id);
+        if (!objects || objects.length === 0) return;
+        const anchor = objects[objects.length - 1];
+        PropSpawner._lineDir.set(id, lineDir);
+        const ldx = mod.XComponentOf(lineDir);
+        const ldz = mod.ZComponentOf(lineDir);
+        const perp1x = -ldz;
+        const perp1z = ldx;
+        const anchorPos = PropSpawner._lineAnchorPos.get(id) ?? PROP_SPAWNER_ZERO_VEC;
+        const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+        const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+        const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+        const dot = perp1x * toPx + perp1z * toPz;
+        const facingX = dot >= 0 ? perp1x : -perp1x;
+        const facingZ = dot >= 0 ? perp1z : -perp1z;
+        const yaw = Math.atan2(facingX, facingZ);
+        const rot = mod.CreateVector(0, yaw, 0);
+        PropSpawner._lineAnchorRot.set(id, rot);
+        try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
+    }
+
+    private static _FinalizeLinePlacement(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const anchorPos = PropSpawner._lineAnchorPos.get(id);
+        const anchorRot = PropSpawner._lineAnchorRot.get(id);
+        const count = PropSpawner._lineCount.get(id) ?? 1;
+        const config = PropSpawner._GetPropConfig(id);
+        const lineDir = PropSpawner._lineDir.get(id);
+        const facingYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
+        const effectiveStep = lineDir ? PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config) : config.width;
+
+        // Move the in-progress anchor to the permanent placed objects list
+        const inProgressList = PropSpawner._playerSpawnedObjects.get(id);
+        if (inProgressList) {
+            for (const obj of inProgressList) {
+                PropSpawner._allPlacedObjects.push(obj);
+            }
+            PropSpawner._playerSpawnedObjects.delete(id);
+        }
+
+        // Spawn child props along the line
+        if (anchorPos && lineDir && count > 1) {
+            for (let i = 1; i < count; i++) {
+                const offset = i * effectiveStep;
+                const pos = mod.CreateVector(
+                    mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                    mod.YComponentOf(anchorPos),
+                    mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+                );
+                const prop = mod.SpawnObject(config.prop as mod.RuntimeSpawn_Sand, pos, anchorRot!, PROP_SPAWNER_ONE_VEC);
+                if (prop) PropSpawner._allPlacedObjects.push(prop);
+            }
+        }
+
+        // Stagger VFX at each placed prop position (fire-and-forget)
+        if (anchorPos) {
+            const fxAnchorPos = anchorPos;
+            const fxLineDir = lineDir;
+            const fxStep = effectiveStep;
+            const fxCount = count;
+            (async () => {
+                const anchorLandVfx = mod.SpawnObject(PROP_SPAWNER_VFX_PROP_LAND, fxAnchorPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (anchorLandVfx) mod.EnableVFX(anchorLandVfx, true);
+                for (let i = 1; i < fxCount; i++) {
+                    await mod.Wait(0.05);
+                    if (!fxLineDir) break;
+                    const pos = mod.CreateVector(
+                        mod.XComponentOf(fxAnchorPos) + mod.XComponentOf(fxLineDir) * i * fxStep,
+                        mod.YComponentOf(fxAnchorPos),
+                        mod.ZComponentOf(fxAnchorPos) + mod.ZComponentOf(fxLineDir) * i * fxStep
+                    );
+                    const childLandVfx = mod.SpawnObject(PROP_SPAWNER_VFX_PROP_LAND, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                    if (childLandVfx) mod.EnableVFX(childLandVfx, true);
+                }
+            })();
+        }
+
+        // Mark placed for phase progress on first finalize
+        if (!PropSpawner._hasPlaced.has(id)) {
+            PropSpawner._hasPlaced.add(id);
+        }
+
+        // Advance prop cycle index so next row uses the next prop
+        const currentIdx = PropSpawner._propIndex.get(id) ?? 0;
+        PropSpawner._propIndex.set(id, currentIdx + 1);
+
+        // Exit line mode
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        PropSpawner._lineModeFirstAimStopConsumed.delete(id);
+        PropSpawner._HideLinePreviews(player);
+        PropSpawner._HideStatusIcon(id);
+        PropSpawner._HidePreviewIcon(id);
+
+        // If we're past the countdown (grace mode), strip the gadget now.
+        if (PropSpawner._graceMode.has(id)) {
+            PropSpawner._CleanupPreviewIcon(id);
+            PropSpawner._CleanupPlayerState(id);
+            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
+        }
+    }
+
+    private static _CancelLinePlacement(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        // Remove the in-progress anchor prop
+        const objects = PropSpawner._playerSpawnedObjects.get(id);
+        if (objects && objects.length > 0) {
+            const anchor = objects.pop()!;
+            try { mod.UnspawnObject(anchor); } catch { }
+            if (objects.length === 0) PropSpawner._playerSpawnedObjects.delete(id);
+        }
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        PropSpawner._lineModeFirstAimStopConsumed.delete(id);
+        PropSpawner._HideLinePreviews(player);
+        PropSpawner._HideStatusIcon(id);
+        PropSpawner._HidePreviewIcon(id);
+
+        // If we're past the countdown (grace mode), strip the gadget on cancel too.
+        if (PropSpawner._graceMode.has(id)) {
+            PropSpawner._CleanupPreviewIcon(id);
+            PropSpawner._CleanupPlayerState(id);
+            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
+        }
+    }
+
+    private static _RemoveGadgetAndCleanup(player: mod.Player): void {
+        try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+        const pp = PlayerProfile.Get(player);
+        const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
+        if (gadgetItem?.gadget) {
+            try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
+        }
     }
 }
 
@@ -12456,6 +12953,10 @@ export function OnPortalGadgetAimStart(player: mod.Player): void {
 
 export function OnPortalGadgetAimStop(player: mod.Player): void {
     PropSpawner.OnAimStop(player);
+}
+
+export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
+    PropSpawner.OnLaserToggle(player, eventBoolean);
 }
 
 export function OnPortalGadgetFireStart(player: mod.Player): void {
