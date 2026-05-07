@@ -16,6 +16,8 @@ interface PropConfig {
     // Positive rightOffset shifts the spawn position to the right of the player's facing.
     forwardOffset: number;
     rightOffset: number;
+    // Width of the prop along the line direction (metres). Used to space props in a row.
+    width: number;
 }
 
 // ---- Config ----------------------------------------------------------------
@@ -23,6 +25,7 @@ interface PropConfig {
 const MAX_SPAWN_DISTANCE = 10;   // metres; also used as the raycast end distance
 const PREVIEW_TICK_INTERVAL = 3;   // fire a preview raycast every N OngoingPlayer ticks
 const MIN_FLOOR_NORMAL_Y = 0.5; // reject surfaces whose Y normal is below this (walls/ceilings)
+const MAX_LINE_PROPS = 3;        // maximum number of props that can be placed in a single line row
 
 const ZERO_VEC = mod.CreateVector(0, 0, 0);
 const ONE_VEC = mod.CreateVector(1, 1, 1);
@@ -34,16 +37,19 @@ const PROP_CONFIGS: PropConfig[] = [
         prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320,
         forwardOffset: 0,
         rightOffset: 1,
+        width: 1.92, // 192 cm wall panel
     },
     {
         prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B,
         forwardOffset: 0,
         rightOffset: 1,
+        width: 1.0,
     },
     {
         prop: mod.RuntimeSpawn_Sand.CratePallet_01,
         forwardOffset: 0,
         rightOffset: 0,
+        width: 1.2,
     },
 ];
 
@@ -72,6 +78,26 @@ const playerPreviewIcons: Map<number, mod.WorldIcon> = new Map();
 
 // Objects spawned by each player, kept for cleanup
 const playerSpawnedObjects: Map<number, mod.Object[]> = new Map();
+
+// ---- Line-mode state -------------------------------------------------------
+
+// When true, the player has placed the anchor prop and is dragging out additional props.
+const playerLineMode: Set<number> = new Set();
+
+// World position of the first (anchor) prop placed in line mode.
+const playerLineAnchorPos: Map<number, mod.Vector> = new Map();
+
+// Rotation applied to the anchor prop (and carried forward to all line props).
+const playerLineAnchorRot: Map<number, mod.Vector> = new Map();
+
+// Extra world icons used to preview line slots 2 and 3 (index 0 = slot 2, index 1 = slot 3).
+const playerLinePreviewIcons: Map<number, mod.WorldIcon[]> = new Map();
+
+// Most recent computed count of line props (1..MAX_LINE_PROPS) during line preview.
+const playerLineCount: Map<number, number> = new Map();
+
+// Current line direction vector (from anchor toward cursor) updated each aim tick.
+const playerLineDir: Map<number, mod.Vector> = new Map();
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -112,7 +138,6 @@ function GetOrCreatePreviewIcon(player: mod.Player): mod.WorldIcon | undefined {
 }
 
 function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
-    if (!playerGadgetAiming.has(GetPlayerId(player))) return;
     const icon = GetOrCreatePreviewIcon(player);
     if (!icon) return;
     mod.SetWorldIconText(icon, GetPropPreviewMessage(GetPropConfig(player).prop));
@@ -123,7 +148,6 @@ function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
 }
 
 function ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
-    if (!playerGadgetAiming.has(GetPlayerId(player))) return;
     const icon = GetOrCreatePreviewIcon(player);
     if (!icon) return;
     mod.SetWorldIconText(icon, message);
@@ -175,6 +199,158 @@ function GetFacingPlayerRotation(player: mod.Player): mod.Vector {
     return mod.CreateVector(0, yaw, 0);
 }
 
+// ---- Line-mode helpers ----------------------------------------------------
+
+// Compute the horizontal direction vector from anchorPos toward cursorPos,
+// flattened to the XZ plane. Returns undefined if the two points are coincident.
+function ComputeLineDirection(anchorPos: mod.Vector, cursorPos: mod.Vector): mod.Vector | undefined {
+    const dx = mod.XComponentOf(cursorPos) - mod.XComponentOf(anchorPos);
+    const dz = mod.ZComponentOf(cursorPos) - mod.ZComponentOf(anchorPos);
+    const len = Math.sqrt(dx * dx + dz * dz);
+    if (len < 0.001) return undefined;
+    return mod.CreateVector(dx / len, 0, dz / len);
+}
+
+// Compute the horizontal distance between two world positions (ignores Y).
+function HorizontalDistance(a: mod.Vector, b: mod.Vector): number {
+    const dx = mod.XComponentOf(b) - mod.XComponentOf(a);
+    const dz = mod.ZComponentOf(b) - mod.ZComponentOf(a);
+    return Math.sqrt(dx * dx + dz * dz);
+}
+
+// Snap the count of additional props in the line based on how far the cursor
+// has moved from the anchor. Returns 1 (only anchor) up to MAX_LINE_PROPS.
+function ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, propWidth: number): number {
+    const dist = HorizontalDistance(anchorPos, cursorPos);
+    // The nth additional prop starts at (n * propWidth) from the anchor centre.
+    // We require the cursor to reach that distance before showing the next prop.
+    const additional = Math.min(Math.floor(dist / propWidth), MAX_LINE_PROPS - 1);
+    return 1 + additional;
+}
+
+// Spawn or ensure existence of line preview icons for slots 2..MAX_LINE_PROPS.
+// Icons beyond the current count are hidden; visible ones are positioned.
+function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number): void {
+    const id = GetPlayerId(player);
+    const config = GetPropConfig(player);
+    let icons = playerLinePreviewIcons.get(id);
+    if (!icons) {
+        icons = [];
+        playerLinePreviewIcons.set(id, icons);
+    }
+
+    // Ensure we have enough icon objects (spawn lazily at anchor so position is valid)
+    while (icons.length < MAX_LINE_PROPS - 1) {
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, anchorPos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) break;
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+        icons.push(icon);
+    }
+
+    // Slot index 0 = second prop, 1 = third prop, etc.
+    for (let i = 0; i < icons.length; i++) {
+        const slotIndex = i + 1; // 1-based offset from anchor
+        const icon = icons[i];
+        if (slotIndex < count) {
+            // Position along the line
+            const offset = slotIndex * config.width;
+            const pos = mod.CreateVector(
+                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                mod.YComponentOf(anchorPos),
+                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+            );
+            mod.SetWorldIconText(icon, GetPropPreviewMessage(config.prop));
+            mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+            mod.SetWorldIconPosition(icon, pos);
+            mod.EnableWorldIconImage(icon, true);
+            mod.EnableWorldIconText(icon, true);
+        } else {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
+    }
+
+    playerLineCount.set(id, count);
+}
+
+function HideLinePreviews(player: mod.Player): void {
+    const id = GetPlayerId(player);
+    const icons = playerLinePreviewIcons.get(id);
+    if (!icons) return;
+    for (const icon of icons) {
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+    }
+    playerLineCount.set(id, 1);
+}
+
+// Rotate the anchor prop to face toward the player's current position.
+// The line direction is stored separately in playerLineDir for use at finalize.
+function RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
+    const id = GetPlayerId(player);
+    const objects = playerSpawnedObjects.get(id);
+    if (!objects || objects.length === 0) return;
+    const anchor = objects[objects.length - 1];
+
+    // Store the line direction for finalize to use for prop placement offsets.
+    playerLineDir.set(id, lineDir);
+
+    // Compute yaw from anchor toward player position (facing the player).
+    const anchorPos = playerLineAnchorPos.get(id) ?? ZERO_VEC;
+    const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+    const toPlayerX = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+    const toPlayerZ = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+    const facePlayerYaw = Math.atan2(toPlayerX, toPlayerZ);
+    const rot = mod.CreateVector(0, facePlayerYaw, 0);
+    playerLineAnchorRot.set(id, rot);
+    try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
+}
+
+// Finalize line-mode: spawn props at slots 2..count along the stored line direction.
+function FinalizeLinePlacement(player: mod.Player): void {
+    const id = GetPlayerId(player);
+    const anchorPos = playerLineAnchorPos.get(id);
+    const anchorRot = playerLineAnchorRot.get(id);
+    const count = playerLineCount.get(id) ?? 1;
+    const config = GetPropConfig(player);
+    // Use the independently stored line direction rather than deriving from anchorRot,
+    // since anchorRot now stores the toward-player facing.
+    const lineDir = playerLineDir.get(id);
+
+    if (anchorPos && lineDir && count > 1) {
+        const list = playerSpawnedObjects.get(id) ?? [];
+        for (let i = 1; i < count; i++) {
+            const offset = i * config.width;
+            const pos = mod.CreateVector(
+                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                mod.YComponentOf(anchorPos),
+                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+            );
+            const prop = mod.SpawnObject(config.prop as mod.RuntimeSpawn_Sand, pos, anchorRot!, ONE_VEC);
+            if (prop) list.push(prop);
+        }
+        playerSpawnedObjects.set(id, list);
+    }
+
+    // Exit line mode
+    playerLineMode.delete(id);
+    playerLineAnchorPos.delete(id);
+    playerLineAnchorRot.delete(id);
+    playerLineDir.delete(id);
+    HideLinePreviews(player);
+
+    // Advance prop rotation cycle once for the whole row
+    const currentIdx = playerPropIndex.get(id) ?? 0;
+    playerPropIndex.set(id, currentIdx + 1);
+
+    HidePreviewIcon(player);
+}
+
+// ---- Cleanup / reset -------------------------------------------------------
+
 function CleanupPlayerObjects(player: mod.Player): void {
     const id = GetPlayerId(player);
 
@@ -191,6 +367,14 @@ function CleanupPlayerObjects(player: mod.Player): void {
         try { mod.UnspawnObject(icon as unknown as mod.Object); } catch { }
         playerPreviewIcons.delete(id);
     }
+
+    const lineIcons = playerLinePreviewIcons.get(id);
+    if (lineIcons) {
+        for (const li of lineIcons) {
+            try { mod.UnspawnObject(li as unknown as mod.Object); } catch { }
+        }
+        playerLinePreviewIcons.delete(id);
+    }
 }
 
 function ResetPlayerState(player: mod.Player): void {
@@ -201,6 +385,11 @@ function ResetPlayerState(player: mod.Player): void {
     playerPreviewTick.delete(id);
     playerHasSpawned.delete(id);
     playerGadgetAiming.delete(id);
+    playerLineMode.delete(id);
+    playerLineAnchorPos.delete(id);
+    playerLineAnchorRot.delete(id);
+    playerLineDir.delete(id);
+    playerLineCount.delete(id);
 }
 
 // ---- Event handlers --------------------------------------------------------
@@ -226,6 +415,7 @@ export function OnPlayerDeployed(player: mod.Player): void {
         mod.EnableWorldIconText(icon, false);
         playerPreviewIcons.set(id, icon);
     }
+    // Line preview icons are spawned lazily in UpdateLinePreviews on first use.
 }
 
 export function OnPortalGadgetAimStart(player: mod.Player): void {
@@ -236,6 +426,10 @@ export function OnPortalGadgetAimStart(player: mod.Player): void {
 export function OnPortalGadgetAimStop(player: mod.Player): void {
     playerGadgetAiming.delete(GetPlayerId(player));
     HidePreviewIcon(player);
+    // Keep line previews visible if in line mode; they will update on next aim tick.
+    if (!playerLineMode.has(GetPlayerId(player))) {
+        HideLinePreviews(player);
+    }
 }
 
 export function OnPortalGadgetFireStop(player: mod.Player): void {
@@ -247,6 +441,13 @@ export function OnPortalGadgetFireStop(player: mod.Player): void {
 
 export function OnPortalGadgetFireStart(player: mod.Player): void {
     const id = GetPlayerId(player);
+
+    if (playerLineMode.has(id)) {
+        // Second click: finalize the line and exit line mode.
+        FinalizeLinePlacement(player);
+        return;
+    }
+
     if (playerRaycastInFlight.has(id)) {
         // A preview raycast is already in flight -- upgrade it to a spawn so its
         // OnRayCastHit result is used for placement instead of discarded.
@@ -261,10 +462,32 @@ export function OnPortalGadgetFireStart(player: mod.Player): void {
 
 export function OngoingPlayer(player: mod.Player): void {
     const id = GetPlayerId(player);
-    if (!playerGadgetAiming.has(id)) {
-        HidePreviewIcon(player);
-        return;
+
+    if (playerLineMode.has(id)) {
+        // In line mode: use the current aim direction to update the line preview
+        // without needing a raycast - the Y is taken from the stored anchor position.
+        const anchorPos = playerLineAnchorPos.get(id);
+        if (anchorPos) {
+            const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+            const facingH = mod.Normalize(mod.CreateVector(
+                mod.XComponentOf(facing), 0, mod.ZComponentOf(facing)
+            ));
+            // Project ahead to approximate where the player is aiming on the ground
+            const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+            const projDist = MAX_SPAWN_DISTANCE;
+            const cursorPos = mod.Add(eyePos, mod.Multiply(facing, projDist));
+
+            const lineDir = ComputeLineDirection(anchorPos, cursorPos);
+            if (lineDir) {
+                const config = GetPropConfig(player);
+                const count = ComputeLineCount(anchorPos, cursorPos, config.width);
+                RotateAnchorProp(player, lineDir);
+                UpdateLinePreviews(player, anchorPos, lineDir, count);
+            }
+        }
+        return; // don't fire preview raycasts while in line mode
     }
+
     if (playerRaycastInFlight.has(id)) return; // never stack raycasts
 
     const tick = (playerPreviewTick.get(id) ?? 0) + 1;
@@ -299,19 +522,23 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
 
         const config = GetPropConfig(eventPlayer);
         const spawnPos = ApplyHorizontalOffset(eventPoint, eventPlayer, config);
+        // Initial rotation faces toward the player; will be adjusted as the player drags.
         const spawnRot = GetFacingPlayerRotation(eventPlayer);
         const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, ONE_VEC);
 
         if (prop) {
-            // Advance to the next prop in the rotation
-            const currentIdx = playerPropIndex.get(id) ?? 0;
-            playerPropIndex.set(id, currentIdx + 1);
-
-            HidePreviewIcon(eventPlayer);
+            // Enter line mode: anchor recorded, prop cycle NOT advanced yet (happens at finalize).
+            playerLineMode.add(id);
+            playerLineAnchorPos.set(id, spawnPos);
+            playerLineAnchorRot.set(id, spawnRot);
+            playerLineCount.set(id, 1);
 
             const list = playerSpawnedObjects.get(id) ?? [];
             list.push(prop);
             playerSpawnedObjects.set(id, list);
+
+            // Keep the cursor preview icon hidden during line-drag
+            HidePreviewIcon(eventPlayer);
         }
     } else {
         // Preview: update icon position and validity
