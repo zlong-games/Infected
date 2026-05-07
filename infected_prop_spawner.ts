@@ -16,8 +16,10 @@ interface PropConfig {
     // Positive rightOffset shifts the spawn position to the right of the player's facing.
     forwardOffset: number;
     rightOffset: number;
-    // Width of the prop along the line direction (metres). Used to space props in a row.
+    // Width of the prop (metres) along its local right axis (perpendicular to its facing).
     width: number;
+    // Depth of the prop (metres) along its local forward axis (along its facing direction).
+    depth: number;
 }
 
 // ---- Config ----------------------------------------------------------------
@@ -37,19 +39,22 @@ const PROP_CONFIGS: PropConfig[] = [
         prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320,
         forwardOffset: 0,
         rightOffset: 1,
-        width: 1.92, // 192 cm wall panel
+        width: 1.92, // 192 cm face width
+        depth: 0.3,  // concrete wall thickness
     },
     {
         prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B,
         forwardOffset: 0,
         rightOffset: 1,
-        width: 1.0,
+        width: 1,
+        depth: 0.2,
     },
     {
         prop: mod.RuntimeSpawn_Sand.CratePallet_01,
         forwardOffset: 0,
         rightOffset: 0,
-        width: 1.2,
+        width: 2,
+        depth: 1.0,
     },
 ];
 
@@ -218,19 +223,29 @@ function HorizontalDistance(a: mod.Vector, b: mod.Vector): number {
     return Math.sqrt(dx * dx + dz * dz);
 }
 
+// Compute the effective step size (metres) between prop centres along the line direction,
+// accounting for both width and depth of the prop at its current facing angle.
+// Uses the shadow/projection formula: step = W * |sin(A-B)| + D * |cos(A-B)|
+// where A = prop facing yaw, B = line direction yaw.
+function ComputeEffectiveStep(lineDir: mod.Vector, facingYaw: number, config: PropConfig): number {
+    const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+    const angle = facingYaw - lineYaw;
+    return config.width * Math.abs(Math.sin(angle)) + config.depth * Math.abs(Math.cos(angle));
+}
+
 // Snap the count of additional props in the line based on how far the cursor
 // has moved from the anchor. Returns 1 (only anchor) up to MAX_LINE_PROPS.
-function ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, propWidth: number): number {
+function ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiveStep: number): number {
     const dist = HorizontalDistance(anchorPos, cursorPos);
-    // The nth additional prop starts at (n * propWidth) from the anchor centre.
+    // The nth additional prop starts at (n * effectiveStep) from the anchor centre.
     // We require the cursor to reach that distance before showing the next prop.
-    const additional = Math.min(Math.floor(dist / propWidth), MAX_LINE_PROPS - 1);
+    const additional = Math.min(Math.floor(dist / effectiveStep), MAX_LINE_PROPS - 1);
     return 1 + additional;
 }
 
 // Spawn or ensure existence of line preview icons for slots 2..MAX_LINE_PROPS.
 // Icons beyond the current count are hidden; visible ones are positioned.
-function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number): void {
+function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
     const id = GetPlayerId(player);
     const config = GetPropConfig(player);
     let icons = playerLinePreviewIcons.get(id);
@@ -255,8 +270,8 @@ function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: 
         const slotIndex = i + 1; // 1-based offset from anchor
         const icon = icons[i];
         if (slotIndex < count) {
-            // Position along the line
-            const offset = slotIndex * config.width;
+            // Position along the line using effective step that accounts for prop facing angle
+            const offset = slotIndex * effectiveStep;
             const pos = mod.CreateVector(
                 mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
                 mod.YComponentOf(anchorPos),
@@ -287,7 +302,8 @@ function HideLinePreviews(player: mod.Player): void {
     playerLineCount.set(id, 1);
 }
 
-// Rotate the anchor prop to face toward the player's current position.
+// Rotate the anchor prop so it is perpendicular to the line direction,
+// choosing the perpendicular that faces toward the player.
 // The line direction is stored separately in playerLineDir for use at finalize.
 function RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
     const id = GetPlayerId(player);
@@ -298,13 +314,24 @@ function RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
     // Store the line direction for finalize to use for prop placement offsets.
     playerLineDir.set(id, lineDir);
 
-    // Compute yaw from anchor toward player position (facing the player).
+    // Two candidate perpendiculars to the line (90-deg CW and CCW in XZ plane).
+    const ldx = mod.XComponentOf(lineDir);
+    const ldz = mod.ZComponentOf(lineDir);
+    const perp1x = -ldz;
+    const perp1z =  ldx;
+
+    // Pick the perpendicular whose dot product with (anchor -> player) is positive,
+    // so all props in the row face toward the player.
     const anchorPos = playerLineAnchorPos.get(id) ?? ZERO_VEC;
     const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
-    const toPlayerX = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
-    const toPlayerZ = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
-    const facePlayerYaw = Math.atan2(toPlayerX, toPlayerZ);
-    const rot = mod.CreateVector(0, facePlayerYaw, 0);
+    const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+    const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+    const dot = perp1x * toPx + perp1z * toPz;
+    const facingX = dot >= 0 ? perp1x : -perp1x;
+    const facingZ = dot >= 0 ? perp1z : -perp1z;
+
+    const yaw = Math.atan2(facingX, facingZ);
+    const rot = mod.CreateVector(0, yaw, 0);
     playerLineAnchorRot.set(id, rot);
     try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
 }
@@ -320,10 +347,13 @@ function FinalizeLinePlacement(player: mod.Player): void {
     // since anchorRot now stores the toward-player facing.
     const lineDir = playerLineDir.get(id);
 
+    const facingYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
+    const effectiveStep = lineDir ? ComputeEffectiveStep(lineDir, facingYaw, config) : config.width;
+
     if (anchorPos && lineDir && count > 1) {
         const list = playerSpawnedObjects.get(id) ?? [];
         for (let i = 1; i < count; i++) {
-            const offset = i * config.width;
+            const offset = i * effectiveStep;
             const pos = mod.CreateVector(
                 mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
                 mod.YComponentOf(anchorPos),
@@ -349,7 +379,25 @@ function FinalizeLinePlacement(player: mod.Player): void {
     HidePreviewIcon(player);
 }
 
-// ---- Cleanup / reset -------------------------------------------------------
+// Cancel line mode: unspawn the anchor prop and reset all line state.
+// Called when the player right-clicks while in line mode.
+function CancelLinePlacement(player: mod.Player): void {
+    const id = GetPlayerId(player);
+
+    // Remove the anchor prop (the last object pushed during the first click).
+    const objects = playerSpawnedObjects.get(id);
+    if (objects && objects.length > 0) {
+        const anchor = objects.pop()!;
+        try { mod.UnspawnObject(anchor); } catch { }
+        if (objects.length === 0) playerSpawnedObjects.delete(id);
+    }
+
+    playerLineMode.delete(id);
+    playerLineAnchorPos.delete(id);
+    playerLineAnchorRot.delete(id);
+    playerLineDir.delete(id);
+    HideLinePreviews(player);
+}
 
 function CleanupPlayerObjects(player: mod.Player): void {
     const id = GetPlayerId(player);
@@ -419,7 +467,13 @@ export function OnPlayerDeployed(player: mod.Player): void {
 }
 
 export function OnPortalGadgetAimStart(player: mod.Player): void {
-    playerGadgetAiming.add(GetPlayerId(player));
+    const id = GetPlayerId(player);
+    if (playerLineMode.has(id)) {
+        // Right-click during line mode cancels the anchor and restarts placement.
+        CancelLinePlacement(player);
+        return;
+    }
+    playerGadgetAiming.add(id);
     // Icon becomes visible on next preview raycast result
 }
 
@@ -480,9 +534,12 @@ export function OngoingPlayer(player: mod.Player): void {
             const lineDir = ComputeLineDirection(anchorPos, cursorPos);
             if (lineDir) {
                 const config = GetPropConfig(player);
-                const count = ComputeLineCount(anchorPos, cursorPos, config.width);
+                // RotateAnchorProp must run first so playerLineAnchorRot is set before ComputeEffectiveStep reads it.
                 RotateAnchorProp(player, lineDir);
-                UpdateLinePreviews(player, anchorPos, lineDir, count);
+                const facingYaw = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
+                const effectiveStep = ComputeEffectiveStep(lineDir, facingYaw, config);
+                const count = ComputeLineCount(anchorPos, cursorPos, effectiveStep);
+                UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
             }
         }
         return; // don't fire preview raycasts while in line mode
