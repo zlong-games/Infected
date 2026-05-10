@@ -12015,8 +12015,8 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     if (!IsPlayerDeployed(eventPlayer)) return;
 
-    // PropSpawner preview tick for human survivors during placement phase
-    if (!isAISoldier && GameHandler.propPlacementPhaseActive) {
+    // PropSpawner preview tick for human survivors during placement phase or grace window
+    if (!isAISoldier && (GameHandler.propPlacementPhaseActive || PropSpawner._graceMode.has(playerObjId))) {
         PropSpawner.OngoingTick(eventPlayer);
     }
 
@@ -12257,15 +12257,15 @@ class PropSpawner {
         GameCountdown.GlobalClose();
         GameHandler.propPlacementPhaseActive = false;
 
-        // For each survivor: players who are mid-placement (in line mode) get a grace
-        // period to finalize; all others have their gadget stripped immediately.
+        // For each survivor: anyone who hasn't placed yet gets a grace period to finish
+        // placing before their gadget is swapped back; already-placed players are cleaned up now.
         for (const player of humanSurvivors) {
             const id = mod.GetObjId(player);
-            if (PropSpawner._lineMode.has(id)) {
-                // Still dragging out a line -- let them finalize via the next fire input.
+            if (!PropSpawner._hasPlaced.has(id)) {
+                // Haven't placed yet -- keep the gadget so they can finish.
                 PropSpawner._graceMode.add(id);
             } else {
-                // Already placed, or ran out of time without starting -- strip gadget now.
+                // Already placed -- strip gadget immediately.
                 PropSpawner._HidePreviewIcon(id);
                 PropSpawner._CleanupPreviewIcon(id);
                 PropSpawner._CleanupPlayerState(id);
