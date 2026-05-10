@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.05.05";
+const VERSION = "1.06.14";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -26,6 +26,7 @@ let BOT_SURVIVAL_TEST_DESIRED_INFECTED_BOTS = 0;
 const BOT_SURVIVAL_TEST_VEHICLE_RESPAWN_DELAY_SECONDS = 1.0;
 
 const LOADOUT_SELECTION_TIME = 40;
+const PROP_PLACEMENT_TIME = 25;        // extra seconds survivors have to place a fortification prop
 const GAME_COUNTDOWN_TIME = FAST_START ? 5 : LOADOUT_SELECTION_TIME;
 const WAIT_FOR_SPAWN_TIMEOUT = 3;
 
@@ -102,6 +103,8 @@ const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Comm
 const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_EOM_ReinforcementCardReveal_OneShot2D;
 const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_FieldUpgrade_Main_OneShot2D;
 const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Notification_ToasterPopUp_OneShot2D;
+const SFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Deploy_Screen_ActionSuccess_OneShot2D;
+const VFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Impact_SafeImpact_Generic;
 const SFX_VL7_TRANSITION_GASP: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Soldier_Movement_CameraNoise_OneShot2D;
 const VL7_TRANSITION_OVERLAY_ALPHA = 0.9;
 const VL7_TRANSITION_OVERLAY_FADE_SECONDS = 3;
@@ -109,8 +112,10 @@ const VL7_TRANSITION_DISABLE_OVERLAY_FADE_SECONDS = 1;
 const VL7_TRANSITION_OVERLAY_FADE_STEP_SECONDS = 0.02;
 const VL7_TRANSITION_DISABLE_OVERLAP_SECONDS = 0;
 const VL7_TRANSITION_DISTORTION_LEAD_SECONDS = 1;
-const VL7_TRANSITION_DISTORTION_TRAIL_SECONDS = 0.2;
-const VL7_TRANSITION_DISTORTION_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Drone_OutOfRange_Distortion;
+const VL7_TRANSITION_DISTORTION_TRAIL_SECONDS = 0.1;
+const VL7_TRANSITION_DISTORTION_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_RemoteTurret_ScreenEffect_Damage;
+const VL7_CLOUD_OBJECT = mod.GetVL7Cloud(1470);
+mod.SetVL7CloudEffects(VL7_CLOUD_OBJECT, true, false, false);
 
 const ALPHA_INDICATOR_FLAME_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CarFire_FrameCrawl; // has effect on objects too
 const ALPH_INDICATOR_BLINKING_FIRE_VFX: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_CIN_MF_Large_Static_Fire;
@@ -319,13 +324,13 @@ const SANDSTORM_CHANCE_LMS = 0.75;
 const SANDSTORM_CHANCE_DEFAULT = 0.9;
 // Reserve these IDs in Godot for sandstorm warning/loop sounds.
 const SANDSTORM_WARNING_SFX_ID = 2601;
-const SANDSTORM_WARNING_SFX_ATTENUATION = 80;
-const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2612, 2613, 2614];
-const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 60;
+const SANDSTORM_WARNING_SFX_ATTENUATION = 100;
+const SANDSTORM_WIND_LOOP_SFX_IDS: number[] = [2620, 2621, 2622];
+const SANDSTORM_WIND_LOOP_SFX_ATTENUATION = 90;
 const SANDSTORM_FIRE_LOOP_SFX_IDS: number[] = [2603, 2604, 2605, 2606, 2607, 2608, 2609, 2610];
-const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 55;
+const SANDSTORM_FIRE_LOOP_SFX_ATTENUATION = 100;
 const SANDSTORM_LOOP_AUDIO_RAMP_SECONDS = 10;
-const SANDSTORM_JETWASH_WARNING_LEAD_SECONDS = 1;
+const SANDSTORM_JETWASH_WARNING_LEAD_SECONDS = 0.25;
 const SANDSTORM_LOOP_SFX_FADE_STEP_SECONDS = 0.1;
 const SANDSTORM_LOOP_SFX_PLAY_STAGGER_SECONDS = 0.06;
 const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0.02;
@@ -2703,6 +2708,7 @@ class GameCountdown {
 
     private ShouldShowCountdownPopup(): boolean {
         if (GameHandler.gameState !== GameState.GameStartCountdown) return false;
+        if (GameHandler.propPlacementPhaseActive) return true; // show for all players during prop phase
         if (this._PlayerProfile.isAlphaInfected) return true;
         return !!this._PlayerProfile.loadoutSelectionUI?.HasSelected();
     }
@@ -2720,6 +2726,13 @@ class GameCountdown {
         const subheaderWidget = mod.FindUIWidgetWithName(`${this.uiID}_subheader_${this._PlayerProfile.playerID}`);
 
         if (!subheaderWidget) return;
+
+        if (GameHandler.propPlacementPhaseActive) {
+            const { placed, total } = PropSpawner.GetPlacementStatus();
+            mod.SetUITextLabel(subheaderWidget, MakeMessage(mod.stringkeys.prop_spawner_countdown, placed, total));
+            mod.SetUITextColor(subheaderWidget, this._PlayerProfile.isInfectedTeam || this._PlayerProfile.isAlphaInfected ? UI.battlefieldRed : UI.allyBlue);
+            return;
+        }
 
         const { readyHumans, totalSelectingHumans } = this.GetReadyCountState();
         if (totalSelectingHumans > 0) {
@@ -5051,6 +5064,7 @@ class Sandstorm {
     static sandstormFireLoopPreFadeStarted: boolean = false;
     static sandstormClearing: boolean = false;
     static sandstormTickLoopStarted: boolean = false;
+    static sandstormFadeCloud: mod.VL7Cloud | undefined;
 
     static IsSandstormMapEligible(): boolean {
         return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE;
@@ -5433,6 +5447,15 @@ class Sandstorm {
         void Sandstorm.EnsureSandstormLoopSfx(1);
         Sandstorm.SetSandstormFireLoopAmplitude(1);
         Sandstorm.SyncSandstormScreenEffectForAllPlayers(true);
+        if (Sandstorm.sandstormFadeCloud) {
+            try { mod.UnspawnObject(Sandstorm.sandstormFadeCloud as unknown as mod.Object); } catch { }
+            Sandstorm.sandstormFadeCloud = undefined;
+        }
+        const fadeCloud = mod.SpawnObject(mod.RuntimeSpawn_Common.VL7Cloud, POSITION_HQ1, ZERO_VEC, mod.CreateVector(20, 20, 20)) as mod.VL7Cloud | undefined;
+        if (fadeCloud) {
+            mod.SetVL7CloudEffects(fadeCloud, true, false, false);
+            Sandstorm.sandstormFadeCloud = fadeCloud;
+        }
         console.log(`Sandstorm | Active for ${Sandstorm.sandstormActiveSecondsRemaining}s.`);
     }
 
@@ -5454,6 +5477,10 @@ class Sandstorm {
             Sandstorm.sandstormActive = false;
             Sandstorm.sandstormClearing = false;
             Sandstorm.SyncSandstormScreenEffectForAllPlayers(false, true);
+            if (Sandstorm.sandstormFadeCloud) {
+                try { mod.UnspawnObject(Sandstorm.sandstormFadeCloud as unknown as mod.Object); } catch { }
+                Sandstorm.sandstormFadeCloud = undefined;
+            }
             Sandstorm.SetSandstormWhiteSmokeVfxEnabled(false);
             console.log('Sandstorm | Cleared.');
         })();
@@ -5734,6 +5761,7 @@ class GameHandler {
 
     // game states
     static gameState = GameState.PreGame
+    static propPlacementPhaseActive: boolean = false;
     static currentRound: number = 1;
     static survivorsRoundsWon: number = 0;
     /**
@@ -6060,8 +6088,9 @@ class GameHandler {
                 const selectingSurvivors = humanSurvivors.filter(pp => !pp.isAlphaInfected);
                 const allSelected = selectingSurvivors.length === 0 || selectingSurvivors.every(pp => pp.loadoutSelectionUI?.HasSelected());
 
-                if (allSelected && this.countdownTimeRemaining > 5) {
-                    this.countdownTimeRemaining = 5;
+                if (allSelected && this.countdownTimeRemaining > 0) {
+                    this.countdownTimeRemaining = 0;
+                    break;
                 }
 
                 // Update loadout menu timer for players still selecting
@@ -6575,6 +6604,7 @@ class GameHandler {
 
     static async EndRoundCleanup() {
         console.log(`"EoR" | Starting End Round Cleanup`);
+        PropSpawner.CleanupAllObjects();
         // GameHandler.StopLastManStandingMusic();
         if (GameHandler.gameState === GameState.GameOver)
             return;
@@ -6722,6 +6752,7 @@ class GameHandler {
 
         this.RestrictAllInputsAllPlayers(true);
         await this.RoundStartCountdown();
+        await PropSpawner.RunPhase();
         console.log('Game is starting. Current Round: ' + GameHandler.currentRound);
         this.gameState = GameState.GameRoundIsRunning;
         Sandstorm.InitializeSandstormEventForRound();
@@ -8336,8 +8367,8 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
         if (isInfected) {
             // disabling to troubleshoot high TN/SFT rubberbanding
             // mod.SetPlayerMovementSpeedMultiplier(eventPlayer, playerProfile.isAlphaInfected ? 1.1 : 1);
-            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 0.7 : 0.9);
-            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 300 : 150);
+            mod.SetPlayerIncomingDamageFactor(eventPlayer, playerProfile.isAlphaInfected ? 0.9 : 1);
+            mod.SetPlayerMaxHealth(eventPlayer, playerProfile.isAlphaInfected ? 200 : 150);
         }
     }
     if (!isInfected) {
@@ -10064,7 +10095,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
 
     // Spawn destination indicator once - repositioned via MoveVFX each iteration.
     const destVfx = mod.SpawnObject(
-        mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow,
+        mod.RuntimeSpawn_Common.FX_Gadget_AT4_Projectile_Trail,
         initialTrack.steps[initialTrack.steps.length - 1], ZERO_VEC
     ) as mod.VFX;
     mod.EnableVFX(destVfx, false); // hidden until charge is ready
@@ -10181,7 +10212,7 @@ async function startTrajectoryPreview(player: mod.Player, state: LeapState): Pro
             mod.UnspawnObject(trailVfx);
             trailVfx = mod.SpawnObject(
                 trailReady
-                    ? mod.RuntimeSpawn_Common.FX_ThrowingKnife_Trail_Friendly
+                    ? mod.RuntimeSpawn_Common.FX_ProjectileTrail_M320_NonLethal
                     : mod.RuntimeSpawn_Common.FX_EODBot_Active_Enemy,
                 liveTrackPoints[0], ZERO_VEC, mod.CreateVector(1, 1, 1)
             ) as mod.VFX;
@@ -11362,6 +11393,8 @@ export function OnPlayerUndeploy(playerObjId: number) {
 
     CleanupPlayerOngoingVisuals(playerObjId);
     CleanupLeapStateByObjId(playerObjId);
+    const undeployedPlayer = PlayerProfile._allPlayers.get(playerObjId)?.player;
+    if (undeployedPlayer) PropSpawner.CleanupPlayer(undeployedPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11384,6 +11417,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
         CleanupPlayerOngoingVisuals(playerObjId);
     }
     CleanupLeapSystem(eventPlayer);
+    PropSpawner.CleanupPlayer(eventPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11724,7 +11758,13 @@ async function BeginVL7TransitionDistortionLead(player: mod.Player): Promise<{ p
     VL7_TRANSITION_DISTORTION_TOKEN_BY_PLAYER.set(playerObjId, token);
     ReleaseVL7TransitionDistortionForPlayer(playerObjId);
 
-    const spawnPosition = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+    let spawnPosition: mod.Vector;
+    try {
+        spawnPosition = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition) as mod.Vector;
+    } catch {
+        spawnPosition = mod.GetObjectPosition(player);
+    }
+
     const distortionVfx = mod.SpawnObject(
         VL7_TRANSITION_DISTORTION_VFX,
         spawnPosition,
@@ -11975,6 +12015,11 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     if (!IsPlayerDeployed(eventPlayer)) return;
 
+    // PropSpawner preview tick for human survivors during placement phase
+    if (!isAISoldier && GameHandler.propPlacementPhaseActive) {
+        PropSpawner.OngoingTick(eventPlayer);
+    }
+
     if (!isAISoldier) {
         // Safety net: if leap is unlocked and this deployed alpha is missing state,
         // initialize leap here so crouch charge detection can start immediately.
@@ -12094,16 +12139,957 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     }
 }
 
+// ============================================================
+// PropSpawner -- pre-round survivor fortification
+// ============================================================
+
+const PROP_SPAWNER_MAX_DISTANCE = 10;
+const PROP_SPAWNER_PREVIEW_TICK_INTERVAL = 3;
+const PROP_SPAWNER_MIN_FLOOR_NORMAL_Y = 0.5;
+const PROP_SPAWNER_ZERO_VEC = mod.CreateVector(0, 0, 0);
+const PROP_SPAWNER_ONE_VEC = mod.CreateVector(1, 1, 1);
+const PROP_SPAWNER_MAX_LINE_PROPS = 3;
+const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 5;
+const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Sand;
+const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
+const PROP_SPAWNER_VFX_LINE_HINT = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
+const PROP_SPAWNER_SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
+const PROP_SPAWNER_SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
+// ---- Ratchet tuning
+const PROP_SPAWNER_LINE_RATCHET_DEG = 1;
+const PROP_SPAWNER_RATCHET_BASE_AMP = 0.5;
+const PROP_SPAWNER_RATCHET_AMP_STEP = 0.15;
+const PROP_SPAWNER_RATCHET_MAX_AMP = 0.85;
+const PROP_SPAWNER_RATCHET_ATTEN = 30;
+
+interface PropSpawnerConfig {
+    prop: mod.RuntimeSpawn_Common | mod.RuntimeSpawn_Sand;
+    forwardOffset: number;
+    rightOffset: number;
+    width: number;
+    depth: number;
+    // Minimum horizontal distance from anchor before line drag engages.
+    lineDragMinDist: number;
+    // Minimum dot-product (player facing vs direction-to-anchor) for hint VFX keyhole visibility.
+    keyholeMinDot: number;
+}
+
+const PROP_SPAWNER_POOL: PropSpawnerConfig[] = [
+    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 0.96, width: 1.92, depth: 0.3, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
+    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 0.5, width: 1.0, depth: 0.2, lineDragMinDist: 1.0, keyholeMinDot: 0.65 },
+    { prop: mod.RuntimeSpawn_Common.CrateAmmo_01_StackB, forwardOffset: 0, rightOffset: 0, width: 2.0, depth: 1.0, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
+];
+
+class PropSpawner {
+    static readonly _propIndex: Map<number, number> = new Map();
+    static readonly _raycastInFlight: Set<number> = new Set();
+    static readonly _raycastPurpose: Map<number, "preview" | "spawn" | "line_cursor"> = new Map();
+    static readonly _previewTick: Map<number, number> = new Map();
+    static readonly _hasPlaced: Set<number> = new Set();
+    static readonly _previewIcons: Map<number, mod.WorldIcon> = new Map();
+    static readonly _allPlacedObjects: mod.Object[] = [];
+    static _survivorsInPhase: mod.Player[] = [];
+    static readonly _playerSpawnedObjects: Map<number, mod.Object[]> = new Map();
+    static readonly _lineMode: Set<number> = new Set();
+    static readonly _lineAnchorPos: Map<number, mod.Vector> = new Map();
+    static readonly _lineAnchorRot: Map<number, mod.Vector> = new Map();
+    static readonly _linePreviewIcons: Map<number, mod.WorldIcon[]> = new Map();
+    static readonly _lineCount: Map<number, number> = new Map();
+    static readonly _lineDir: Map<number, mod.Vector> = new Map();
+    static readonly _lineCursorPos: Map<number, mod.Vector> = new Map();
+    static readonly _ratchetAngle: Map<number, number> = new Map();
+    static readonly _ratchetNotch: Map<number, number> = new Map();
+    static readonly _graceMode: Set<number> = new Set();
+    static readonly _lineCursorState: Map<number, "valid" | "invalid_surface" | "out_of_range"> = new Map();
+    static readonly _statusIcons: Map<number, mod.WorldIcon> = new Map();
+
+    // Players in line mode whose updates are frozen (laser toggle activates extension).
+    static readonly _lineFrozen: Set<number> = new Set();
+    // Persistent hint VFX at the first-extension-slot; visible only when keyholed.
+    static readonly _lineHintVfx: Map<number, mod.VFX> = new Map();
+
+    static GetPlacementStatus(): { placed: number; total: number } {
+        return { placed: PropSpawner._hasPlaced.size, total: PropSpawner._survivorsInPhase.length };
+    }
+
+    static HasRaycastInFlight(id: number): boolean {
+        return PropSpawner._raycastInFlight.has(id);
+    }
+
+    static AllSurvivorsPlaced(): boolean {
+        if (PropSpawner._survivorsInPhase.length === 0) return false;
+        return PropSpawner._survivorsInPhase.every(p => PropSpawner._hasPlaced.has(mod.GetObjId(p)));
+    }
+
+    static async RunPhase(): Promise<void> {
+        const humanSurvivors = PlayerProfile._allPlayerProfiles
+            .filter(pp => !pp.isAI && !pp.isInfectedTeam && !pp.isAlphaInfected)
+            .map(pp => pp.player)
+            .filter(p => Helpers.HasValidObjId(p));
+
+        if (humanSurvivors.length === 0) return;
+
+        PropSpawner._survivorsInPhase = humanSurvivors;
+        GameHandler.propPlacementPhaseActive = true;
+        GameHandler.countdownTimeRemaining = PROP_PLACEMENT_TIME;
+
+        for (const player of humanSurvivors) {
+            const id = mod.GetObjId(player);
+            PropSpawner._propIndex.set(id, 0);
+            try { mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+            try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
+            PropSpawner._SpawnPreviewIcon(player);
+        }
+
+        GameCountdown.GlobalUpdate();
+
+        while (GameHandler.countdownTimeRemaining > 0) {
+            if (PropSpawner.AllSurvivorsPlaced()) break;
+            const timeText = Helpers.FormatTime(GameHandler.countdownTimeRemaining);
+            GameCountdown.GlobalTickDown(timeText[0], timeText[1], timeText[2]);
+            if (GameHandler.countdownTimeRemaining <= 5) {
+                Helpers.PlaySoundFX(SFX_ROUND_COUNTDOWN, 1);
+            }
+            await mod.Wait(1);
+            GameHandler.countdownTimeRemaining--;
+        }
+
+        GameCountdown.GlobalClose();
+        GameHandler.propPlacementPhaseActive = false;
+
+        // For each survivor: players who are mid-placement (in line mode) get a grace
+        // period to finalize; all others have their gadget stripped immediately.
+        for (const player of humanSurvivors) {
+            const id = mod.GetObjId(player);
+            if (PropSpawner._lineMode.has(id)) {
+                // Still dragging out a line -- let them finalize via the next fire input.
+                PropSpawner._graceMode.add(id);
+            } else {
+                // Already placed, or ran out of time without starting -- strip gadget now.
+                PropSpawner._HidePreviewIcon(id);
+                PropSpawner._CleanupPreviewIcon(id);
+                PropSpawner._CleanupPlayerState(id);
+                if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
+            }
+        }
+        PropSpawner._hasPlaced.clear();
+        PropSpawner._survivorsInPhase = [];
+    }
+
+    static CleanupAllObjects(): void {
+        for (const obj of PropSpawner._allPlacedObjects) {
+            try { mod.UnspawnObject(obj); } catch { }
+        }
+        PropSpawner._allPlacedObjects.length = 0;
+    }
+
+    static CleanupPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        // Cancel any active line placement (unspawn in-progress anchor prop)
+        if (PropSpawner._lineMode.has(id)) {
+            const objects = PropSpawner._playerSpawnedObjects.get(id);
+            if (objects) {
+                for (const obj of objects) {
+                    try { mod.UnspawnObject(obj); } catch { }
+                }
+                PropSpawner._playerSpawnedObjects.delete(id);
+            }
+        }
+        // Clean up line preview icons
+        const lineIcons = PropSpawner._linePreviewIcons.get(id);
+        if (lineIcons) {
+            for (const li of lineIcons) {
+                try { mod.UnspawnObject(li as unknown as mod.Object); } catch { }
+            }
+            PropSpawner._linePreviewIcons.delete(id);
+        }
+        // Clean up status icon
+        const statusIcon = PropSpawner._statusIcons.get(id);
+        if (statusIcon) {
+            try { mod.UnspawnObject(statusIcon as unknown as mod.Object); } catch { }
+            PropSpawner._statusIcons.delete(id);
+        }
+        // Clean up hint VFX
+        const hintVfxClean = PropSpawner._lineHintVfx.get(id);
+        if (hintVfxClean) {
+            mod.EnableVFX(hintVfxClean, false);
+            try { mod.UnspawnObject(hintVfxClean as unknown as mod.Object); } catch { }
+            PropSpawner._lineHintVfx.delete(id);
+        }
+        PropSpawner._HidePreviewIcon(id);
+        PropSpawner._CleanupPreviewIcon(id);
+        PropSpawner._CleanupPlayerState(id);
+    }
+
+    private static _SpawnPreviewIcon(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (PropSpawner._previewIcons.has(id)) return;
+        const pos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+        PropSpawner._previewIcons.set(id, icon);
+    }
+
+    private static _CleanupPlayerState(id: number): void {
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+        PropSpawner._previewTick.delete(id);
+        PropSpawner._propIndex.delete(id);
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._lineCount.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._graceMode.delete(id);
+        PropSpawner._lineCursorState.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        PropSpawner._lineHintVfx.delete(id); // object already unspawned by CleanupPlayer
+    }
+
+    private static _HidePreviewIcon(id: number): void {
+        const icon = PropSpawner._previewIcons.get(id);
+        if (icon) {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
+    }
+
+    private static _CleanupPreviewIcon(id: number): void {
+        const icon = PropSpawner._previewIcons.get(id);
+        if (icon) {
+            try { mod.UnspawnObject(icon as unknown as mod.Object); } catch { }
+            PropSpawner._previewIcons.delete(id);
+        }
+    }
+
+    private static _GetPropPreviewMessage(config: PropSpawnerConfig): mod.Message {
+        switch (config.prop) {
+            case mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_barrierconcretewall_01_192x320);
+            case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_barricadeboardswood_01_B);
+            case mod.RuntimeSpawn_Common.CrateAmmo_01_StackB:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_crateammo_01_stackb);
+            default:
+                return mod.Message(mod.stringkeys.prop_spawner_preview_unknown);
+        }
+    }
+
+    private static _ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const icon = PropSpawner._previewIcons.get(id);
+        if (!icon) return;
+        const config = PropSpawner._GetPropConfig(id);
+        mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
+        mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+        mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
+        const id = mod.GetObjId(player);
+        const icon = PropSpawner._previewIcons.get(id);
+        if (!icon) return;
+        mod.SetWorldIconText(icon, message);
+        mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
+        mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _GetRaycastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const start = mod.Add(eyePos, facing);
+        const end = mod.Add(start, mod.Multiply(facing, PROP_SPAWNER_MAX_DISTANCE));
+        return { start, end };
+    }
+
+    private static _ComputeObjectPosFromPivot(pivot: mod.Vector, yaw: number, config: PropSpawnerConfig): mod.Vector {
+        if (config.rightOffset === 0 && config.forwardOffset === 0) return pivot;
+        let result = pivot;
+        if (config.rightOffset !== 0) {
+            const prx = Math.cos(yaw);
+            const prz = -Math.sin(yaw);
+            result = mod.Add(result, mod.CreateVector(-config.rightOffset * prx, 0, -config.rightOffset * prz));
+        }
+        if (config.forwardOffset !== 0) {
+            const pfx = Math.sin(yaw);
+            const pfz = Math.cos(yaw);
+            result = mod.Add(result, mod.CreateVector(-config.forwardOffset * pfx, 0, -config.forwardOffset * pfz));
+        }
+        return result;
+    }
+
+    private static _GetFacingPlayerRotation(player: mod.Player): mod.Vector {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const yaw = Math.atan2(-mod.XComponentOf(facing), -mod.ZComponentOf(facing));
+        return mod.CreateVector(0, yaw, 0);
+    }
+
+    static OnAimStart(_player: mod.Player): void { }
+
+    static OnAimStop(player: mod.Player): void {
+        if (GameHandler.propPlacementPhaseActive) {
+            PropSpawner._HidePreviewIcon(mod.GetObjId(player));
+        }
+    }
+
+    static OnFireStart(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const inGrace = PropSpawner._graceMode.has(id);
+        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
+        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
+        if (PropSpawner._hasPlaced.has(id)) return;
+        if (PropSpawner._lineMode.has(id)) {
+            PropSpawner._FinalizeLinePlacement(player);
+            return;
+        }
+        if (PropSpawner._raycastInFlight.has(id)) {
+            PropSpawner._raycastPurpose.set(id, "spawn");
+        } else {
+            const { start, end } = PropSpawner._GetRaycastVectors(player);
+            PropSpawner._raycastInFlight.add(id);
+            PropSpawner._raycastPurpose.set(id, "spawn");
+            mod.RayCast(player, start, end);
+        }
+    }
+
+    static OnFireStop(player: mod.Player): void {
+        // No-op: icon stays visible until next raycast result updates it
+    }
+
+    static OngoingTick(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+        const id = mod.GetObjId(player);
+        const inGrace = PropSpawner._graceMode.has(id);
+        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
+        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
+
+        if (PropSpawner._lineMode.has(id)) {
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            if (anchorPos) {
+                if (PropSpawner._lineFrozen.has(id)) {
+                    // Extension inactive: still track aim to keep status icon current.
+                    if (!PropSpawner._raycastInFlight.has(id)) {
+                        const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
+                        PropSpawner._previewTick.set(id, tick);
+                        if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL === 0) {
+                            const { start, end } = PropSpawner._GetRaycastVectors(player);
+                            PropSpawner._raycastInFlight.add(id);
+                            PropSpawner._raycastPurpose.set(id, "line_cursor");
+                            mod.RayCast(player, start, end);
+                        }
+                    }
+                    const cachedCursor = PropSpawner._lineCursorPos.get(id);
+                    const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+                    const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+                    const aimPoint = cachedCursor ?? mod.Add(eyePos, mod.Multiply(facing, PROP_SPAWNER_LINE_CURSOR_MAX_DIST));
+                    // Rotate anchor prop to face the player while frozen (root prop only).
+                    const frozenLineCount = PropSpawner._lineCount.get(id) ?? 1;
+                    const frozenObjects = PropSpawner._playerSpawnedObjects.get(id);
+                    if (frozenLineCount <= 1 && frozenObjects && frozenObjects.length > 0) {
+                        const anchor = frozenObjects[frozenObjects.length - 1];
+                        const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+                        const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+                        const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+                        const yaw = Math.atan2(toPx, toPz);
+                        const rot = mod.CreateVector(0, yaw, 0);
+                        PropSpawner._lineAnchorRot.set(id, rot);
+                        const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
+                        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+                    }
+                    // Keyhole hint VFX: show first-extension-slot when player looks toward anchor.
+                    const frozenHintVfx = PropSpawner._lineHintVfx.get(id);
+                    if (frozenHintVfx) {
+                        const hFx = mod.XComponentOf(facing);
+                        const hFz = mod.ZComponentOf(facing);
+                        const hFLen = Math.sqrt(hFx * hFx + hFz * hFz);
+                        if (hFLen > 0.001) {
+                            const config = PropSpawner._GetPropConfig(id);
+                            const anchorRotY = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
+                            const tentativeDir = mod.CreateVector(hFx / hFLen, 0, hFz / hFLen);
+                            const step = PropSpawner._ComputeEffectiveStep(tentativeDir, anchorRotY, config);
+                            // Height = effective step: the Trophy Range Indicator projects a
+                            // circle whose radius matches its height above the ground, so the
+                            // circle edge aligns with where the first extension prop would land.
+                            const hintPos = mod.CreateVector(
+                                mod.XComponentOf(anchorPos),
+                                mod.YComponentOf(anchorPos) + step,
+                                mod.ZComponentOf(anchorPos)
+                            );
+                            const dax = mod.XComponentOf(anchorPos) - mod.XComponentOf(eyePos);
+                            const day = mod.YComponentOf(anchorPos) - mod.YComponentOf(eyePos);
+                            const daz = mod.ZComponentOf(anchorPos) - mod.ZComponentOf(eyePos);
+                            const daLen = Math.sqrt(dax * dax + day * day + daz * daz);
+                            const dotToAnchor = daLen > 0.001
+                                ? (mod.XComponentOf(facing) * dax + mod.YComponentOf(facing) * day + mod.ZComponentOf(facing) * daz) / daLen
+                                : 0;
+                            if (dotToAnchor >= PropSpawner._GetPropConfig(id).keyholeMinDot) {
+                                try { mod.SetObjectTransform(frozenHintVfx as unknown as mod.Object, mod.CreateTransform(hintPos, PROP_SPAWNER_ZERO_VEC)); } catch { }
+                                mod.EnableVFX(frozenHintVfx, true);
+                            } else {
+                                mod.EnableVFX(frozenHintVfx, false);
+                            }
+                        } else {
+                            mod.EnableVFX(frozenHintVfx, false);
+                        }
+                    }
+                    PropSpawner._ShowStatusIcon(player, aimPoint,
+                        mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                        mod.CreateVector(0.8, 0.8, 1.0));
+                    return;
+                }
+
+                if (!PropSpawner._raycastInFlight.has(id)) {
+                    const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
+                    PropSpawner._previewTick.set(id, tick);
+                    if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL === 0) {
+                        const { start, end } = PropSpawner._GetRaycastVectors(player);
+                        PropSpawner._raycastInFlight.add(id);
+                        PropSpawner._raycastPurpose.set(id, "line_cursor");
+                        mod.RayCast(player, start, end);
+                    }
+                }
+                const cachedCursor = PropSpawner._lineCursorPos.get(id);
+                const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+                const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+                const cursorPos = cachedCursor ?? mod.Add(eyePos, mod.Multiply(facing, PROP_SPAWNER_LINE_CURSOR_MAX_DIST));
+                const dist = PropSpawner._HorizontalDistance(anchorPos, cursorPos);
+                if (dist < PropSpawner._GetPropConfig(id).lineDragMinDist) {
+                    const objects = PropSpawner._playerSpawnedObjects.get(id);
+                    if (objects && objects.length > 0) {
+                        const anchor = objects[objects.length - 1];
+                        const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+                        const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+                        const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+                        const yaw = Math.atan2(toPx, toPz);
+                        const rot = mod.CreateVector(0, yaw, 0);
+                        PropSpawner._lineAnchorRot.set(id, rot);
+                        const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
+                        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+                    }
+                    PropSpawner._HideLinePreviews(player);
+                    PropSpawner._HideStatusIcon(id);
+                } else {
+                    const lineDir = PropSpawner._ComputeLineDirection(anchorPos, cursorPos);
+                    if (lineDir) {
+                        const config = PropSpawner._GetPropConfig(id);
+                        const cursorState = PropSpawner._lineCursorState.get(id);
+                        const statusPos = cursorPos;
+
+                        if (cursorState === "invalid_surface" || cursorState === "out_of_range") {
+                            PropSpawner._HideLinePreviews(player);
+                            const errorMsg = cursorState === "invalid_surface"
+                                ? mod.Message(mod.stringkeys.prop_spawner_invalid_surface)
+                                : mod.Message(mod.stringkeys.prop_spawner_out_of_range);
+                            PropSpawner._ShowStatusIcon(player, statusPos, errorMsg, mod.CreateVector(1, 0.35, 0));
+                        } else {
+                            PropSpawner._RotateAnchorProp(player, lineDir);
+                            const facingYaw = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
+                            const effectiveStep = PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config);
+                            const count = PropSpawner._ComputeLineCount(anchorPos, cursorPos, effectiveStep);
+                            const prevRatchetCount = PropSpawner._lineCount.get(id) ?? 1;
+                            PropSpawner._UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
+
+                            if (count === 1) {
+                                PropSpawner._HideStatusIcon(id);
+                            } else {
+                                PropSpawner._ShowStatusIcon(player, statusPos,
+                                    mod.Message(mod.stringkeys.prop_spawner_fire_to_place),
+                                    mod.CreateVector(0.2, 1, 0.2));
+                            }
+
+                            const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+                            if (count !== prevRatchetCount) {
+                                PropSpawner._ratchetAngle.set(id, lineYaw);
+                                PropSpawner._ratchetNotch.set(id, 0);
+                            } else {
+                                const lastRatchetAngle = PropSpawner._ratchetAngle.get(id);
+                                if (lastRatchetAngle === undefined) {
+                                    PropSpawner._ratchetAngle.set(id, lineYaw);
+                                    PropSpawner._ratchetNotch.set(id, 0);
+                                } else {
+                                    const delta = PropSpawner._SmallestAngleDelta(lastRatchetAngle, lineYaw);
+                                    if (delta >= PROP_SPAWNER_LINE_RATCHET_DEG * (Math.PI / 180)) {
+                                        PropSpawner._ratchetAngle.set(id, lineYaw);
+                                        const notch = (PropSpawner._ratchetNotch.get(id) ?? 0) + 1;
+                                        PropSpawner._ratchetNotch.set(id, notch);
+                                        const amp = Math.min(PROP_SPAWNER_RATCHET_BASE_AMP + notch * PROP_SPAWNER_RATCHET_AMP_STEP, PROP_SPAWNER_RATCHET_MAX_AMP);
+                                        const ratchetSlot = count - 1;
+                                        const ratchetPos = ratchetSlot > 0
+                                            ? mod.CreateVector(
+                                                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * ratchetSlot * effectiveStep,
+                                                mod.YComponentOf(anchorPos),
+                                                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * ratchetSlot * effectiveStep
+                                            )
+                                            : cursorPos;
+                                        PropSpawner._PlaySFX3DAtPos(PROP_SPAWNER_SFX_RATCHET, amp, ratchetPos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if (PropSpawner._raycastInFlight.has(id)) return;
+        try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
+        const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
+        PropSpawner._previewTick.set(id, tick);
+        if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL !== 0) return;
+        const { start, end } = PropSpawner._GetRaycastVectors(player);
+        PropSpawner._raycastInFlight.add(id);
+        PropSpawner._raycastPurpose.set(id, "preview");
+        mod.RayCast(player, start, end);
+    }
+
+    static OnRayCastHit(player: mod.Player, point: mod.Vector, normal: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const purpose = PropSpawner._raycastPurpose.get(id);
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+
+        const isFloor = mod.YComponentOf(normal) >= PROP_SPAWNER_MIN_FLOOR_NORMAL_Y;
+
+        if (purpose === "spawn") {
+            if (!isFloor) {
+                PropSpawner._ShowPreviewIconError(player, point, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+                return;
+            }
+            const config = PropSpawner._GetPropConfig(id);
+            const pivotPos = point; // raw hit = visual centre (pivot)
+            const spawnRot = PropSpawner._GetFacingPlayerRotation(player);
+            const spawnYaw = mod.YComponentOf(spawnRot);
+            const spawnPos = PropSpawner._ComputeObjectPosFromPivot(pivotPos, spawnYaw, config);
+            const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, PROP_SPAWNER_ONE_VEC);
+            if (prop) {
+                PropSpawner._lineMode.add(id);
+                PropSpawner._lineAnchorPos.set(id, pivotPos);
+                PropSpawner._lineAnchorRot.set(id, spawnRot);
+                PropSpawner._lineCount.set(id, 1);
+                PropSpawner._lineFrozen.add(id); // start frozen; laser toggle activates extension
+                const list = PropSpawner._playerSpawnedObjects.get(id) ?? [];
+                list.push(prop);
+                PropSpawner._playerSpawnedObjects.set(id, list);
+                const anchorVfx = mod.SpawnObject(PROP_SPAWNER_VFX_ANCHOR_LAUNCH, pivotPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (anchorVfx) mod.EnableVFX(anchorVfx, true);
+                PropSpawner._ratchetAngle.delete(id);
+                PropSpawner._ratchetNotch.set(id, 0);
+                // Hint VFX: spawned at anchor, disabled until laser-toggle activates draw mode
+                const existingHintVfx = PropSpawner._lineHintVfx.get(id);
+                if (existingHintVfx) {
+                    try { mod.UnspawnObject(existingHintVfx as unknown as mod.Object); } catch { }
+                }
+                const hintVfx = mod.SpawnObject(PROP_SPAWNER_VFX_LINE_HINT, pivotPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (hintVfx) {
+                    mod.EnableVFX(hintVfx, false);
+                    PropSpawner._lineHintVfx.set(id, hintVfx);
+                } else {
+                    PropSpawner._lineHintVfx.delete(id);
+                }
+                PropSpawner._HidePreviewIcon(id);
+            }
+        } else if (purpose === "line_cursor") {
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            if (isFloor && anchorPos && PropSpawner._HorizontalDistance(anchorPos, point) <= PROP_SPAWNER_LINE_CURSOR_MAX_DIST) {
+                PropSpawner._lineCursorPos.set(id, point);
+                PropSpawner._lineCursorState.set(id, "valid");
+            } else {
+                PropSpawner._lineCursorPos.delete(id);
+                PropSpawner._lineCursorState.set(id, isFloor ? "out_of_range" : "invalid_surface");
+            }
+        } else {
+            if (isFloor) {
+                PropSpawner._ShowPreviewIconValid(player, point);
+            } else {
+                PropSpawner._ShowPreviewIconError(player, point, mod.Message(mod.stringkeys.prop_spawner_invalid_surface));
+            }
+        }
+    }
+
+    static OnRayCastMissed(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const purpose = PropSpawner._raycastPurpose.get(id);
+        PropSpawner._raycastInFlight.delete(id);
+        PropSpawner._raycastPurpose.delete(id);
+        if (purpose === "line_cursor") {
+            PropSpawner._lineCursorPos.delete(id);
+            PropSpawner._lineCursorState.set(id, "out_of_range");
+        } else {
+            const { end } = PropSpawner._GetRaycastVectors(player);
+            PropSpawner._ShowPreviewIconError(player, end, mod.Message(mod.stringkeys.prop_spawner_out_of_range));
+        }
+    }
+
+    static OnLaserToggle(player: mod.Player, _eventBoolean: boolean): void {
+        const id = mod.GetObjId(player);
+        if (!GameHandler.propPlacementPhaseActive && !PropSpawner._graceMode.has(id)) return;
+        if (!PropSpawner._lineMode.has(id)) return;
+        if (PropSpawner._lineFrozen.has(id)) {
+            PropSpawner._lineFrozen.delete(id);
+            // Show hint VFX as a directional cue when extension/draw mode is activated
+            const hintVfx = PropSpawner._lineHintVfx.get(id);
+            if (hintVfx) mod.EnableVFX(hintVfx, true);
+        } else {
+            PropSpawner._lineFrozen.add(id);
+        }
+    }
+
+    private static _GetPropConfig(id: number): PropSpawnerConfig {
+        const idx = PropSpawner._propIndex.get(id) ?? 0;
+        return PROP_SPAWNER_POOL[idx % PROP_SPAWNER_POOL.length];
+    }
+
+    private static _ComputeLineDirection(anchorPos: mod.Vector, cursorPos: mod.Vector): mod.Vector | undefined {
+        const dx = mod.XComponentOf(cursorPos) - mod.XComponentOf(anchorPos);
+        const dz = mod.ZComponentOf(cursorPos) - mod.ZComponentOf(anchorPos);
+        const len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 0.001) return undefined;
+        return mod.CreateVector(dx / len, 0, dz / len);
+    }
+
+    private static _HorizontalDistance(a: mod.Vector, b: mod.Vector): number {
+        const dx = mod.XComponentOf(b) - mod.XComponentOf(a);
+        const dz = mod.ZComponentOf(b) - mod.ZComponentOf(a);
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static _ComputeEffectiveStep(lineDir: mod.Vector, facingYaw: number, config: PropSpawnerConfig): number {
+        const lineYaw = Math.atan2(mod.XComponentOf(lineDir), mod.ZComponentOf(lineDir));
+        const angle = facingYaw - lineYaw;
+        return config.width * Math.abs(Math.sin(angle)) + config.depth * Math.abs(Math.cos(angle));
+    }
+
+    private static _ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiveStep: number): number {
+        const dist = PropSpawner._HorizontalDistance(anchorPos, cursorPos);
+        const additional = Math.min(Math.floor(dist / effectiveStep), PROP_SPAWNER_MAX_LINE_PROPS - 1);
+        return 1 + additional;
+    }
+
+    private static _SmallestAngleDelta(a: number, b: number): number {
+        let d = b - a;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        return Math.abs(d);
+    }
+
+    private static _PlaySFX2DForPlayer(sfx: mod.RuntimeSpawn_Common, amplitude: number, player: mod.Player, pos: mod.Vector): void {
+        const sfxObj = mod.SpawnObject(sfx, pos, PROP_SPAWNER_ZERO_VEC) as mod.SFX;
+        if (sfxObj) mod.PlaySound(sfxObj, amplitude, player);
+    }
+
+    private static _PlaySFX3DAtPos(sfx: mod.RuntimeSpawn_Common, amplitude: number, pos: mod.Vector): void {
+        const sfxObj = mod.SpawnObject(sfx, pos, PROP_SPAWNER_ZERO_VEC) as mod.SFX;
+        if (sfxObj) mod.PlaySound(sfxObj, amplitude, pos, PROP_SPAWNER_RATCHET_ATTEN);
+    }
+
+    private static _UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
+        const id = mod.GetObjId(player);
+        const config = PropSpawner._GetPropConfig(id);
+        let icons = PropSpawner._linePreviewIcons.get(id);
+        if (!icons) {
+            icons = [];
+            PropSpawner._linePreviewIcons.set(id, icons);
+        }
+        while (icons.length < PROP_SPAWNER_MAX_LINE_PROPS - 1) {
+            const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, anchorPos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+            if (!icon) break;
+            mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+            mod.SetWorldIconOwner(icon, player);
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+            icons.push(icon);
+        }
+        for (let i = 0; i < icons.length; i++) {
+            const slotIndex = i + 1;
+            const icon = icons[i];
+            if (slotIndex < count) {
+                const offset = slotIndex * effectiveStep;
+                const pos = mod.CreateVector(
+                    mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                    mod.YComponentOf(anchorPos),
+                    mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+                );
+                mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
+                mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+                mod.SetWorldIconPosition(icon, pos);
+                mod.SetWorldIconOwner(icon, player);
+                mod.EnableWorldIconImage(icon, true);
+                mod.EnableWorldIconText(icon, true);
+            } else {
+                mod.EnableWorldIconImage(icon, false);
+                mod.EnableWorldIconText(icon, false);
+            }
+        }
+        const prevCount = PropSpawner._lineCount.get(id) ?? 1;
+        if (count > prevCount) {
+            const newSlotOffset = (count - 1) * effectiveStep;
+            const newSlotPos = mod.CreateVector(
+                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * newSlotOffset,
+                mod.YComponentOf(anchorPos),
+                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * newSlotOffset
+            );
+            PropSpawner._PlaySFX2DForPlayer(PROP_SPAWNER_SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
+        }
+        PropSpawner._lineCount.set(id, count);
+    }
+
+    private static _HideLinePreviews(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const icons = PropSpawner._linePreviewIcons.get(id);
+        if (!icons) return;
+        for (const icon of icons) {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
+        PropSpawner._lineCount.set(id, 1);
+    }
+
+    private static _GetLineModeStatusPos(anchorPos: mod.Vector): mod.Vector {
+        return mod.CreateVector(
+            mod.XComponentOf(anchorPos),
+            mod.YComponentOf(anchorPos) + 1.5,
+            mod.ZComponentOf(anchorPos)
+        );
+    }
+
+    private static _ShowStatusIcon(player: mod.Player, pos: mod.Vector, message: mod.Message, color: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        let icon = PropSpawner._statusIcons.get(id);
+        if (!icon) {
+            icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+            if (!icon) return;
+            mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+            PropSpawner._statusIcons.set(id, icon);
+        }
+        mod.SetWorldIconText(icon, message);
+        mod.SetWorldIconColor(icon, color);
+        mod.SetWorldIconPosition(icon, pos);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+    }
+
+    private static _HideStatusIcon(id: number): void {
+        const icon = PropSpawner._statusIcons.get(id);
+        if (!icon) return;
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+    }
+
+    private static _RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const objects = PropSpawner._playerSpawnedObjects.get(id);
+        if (!objects || objects.length === 0) return;
+        const anchor = objects[objects.length - 1];
+        PropSpawner._lineDir.set(id, lineDir);
+        const ldx = mod.XComponentOf(lineDir);
+        const ldz = mod.ZComponentOf(lineDir);
+        const perp1x = -ldz;
+        const perp1z = ldx;
+        const anchorPos = PropSpawner._lineAnchorPos.get(id) ?? PROP_SPAWNER_ZERO_VEC;
+        const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+        const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+        const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+        const dot = perp1x * toPx + perp1z * toPz;
+        const facingX = dot >= 0 ? perp1x : -perp1x;
+        const facingZ = dot >= 0 ? perp1z : -perp1z;
+        const yaw = Math.atan2(facingX, facingZ);
+        const rot = mod.CreateVector(0, yaw, 0);
+        PropSpawner._lineAnchorRot.set(id, rot);
+        const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
+        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+    }
+
+    private static _FinalizeLinePlacement(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const anchorPos = PropSpawner._lineAnchorPos.get(id);
+        const anchorRot = PropSpawner._lineAnchorRot.get(id);
+        const count = PropSpawner._lineCount.get(id) ?? 1;
+        const config = PropSpawner._GetPropConfig(id);
+        const lineDir = PropSpawner._lineDir.get(id);
+        const facingYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
+        const effectiveStep = lineDir ? PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config) : config.width;
+
+        // Move the in-progress anchor to the permanent placed objects list
+        const inProgressList = PropSpawner._playerSpawnedObjects.get(id);
+        if (inProgressList) {
+            for (const obj of inProgressList) {
+                PropSpawner._allPlacedObjects.push(obj);
+            }
+            PropSpawner._playerSpawnedObjects.delete(id);
+        }
+
+        // Spawn child props along the line
+        if (anchorPos && lineDir && count > 1) {
+            const childYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
+            for (let i = 1; i < count; i++) {
+                const offset = i * effectiveStep;
+                const childPivot = mod.CreateVector(
+                    mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                    mod.YComponentOf(anchorPos),
+                    mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+                );
+                const childObjectPos = PropSpawner._ComputeObjectPosFromPivot(childPivot, childYaw, config);
+                const prop = mod.SpawnObject(config.prop as mod.RuntimeSpawn_Sand, childObjectPos, anchorRot!, PROP_SPAWNER_ONE_VEC);
+                if (prop) PropSpawner._allPlacedObjects.push(prop);
+            }
+        }
+
+        // Stagger VFX at each placed prop position (fire-and-forget)
+        if (anchorPos) {
+            const fxAnchorPos = anchorPos;
+            const fxLineDir = lineDir;
+            const fxStep = effectiveStep;
+            const fxCount = count;
+            (async () => {
+                const anchorLandVfx = mod.SpawnObject(PROP_SPAWNER_VFX_PROP_LAND, fxAnchorPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (anchorLandVfx) mod.EnableVFX(anchorLandVfx, true);
+                for (let i = 1; i < fxCount; i++) {
+                    await mod.Wait(0.05);
+                    if (!fxLineDir) break;
+                    const pos = mod.CreateVector(
+                        mod.XComponentOf(fxAnchorPos) + mod.XComponentOf(fxLineDir) * i * fxStep,
+                        mod.YComponentOf(fxAnchorPos),
+                        mod.ZComponentOf(fxAnchorPos) + mod.ZComponentOf(fxLineDir) * i * fxStep
+                    );
+                    const childLandVfx = mod.SpawnObject(PROP_SPAWNER_VFX_PROP_LAND, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                    if (childLandVfx) mod.EnableVFX(childLandVfx, true);
+                }
+            })();
+        }
+
+        // Mark placed for phase progress on first finalize
+        if (!PropSpawner._hasPlaced.has(id)) {
+            PropSpawner._hasPlaced.add(id);
+        }
+
+        // Advance prop cycle index so next row uses the next prop
+        const currentIdx = PropSpawner._propIndex.get(id) ?? 0;
+        PropSpawner._propIndex.set(id, currentIdx + 1);
+
+        // Exit line mode
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        const finalizeHintVfx = PropSpawner._lineHintVfx.get(id);
+        if (finalizeHintVfx) {
+            mod.EnableVFX(finalizeHintVfx, false);
+            try { mod.UnspawnObject(finalizeHintVfx as unknown as mod.Object); } catch { }
+            PropSpawner._lineHintVfx.delete(id);
+        }
+        PropSpawner._HideLinePreviews(player);
+        PropSpawner._HideStatusIcon(id);
+        PropSpawner._HidePreviewIcon(id);
+
+        // If we're past the countdown (grace mode), strip the gadget now.
+        if (PropSpawner._graceMode.has(id)) {
+            PropSpawner._CleanupPreviewIcon(id);
+            PropSpawner._CleanupPlayerState(id);
+            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
+        }
+    }
+
+    private static _CancelLinePlacement(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        // Remove the in-progress anchor prop
+        const objects = PropSpawner._playerSpawnedObjects.get(id);
+        if (objects && objects.length > 0) {
+            const anchor = objects.pop()!;
+            try { mod.UnspawnObject(anchor); } catch { }
+            if (objects.length === 0) PropSpawner._playerSpawnedObjects.delete(id);
+        }
+        PropSpawner._lineMode.delete(id);
+        PropSpawner._lineAnchorPos.delete(id);
+        PropSpawner._lineAnchorRot.delete(id);
+        PropSpawner._lineDir.delete(id);
+        PropSpawner._lineCursorPos.delete(id);
+        PropSpawner._ratchetAngle.delete(id);
+        PropSpawner._ratchetNotch.delete(id);
+        PropSpawner._lineFrozen.delete(id);
+        const cancelHintVfx = PropSpawner._lineHintVfx.get(id);
+        if (cancelHintVfx) {
+            mod.EnableVFX(cancelHintVfx, false);
+            try { mod.UnspawnObject(cancelHintVfx as unknown as mod.Object); } catch { }
+            PropSpawner._lineHintVfx.delete(id);
+        }
+        PropSpawner._HideLinePreviews(player);
+        PropSpawner._HideStatusIcon(id);
+        PropSpawner._HidePreviewIcon(id);
+
+        // If we're past the countdown (grace mode), strip the gadget on cancel too.
+        if (PropSpawner._graceMode.has(id)) {
+            PropSpawner._CleanupPreviewIcon(id);
+            PropSpawner._CleanupPlayerState(id);
+            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
+        }
+    }
+
+    private static _RemoveGadgetAndCleanup(player: mod.Player): void {
+        try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
+        const pp = PlayerProfile.Get(player);
+        const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
+        if (gadgetItem?.gadget) {
+            try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
+        }
+    }
+}
+
 export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
-    HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+        PropSpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else {
+        HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
+    }
 }
 
 export function OnRayCastMissed(eventPlayer: mod.Player) {
-    HandleLeapRayCastMissed(eventPlayer);
+    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+        PropSpawner.OnRayCastMissed(eventPlayer);
+    } else {
+        HandleLeapRayCastMissed(eventPlayer);
+    }
+}
+
+export function OnPortalGadgetAimStart(player: mod.Player): void {
+    PropSpawner.OnAimStart(player);
+}
+
+export function OnPortalGadgetAimStop(player: mod.Player): void {
+    PropSpawner.OnAimStop(player);
+}
+
+export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
+    PropSpawner.OnLaserToggle(player, eventBoolean);
+}
+
+export function OnPortalGadgetFireStart(player: mod.Player): void {
+    PropSpawner.OnFireStart(player);
+}
+
+export function OnPortalGadgetFireStop(player: mod.Player): void {
+    PropSpawner.OnFireStop(player);
 }
 
 export async function OnGameModeStarted() {
-    mod.EnableAllPlayerDeploy(false);
     mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
 
     // ---- BOT SURVIVAL TEST MODE: no rounds/timers, ramp infected bot population ----

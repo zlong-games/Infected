@@ -5,3 +5,5 @@
 !.gitignore
 !infected.ts
 !zombies.strings.json
+!infected_prop_spawner.ts
+!infected_prop_spawner.strings.json
