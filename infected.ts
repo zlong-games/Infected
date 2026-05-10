@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.14";
+const VERSION = "1.06.15";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
