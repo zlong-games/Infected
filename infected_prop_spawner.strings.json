@@ -1,9 +1,10 @@
 {
   "prop_spawner_preview_barrierconcretewall_01_192x320": "Barrier Concrete Wall",
   "prop_spawner_preview_barricadeboardswood_01_B": "Barricade Boards",
-  "prop_spawner_preview_cratepallet_01": "Crate Pallet",
+  "prop_spawner_preview_crateammo_01_stackb": "Ammo Crate Stack",
   "prop_spawner_preview_unknown": "Next prop: Unknown",
   "prop_spawner_invalid_surface": "Invalid surface",
   "prop_spawner_out_of_range": "Out of range",
-  "prop_spawner_toggle_to_extend": "Toggle Laser to extend props"
+  "prop_spawner_toggle_to_extend": "Toggle Laser to extend props",
+  "prop_spawner_fire_to_place": "Fire to place prop"
 }

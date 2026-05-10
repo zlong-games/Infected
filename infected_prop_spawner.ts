@@ -20,6 +20,10 @@ interface PropConfig {
     width: number;
     // Depth of the prop (metres) along its local forward axis (along its facing direction).
     depth: number;
+    // Minimum horizontal distance from anchor before line drag engages (metres).
+    lineDragMinDist: number;
+    // Minimum dot-product for keyhole VFX to be visible (cos of max angle).
+    keyholeMinDot: number;
 }
 
 // ---- Config ----------------------------------------------------------------
@@ -28,13 +32,13 @@ const MAX_SPAWN_DISTANCE = 10;   // metres; also used as the raycast end distanc
 const PREVIEW_TICK_INTERVAL = 3;   // fire a preview raycast every N OngoingPlayer ticks
 const MIN_FLOOR_NORMAL_Y = 0.5; // reject surfaces whose Y normal is below this (walls/ceilings)
 const MAX_LINE_PROPS = 3;        // maximum number of props that can be placed in a single line row
-const LINE_CURSOR_MAX_DIST = 5; // max metres from anchor for a floor raycast to count as line cursor
-const LINE_DRAG_MIN_DIST = 2.0; // min horizontal metres from anchor before line drag engages
+const LINE_CURSOR_MAX_DIST = 10; // max metres from anchor for a floor raycast to count as line cursor
 // ---- SFX / VFX identifiers -------------------------------------------------
-const VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Sand;
-const VFX_PROP_LAND     = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
-const SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_ATMine_Pickup_OneShot3D;
-const SFX_RATCHET       = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
+const VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
+const VFX_PROP_LAND     = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation; // aggressive VFX for clear feedback
+const VFX_LINE_HINT     = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
+const SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
+const SFX_RATCHET       = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
 
 // ---- Ratchet tuning --------------------------------------------------------
 const LINE_RATCHET_DEG  = 3;    // degrees of aim sweep per ratchet notch
@@ -45,30 +49,11 @@ const RATCHET_ATTEN     = 30;   // 3D attenuation range for ratchet SFX
 const ZERO_VEC = mod.CreateVector(0, 0, 0);
 const ONE_VEC = mod.CreateVector(1, 1, 1);
 
-// Per-prop placement config. Tune forwardOffset / rightOffset to align each prop's
-// visual centre with the player's aim point.
+// Per-prop placement config.
 const PROP_CONFIGS: PropConfig[] = [
-    {
-        prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320,
-        forwardOffset: 0,
-        rightOffset: 0,
-        width: 1.92, // 192 cm face width
-        depth: 0.3,  // concrete wall thickness
-    },
-    {
-        prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B,
-        forwardOffset: 0,
-        rightOffset: 0,
-        width: 1,
-        depth: 0.2,
-    },
-    {
-        prop: mod.RuntimeSpawn_Sand.CratePallet_01,
-        forwardOffset: 0,
-        rightOffset: 0,
-        width: 2,
-        depth: 1.0,
-    },
+    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 0.96, width: 1.92, depth: 0.3, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
+    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 0.5, width: 1.0, depth: 0.2, lineDragMinDist: 1.0, keyholeMinDot: 0.65 },
+    { prop: mod.RuntimeSpawn_Common.CrateAmmo_01_StackB, forwardOffset: 0, rightOffset: 0, width: 2.0, depth: 1.0, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
 ];
 
 // ---- Per-player state ------------------------------------------------------
@@ -131,6 +116,10 @@ const playerStatusIcons: Map<number, mod.WorldIcon> = new Map();
 // Players in line mode whose aim updates are frozen (stopped aiming after placing anchor).
 const playerLineFrozen: Set<number> = new Set();
 
+// Persistent hint VFX spawned at the first-extension-slot position while in frozen line mode.
+// Enabled only when the player is "keyholed" (looking toward the anchor).
+const playerLineHintVfx: Map<number, mod.VFX> = new Map();
+
 
 
 // ---- Helpers ---------------------------------------------------------------
@@ -160,8 +149,8 @@ function GetPropPreviewMessage(prop: SpawnableProp): mod.Message {
             return mod.Message(mod.stringkeys.prop_spawner_preview_barrierconcretewall_01_192x320);
         case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
             return mod.Message(mod.stringkeys.prop_spawner_preview_barricadeboardswood_01_B);
-        case mod.RuntimeSpawn_Sand.CratePallet_01:
-            return mod.Message(mod.stringkeys.prop_spawner_preview_cratepallet_01);
+        case mod.RuntimeSpawn_Common.CrateAmmo_01_StackB:
+            return mod.Message(mod.stringkeys.prop_spawner_preview_crateammo_01_stackb);
         default:
             return mod.Message(mod.stringkeys.prop_spawner_preview_unknown);
     }
@@ -201,26 +190,20 @@ function HidePreviewIcon(player: mod.Player): void {
     }
 }
 
-// Apply per-prop horizontal offsets to align the spawn position with the aim point.
-function ApplyHorizontalOffset(position: mod.Vector, player: mod.Player, config: PropConfig): mod.Vector {
-    if (config.forwardOffset === 0 && config.rightOffset === 0) return position;
-
-    const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
-    // Flatten facing to the horizontal plane so vertical aim angle does not skew offsets
-    const facingH = mod.Normalize(mod.CreateVector(
-        mod.XComponentOf(facing),
-        0,
-        mod.ZComponentOf(facing)
-    ));
-    // Right vector = 90 deg CW rotation of facingH around the Y axis
-    const right = mod.CreateVector(mod.ZComponentOf(facingH), 0, -mod.XComponentOf(facingH));
-
-    let result = position;
-    if (config.forwardOffset !== 0) {
-        result = mod.Add(result, mod.Multiply(facingH, config.forwardOffset));
-    }
+// Compute the object origin from a pivot point (raw raycast hit / visual centre).
+// Offsets along the prop's own right/forward axes derived from yaw so rotation stays centred.
+function ComputeObjectPosFromPivot(pivot: mod.Vector, yaw: number, config: PropConfig): mod.Vector {
+    if (config.rightOffset === 0 && config.forwardOffset === 0) return pivot;
+    let result = pivot;
     if (config.rightOffset !== 0) {
-        result = mod.Add(result, mod.Multiply(right, config.rightOffset));
+        const prx = Math.cos(yaw);
+        const prz = -Math.sin(yaw);
+        result = mod.Add(result, mod.CreateVector(-config.rightOffset * prx, 0, -config.rightOffset * prz));
+    }
+    if (config.forwardOffset !== 0) {
+        const pfx = Math.sin(yaw);
+        const pfz = Math.cos(yaw);
+        result = mod.Add(result, mod.CreateVector(-config.forwardOffset * pfx, 0, -config.forwardOffset * pfz));
     }
     return result;
 }
@@ -329,7 +312,7 @@ function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: 
             mod.YComponentOf(anchorPos),
             mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * newSlotOffset
         );
-        PlaySFX2DForPlayer(SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
+        PlaySFX3DForPlayer(SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
     }
 
     playerLineCount.set(id, count);
@@ -345,8 +328,8 @@ function SmallestAngleDelta(a: number, b: number): number {
     return Math.abs(d);
 }
 
-// Play a 2D sound heard only by a specific player.
-function PlaySFX2DForPlayer(sfx: mod.RuntimeSpawn_Common, amplitude: number, player: mod.Player, pos: mod.Vector): void {
+// Play a sound heard only by a specific player.
+function PlaySFX3DForPlayer(sfx: mod.RuntimeSpawn_Common, amplitude: number, player: mod.Player, pos: mod.Vector): void {
     const sfxObj = mod.SpawnObject(sfx, pos, ZERO_VEC) as mod.SFX;
     if (sfxObj) mod.PlaySound(sfxObj, amplitude, player);
 }
@@ -433,7 +416,8 @@ function RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
     const yaw = Math.atan2(facingX, facingZ);
     const rot = mod.CreateVector(0, yaw, 0);
     playerLineAnchorRot.set(id, rot);
-    try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
+    const objectPos = ComputeObjectPosFromPivot(anchorPos, yaw, GetPropConfig(player));
+    try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
 }
 
 // Finalize line-mode: spawn props at slots 2..count along the stored line direction.
@@ -452,14 +436,16 @@ function FinalizeLinePlacement(player: mod.Player): void {
 
     if (anchorPos && lineDir && count > 1) {
         const list = playerSpawnedObjects.get(id) ?? [];
+        const childYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
         for (let i = 1; i < count; i++) {
             const offset = i * effectiveStep;
-            const pos = mod.CreateVector(
+            const childPivot = mod.CreateVector(
                 mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
                 mod.YComponentOf(anchorPos),
                 mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
             );
-            const prop = mod.SpawnObject(config.prop as mod.RuntimeSpawn_Sand, pos, anchorRot!, ONE_VEC);
+            const childObjectPos = ComputeObjectPosFromPivot(childPivot, childYaw, config);
+            const prop = mod.SpawnObject(config.prop as mod.RuntimeSpawn_Sand, childObjectPos, anchorRot!, ONE_VEC);
             if (prop) list.push(prop);
         }
         playerSpawnedObjects.set(id, list);
@@ -497,6 +483,12 @@ function FinalizeLinePlacement(player: mod.Player): void {
     playerRatchetAngle.delete(id);
     playerRatchetNotch.delete(id);
     playerLineFrozen.delete(id);
+    const finalizeHintVfx = playerLineHintVfx.get(id);
+    if (finalizeHintVfx) {
+        mod.EnableVFX(finalizeHintVfx, false);
+        try { mod.UnspawnObject(finalizeHintVfx as unknown as mod.Object); } catch { }
+        playerLineHintVfx.delete(id);
+    }
     HideLinePreviews(player);
     HideStatusIcon(player);
 
@@ -528,6 +520,12 @@ function CancelLinePlacement(player: mod.Player): void {
     playerRatchetAngle.delete(id);
     playerRatchetNotch.delete(id);
     playerLineFrozen.delete(id);
+    const cancelHintVfx = playerLineHintVfx.get(id);
+    if (cancelHintVfx) {
+        mod.EnableVFX(cancelHintVfx, false);
+        try { mod.UnspawnObject(cancelHintVfx as unknown as mod.Object); } catch { }
+        playerLineHintVfx.delete(id);
+    }
     HideLinePreviews(player);
     HideStatusIcon(player);
     HidePreviewIcon(player);
@@ -563,6 +561,13 @@ function CleanupPlayerObjects(player: mod.Player): void {
         try { mod.UnspawnObject(statusIcon as unknown as mod.Object); } catch { }
         playerStatusIcons.delete(id);
     }
+
+    const hintVfxCleanup = playerLineHintVfx.get(id);
+    if (hintVfxCleanup) {
+        mod.EnableVFX(hintVfxCleanup, false);
+        try { mod.UnspawnObject(hintVfxCleanup as unknown as mod.Object); } catch { }
+        playerLineHintVfx.delete(id);
+    }
 }
 
 function ResetPlayerState(player: mod.Player): void {
@@ -582,6 +587,7 @@ function ResetPlayerState(player: mod.Player): void {
     playerLineCount.delete(id);
     playerLineCursorState.delete(id);
     playerLineFrozen.delete(id);
+    playerLineHintVfx.delete(id); // object already unspawned by CleanupPlayerObjects
 }
 
 // ---- Event handlers --------------------------------------------------------
@@ -616,6 +622,9 @@ export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: bool
     if (!playerLineMode.has(id)) return;
     if (playerLineFrozen.has(id)) {
         playerLineFrozen.delete(id);
+        // Show hint VFX as a directional cue when extension/draw mode is activated
+        const hintVfx = playerLineHintVfx.get(id);
+        if (hintVfx) mod.EnableVFX(hintVfx, true);
     } else {
         playerLineFrozen.add(id);
     }
@@ -652,12 +661,82 @@ export function OngoingPlayer(player: mod.Player): void {
 
     if (playerLineMode.has(id)) {
         // In line mode: fire throttled line_cursor raycasts to track ground hits.
-        // Fall back to aim-direction projection when no valid floor hit is available.
         const anchorPos = playerLineAnchorPos.get(id);
         if (anchorPos) {
             if (playerLineFrozen.has(id)) {
-                // Player stopped aiming: freeze rotation/extension updates.
-                // Existing preview icons stay in their current state.
+                // Extension inactive: still track aim to keep status icon current.
+                if (!playerRaycastInFlight.has(id)) {
+                    const tick = (playerPreviewTick.get(id) ?? 0) + 1;
+                    playerPreviewTick.set(id, tick);
+                    if (tick % PREVIEW_TICK_INTERVAL === 0) {
+                        const { start, end } = GetRaycastVectors(player);
+                        playerRaycastInFlight.add(id);
+                        playerRaycastPurpose.set(id, "line_cursor");
+                        mod.RayCast(player, start, end);
+                    }
+                }
+                const cachedCursor = playerLineCursorPos.get(id);
+                const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+                const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+                const aimPoint = cachedCursor ?? mod.Add(eyePos, mod.Multiply(facing, LINE_CURSOR_MAX_DIST));
+
+                // Rotate anchor prop to face toward the player while frozen,
+                // but only when there is just the root prop (no line queued yet).
+                const frozenLineCount = playerLineCount.get(id) ?? 1;
+                const frozenObjects = playerSpawnedObjects.get(id);
+                if (frozenLineCount <= 1 && frozenObjects && frozenObjects.length > 0) {
+                    const anchor = frozenObjects[frozenObjects.length - 1];
+                    const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
+                    const toPx = mod.XComponentOf(playerPos) - mod.XComponentOf(anchorPos);
+                    const toPz = mod.ZComponentOf(playerPos) - mod.ZComponentOf(anchorPos);
+                    const yaw = Math.atan2(toPx, toPz);
+                    const rot = mod.CreateVector(0, yaw, 0);
+                    playerLineAnchorRot.set(id, rot);
+                    const objectPos = ComputeObjectPosFromPivot(anchorPos, yaw, GetPropConfig(player));
+                    try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+                }
+
+                // Keyhole hint VFX: show first-extension-slot when player looks at anchor.
+                const frozenHintVfx = playerLineHintVfx.get(id);
+                if (frozenHintVfx) {
+                    const hFx = mod.XComponentOf(facing);
+                    const hFz = mod.ZComponentOf(facing);
+                    const hFLen = Math.sqrt(hFx * hFx + hFz * hFz);
+                    if (hFLen > 0.001) {
+                        const config = GetPropConfig(player);
+                        const anchorRotY = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
+                        const tentativeDir = mod.CreateVector(hFx / hFLen, 0, hFz / hFLen);
+                        const step = ComputeEffectiveStep(tentativeDir, anchorRotY, config);
+                        // Height = effective step: the Trophy Range Indicator projects a
+                        // circle whose radius matches its height above the ground, so the
+                        // circle edge aligns with where the first extension prop would land.
+                        const hintPos = mod.CreateVector(
+                            mod.XComponentOf(anchorPos),
+                            mod.YComponentOf(anchorPos) + step,
+                            mod.ZComponentOf(anchorPos)
+                        );
+                        // Keyholed: player facing aligns with direction toward anchor
+                        const dax = mod.XComponentOf(anchorPos) - mod.XComponentOf(eyePos);
+                        const day = mod.YComponentOf(anchorPos) - mod.YComponentOf(eyePos);
+                        const daz = mod.ZComponentOf(anchorPos) - mod.ZComponentOf(eyePos);
+                        const daLen = Math.sqrt(dax * dax + day * day + daz * daz);
+                        const dotToAnchor = daLen > 0.001
+                            ? (mod.XComponentOf(facing) * dax + mod.YComponentOf(facing) * day + mod.ZComponentOf(facing) * daz) / daLen
+                            : 0;
+                        if (dotToAnchor >= GetPropConfig(player).keyholeMinDot) {
+                            try { mod.SetObjectTransform(frozenHintVfx as unknown as mod.Object, mod.CreateTransform(hintPos, ZERO_VEC)); } catch { }
+                            mod.EnableVFX(frozenHintVfx, true);
+                        } else {
+                            mod.EnableVFX(frozenHintVfx, false);
+                        }
+                    } else {
+                        mod.EnableVFX(frozenHintVfx, false);
+                    }
+                }
+
+                ShowStatusIcon(player, aimPoint,
+                    mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                    mod.CreateVector(0.8, 0.8, 1.0));
                 return;
             }
 
@@ -682,7 +761,7 @@ export function OngoingPlayer(player: mod.Player): void {
 
             const dist = HorizontalDistance(anchorPos, cursorPos);
 
-            if (dist < LINE_DRAG_MIN_DIST) {
+            if (dist < GetPropConfig(player).lineDragMinDist) {
                 // Cursor is close to anchor - prop tracks toward the player, no line shown.
                 const objects = playerSpawnedObjects.get(id);
                 if (objects && objects.length > 0) {
@@ -693,12 +772,11 @@ export function OngoingPlayer(player: mod.Player): void {
                     const yaw = Math.atan2(toPx, toPz);
                     const rot = mod.CreateVector(0, yaw, 0);
                     playerLineAnchorRot.set(id, rot);
-                    try { mod.SetObjectTransform(anchor, mod.CreateTransform(anchorPos, rot)); } catch { }
+                    const objectPos = ComputeObjectPosFromPivot(anchorPos, yaw, GetPropConfig(player));
+                    try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
                 }
                 HideLinePreviews(player);
-                ShowStatusIcon(player, cursorPos,
-                    mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
-                    mod.CreateVector(0.8, 0.8, 1.0));
+                HideStatusIcon(player);
             } else {
                 // Cursor is far enough - engage line drag.
                 const lineDir = ComputeLineDirection(anchorPos, cursorPos);
@@ -723,11 +801,11 @@ export function OngoingPlayer(player: mod.Player): void {
                         UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
  
                         if (count === 1) {
-                            ShowStatusIcon(player, statusPos,
-                                mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
-                                mod.CreateVector(0.8, 0.8, 1.0));
-                        } else {
                             HideStatusIcon(player);
+                        } else {
+                            ShowStatusIcon(player, statusPos,
+                                mod.Message(mod.stringkeys.prop_spawner_fire_to_place),
+                                mod.CreateVector(0.2, 1, 0.2));
                         }
 
                         // Ratchet: ticking SFX every LINE_RATCHET_DEG of aim sweep.
@@ -802,17 +880,19 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
         }
 
         const config = GetPropConfig(eventPlayer);
-        const spawnPos = ApplyHorizontalOffset(eventPoint, eventPlayer, config);
-        // Initial rotation faces toward the player; will be adjusted as the player drags.
+        const pivotPos = eventPoint; // raw hit = visual centre (pivot)
         const spawnRot = GetFacingPlayerRotation(eventPlayer);
+        const spawnYaw = mod.YComponentOf(spawnRot);
+        const spawnPos = ComputeObjectPosFromPivot(pivotPos, spawnYaw, config);
         const prop = mod.SpawnObject(config.prop, spawnPos, spawnRot, ONE_VEC);
 
         if (prop) {
             // Enter line mode: anchor recorded, prop cycle NOT advanced yet (happens at finalize).
             playerLineMode.add(id);
-            playerLineAnchorPos.set(id, spawnPos);
+            playerLineAnchorPos.set(id, pivotPos);
             playerLineAnchorRot.set(id, spawnRot);
             playerLineCount.set(id, 1);
+            playerLineFrozen.add(id); // start frozen; laser toggle activates extension
 
             const list = playerSpawnedObjects.get(id) ?? [];
             list.push(prop);
@@ -823,6 +903,19 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
             if (anchorVfx) mod.EnableVFX(anchorVfx, true);
             playerRatchetAngle.delete(id);
             playerRatchetNotch.set(id, 0);
+
+            // Hint VFX: spawned at anchor, disabled until the player is keyholed
+            const existingHintVfx = playerLineHintVfx.get(id);
+            if (existingHintVfx) {
+                try { mod.UnspawnObject(existingHintVfx as unknown as mod.Object); } catch { }
+            }
+            const hintVfx = mod.SpawnObject(VFX_LINE_HINT, spawnPos, ZERO_VEC) as mod.VFX;
+            if (hintVfx) {
+                mod.EnableVFX(hintVfx, false);
+                playerLineHintVfx.set(id, hintVfx);
+            } else {
+                playerLineHintVfx.delete(id);
+            }
 
             // Keep the cursor preview icon hidden during line-drag
             HidePreviewIcon(eventPlayer);
