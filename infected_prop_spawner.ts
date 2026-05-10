@@ -42,8 +42,8 @@ const SFX_RATCHET       = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equi
 
 // ---- Ratchet tuning --------------------------------------------------------
 const LINE_RATCHET_DEG  = 3;    // degrees of aim sweep per ratchet notch
-const RATCHET_BASE_AMP  = 0.5;  // amplitude of the first notch in a bracket
-const RATCHET_AMP_STEP  = 0.15; // amplitude added per successive notch
+const RATCHET_BASE_AMP  = 0.2;  // amplitude of the first notch in a bracket
+const RATCHET_AMP_STEP  = 0.05; // amplitude added per successive notch
 const RATCHET_MAX_AMP   = 0.85; // amplitude ceiling
 const RATCHET_ATTEN     = 30;   // 3D attenuation range for ratchet SFX
 const ZERO_VEC = mod.CreateVector(0, 0, 0);

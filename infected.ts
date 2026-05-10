@@ -12149,16 +12149,16 @@ const PROP_SPAWNER_MIN_FLOOR_NORMAL_Y = 0.5;
 const PROP_SPAWNER_ZERO_VEC = mod.CreateVector(0, 0, 0);
 const PROP_SPAWNER_ONE_VEC = mod.CreateVector(1, 1, 1);
 const PROP_SPAWNER_MAX_LINE_PROPS = 3;
-const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 5;
-const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LoadoutCrate_Sand;
-const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
+const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 10;
+const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
+const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation;
 const PROP_SPAWNER_VFX_LINE_HINT = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
 const PROP_SPAWNER_SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
 const PROP_SPAWNER_SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
 // ---- Ratchet tuning
-const PROP_SPAWNER_LINE_RATCHET_DEG = 1;
-const PROP_SPAWNER_RATCHET_BASE_AMP = 0.5;
-const PROP_SPAWNER_RATCHET_AMP_STEP = 0.15;
+const PROP_SPAWNER_LINE_RATCHET_DEG = 3;
+const PROP_SPAWNER_RATCHET_BASE_AMP = 0.2;
+const PROP_SPAWNER_RATCHET_AMP_STEP = 0.05;
 const PROP_SPAWNER_RATCHET_MAX_AMP = 0.85;
 const PROP_SPAWNER_RATCHET_ATTEN = 30;
 
