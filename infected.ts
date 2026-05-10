@@ -9095,6 +9095,11 @@ function CheckForBannedWeapons(player: mod.Player) {
         return false;
     }
 
+    // Skip banned-weapon check while a survivor is still in the prop-placement grace window.
+    if (PropSpawner._graceMode.has(mod.GetObjId(player))) {
+        return false;
+    }
+
     const whitelistEntries = Weapons.GetRoundLoadout(playerProfile)
         ?.map(item => {
             if (item.weapon !== undefined) {
