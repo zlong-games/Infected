@@ -35,19 +35,34 @@ const MAX_LINE_PROPS = 3;        // maximum number of props that can be placed i
 const LINE_CURSOR_MAX_DIST = 10; // max metres from anchor for a floor raycast to count as line cursor
 // ---- SFX / VFX identifiers -------------------------------------------------
 const VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
-const VFX_PROP_LAND     = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation; // aggressive VFX for clear feedback
-const VFX_LINE_HINT     = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
+const VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation; // aggressive VFX for clear feedback
+const VFX_LINE_HINT = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
 const SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
-const SFX_RATCHET       = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
+const SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
 
 // ---- Ratchet tuning --------------------------------------------------------
-const LINE_RATCHET_DEG  = 3;    // degrees of aim sweep per ratchet notch
-const RATCHET_BASE_AMP  = 0.2;  // amplitude of the first notch in a bracket
-const RATCHET_AMP_STEP  = 0.05; // amplitude added per successive notch
-const RATCHET_MAX_AMP   = 0.85; // amplitude ceiling
-const RATCHET_ATTEN     = 30;   // 3D attenuation range for ratchet SFX
+const LINE_RATCHET_DEG = 3;    // degrees of aim sweep per ratchet notch
+const RATCHET_BASE_AMP = 0.2;  // amplitude of the first notch in a bracket
+const RATCHET_AMP_STEP = 0.05; // amplitude added per successive notch
+const RATCHET_MAX_AMP = 0.85; // amplitude ceiling
+const RATCHET_ATTEN = 30;   // 3D attenuation range for ratchet SFX
 const ZERO_VEC = mod.CreateVector(0, 0, 0);
 const ONE_VEC = mod.CreateVector(1, 1, 1);
+
+// ---- Bot test harness config -----------------------------------------------
+// Set to false to disable the looping bot entirely.
+const BOT_TEST_ENABLED = true;
+// Numeric spawner ID to use for the test bot (must exist on the current map).
+const BOT_TEST_SPAWNER_ID = 1;
+// Seconds after spawn before the bot aims and fires.
+const BOT_TEST_FIRE_DELAY = 1.5;
+// Seconds after fire before checking whether a prop appeared.
+const BOT_TEST_CONFIRM_DELAY = 3.0;
+// Seconds after the bot is killed before the next spawn request.
+const BOT_TEST_RESTART_DELAY = 2.0;
+// World-space floor position the bot aims at.  Adjust to a flat surface
+// near the spawner for whatever test level is loaded.
+const BOT_TEST_AIM_POS = mod.GetObjectPosition(mod.GetHQ(1)) as mod.Vector;
 
 // Per-prop placement config.
 const PROP_CONFIGS: PropConfig[] = [
@@ -120,6 +135,8 @@ const playerLineFrozen: Set<number> = new Set();
 // Enabled only when the player is "keyholed" (looking toward the anchor).
 const playerLineHintVfx: Map<number, mod.VFX> = new Map();
 
+// ---- Bot test harness state ------------------------------------------------
+let _botTestBot: mod.Player | undefined;
 
 
 // ---- Helpers ---------------------------------------------------------------
@@ -156,12 +173,23 @@ function GetPropPreviewMessage(prop: SpawnableProp): mod.Message {
     }
 }
 
-function GetOrCreatePreviewIcon(player: mod.Player): mod.WorldIcon | undefined {
-    return playerPreviewIcons.get(GetPlayerId(player));
+function GetOrCreatePreviewIcon(player: mod.Player, pos: mod.Vector): mod.WorldIcon | undefined {
+    const id = GetPlayerId(player);
+    let icon = playerPreviewIcons.get(id);
+    if (!icon) {
+        icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return undefined;
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconOwner(icon, player);
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, false);
+        playerPreviewIcons.set(id, icon);
+    }
+    return icon;
 }
 
 function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
-    const icon = GetOrCreatePreviewIcon(player);
+    const icon = GetOrCreatePreviewIcon(player, pos);
     if (!icon) return;
     mod.SetWorldIconText(icon, GetPropPreviewMessage(GetPropConfig(player).prop));
     mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
@@ -172,7 +200,7 @@ function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
 }
 
 function ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
-    const icon = GetOrCreatePreviewIcon(player);
+    const icon = GetOrCreatePreviewIcon(player, pos);
     if (!icon) return;
     mod.SetWorldIconText(icon, message);
     mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
@@ -323,7 +351,7 @@ function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: 
 // Smallest absolute angle delta between two yaw values (radians), wrapping at 2pi.
 function SmallestAngleDelta(a: number, b: number): number {
     let d = b - a;
-    while (d >  Math.PI) d -= 2 * Math.PI;
+    while (d > Math.PI) d -= 2 * Math.PI;
     while (d < -Math.PI) d += 2 * Math.PI;
     return Math.abs(d);
 }
@@ -401,7 +429,7 @@ function RotateAnchorProp(player: mod.Player, lineDir: mod.Vector): void {
     const ldx = mod.XComponentOf(lineDir);
     const ldz = mod.ZComponentOf(lineDir);
     const perp1x = -ldz;
-    const perp1z =  ldx;
+    const perp1z = ldx;
 
     // Pick the perpendicular whose dot product with (anchor -> player) is positive,
     // so all props in the row face toward the player.
@@ -590,29 +618,68 @@ function ResetPlayerState(player: mod.Player): void {
     playerLineHintVfx.delete(id); // object already unspawned by CleanupPlayerObjects
 }
 
+// ---- Bot test harness helpers ---------------------------------------------
+
+async function _BotTestSpawnBot(): Promise<void> {
+    await mod.Wait(10);
+    if (!BOT_TEST_ENABLED) return;
+    const spawner = mod.GetSpawner(BOT_TEST_SPAWNER_ID);
+    mod.AISetUnspawnOnDead(spawner, true);
+    mod.SpawnAIFromAISpawner(spawner);
+}
+
+async function _BotTestRunCycle(bot: mod.Player): Promise<void> {
+    // Let the engine finish placing the bot before touching it.
+    await mod.Wait(0.25);
+    if (!mod.IsPlayerValid(bot)) return;
+
+    _botTestBot = bot;
+    const id = GetPlayerId(bot);
+
+    // Keep the bot stationary; suppress all AI gadget-usage criteria.
+    mod.AIIdleBehavior(bot);
+    mod.AIGadgetSettings(bot, false, false, false);
+    try { mod.AddEquipment(bot, mod.Gadgets.Misc_PortalGadget); } catch { }
+    try { mod.ForceSwitchInventory(bot, mod.InventorySlots.GadgetOne); } catch { }
+
+    // Aim at the target floor surface and wait for the aim to settle.
+    mod.AISetFocusPoint(bot, BOT_TEST_AIM_POS, false);
+    await mod.Wait(BOT_TEST_FIRE_DELAY);
+    if (!mod.IsPlayerValid(bot)) return;
+
+    // Re-confirm aim then pull the trigger.
+    mod.AISetFocusPoint(bot, BOT_TEST_AIM_POS, false);
+    mod.AIForceFire(bot, 0.3);
+
+    // Wait long enough for the spawn raycast callback to arrive.
+    await mod.Wait(BOT_TEST_CONFIRM_DELAY);
+    if (!mod.IsPlayerValid(bot)) return;
+
+    // A prop will be in playerSpawnedObjects once the anchor is placed
+    // (even while still in line-mode before the second click).
+    const objs = playerSpawnedObjects.get(id);
+    if (objs && objs.length > 0) {
+        console.log(`[PropBotTest] PASS - bot(${id}) placed ${objs.length} prop(s)`);
+    } else {
+        console.log(`[PropBotTest] FAIL - bot(${id}) placed no props`);
+    }
+
+    // Kill the bot.  OnPlayerDied handles cleanup and schedules the next spawn.
+    try { mod.Kill(bot); } catch { }
+}
+
 // ---- Event handlers --------------------------------------------------------
 
 export function OnGameModeStarted(): void {
     // New round: clear spawn usage so everyone gets a fresh spawn.
     // Spawned objects are cleaned up per-player in OnPlayerDied / OnPlayerUndeploy.
     playerHasSpawned.clear();
+    if (BOT_TEST_ENABLED) _BotTestSpawnBot();
 }
 
 export function OnPlayerDeployed(player: mod.Player): void {
     mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget);
-
-    // Pre-spawn the preview icon at the player's position so SpawnObject
-    // receives a valid world position
-    const spawnPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
-    const id = GetPlayerId(player);
-    const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, spawnPos, ZERO_VEC) as mod.WorldIcon;
-    if (icon) {
-        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
-        mod.SetWorldIconOwner(icon, player);
-        mod.EnableWorldIconImage(icon, false);
-        mod.EnableWorldIconText(icon, false);
-        playerPreviewIcons.set(id, icon);
-    }
+    // Preview icon is spawned lazily on first raycast hit (GetOrCreatePreviewIcon).
     // Line preview icons are spawned lazily in UpdateLinePreviews on first use.
 }
 
@@ -630,8 +697,12 @@ export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: bool
     }
 }
 
-export function OnPortalGadgetFireStop(player: mod.Player): void {
-    HidePreviewIcon(player);
+export function OnPortalGadgetFireStop(_player: mod.Player): void {
+    // Intentionally empty: preview icon visibility is managed by the raycast
+    // preview loop (OngoingPlayer) and line-mode transitions (HidePreviewIcon
+    // is called on line-mode entry/exit and cleanup).  Hiding here caused the
+    // icon to be cleared every time FireStop fired, preventing it from ever
+    // appearing during normal aiming.
 }
 
 export function OnPortalGadgetFireStart(player: mod.Player): void {
@@ -799,7 +870,7 @@ export function OngoingPlayer(player: mod.Player): void {
                         const count = ComputeLineCount(anchorPos, cursorPos, effectiveStep);
                         const prevRatchetCount = playerLineCount.get(id) ?? 1;
                         UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
- 
+
                         if (count === 1) {
                             HideStatusIcon(player);
                         } else {
@@ -834,7 +905,7 @@ export function OngoingPlayer(player: mod.Player): void {
                                             mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * ratchetSlot * effectiveStep,
                                             mod.YComponentOf(anchorPos),
                                             mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * ratchetSlot * effectiveStep
-                                          )
+                                        )
                                         : cursorPos;
                                     PlaySFX3DAtPos(SFX_RATCHET, amp, ratchetPos);
                                 }
@@ -961,6 +1032,13 @@ export function OnRayCastMissed(eventPlayer: mod.Player): void {
     }
 }
 
+export function OnSpawnerSpawned(eventPlayer: mod.Player, eventSpawner: mod.Spawner): void {
+    if (!BOT_TEST_ENABLED) return;
+    if (mod.GetObjId(eventSpawner) !== BOT_TEST_SPAWNER_ID) return;
+    if (!mod.IsPlayerValid(eventPlayer)) return;
+    _BotTestRunCycle(eventPlayer);
+}
+
 export function OnPlayerDied(
     eventPlayer: mod.Player,
     eventOtherPlayer: mod.Player,
@@ -969,6 +1047,16 @@ export function OnPlayerDied(
 ): void {
     CleanupPlayerObjects(eventPlayer);
     ResetPlayerState(eventPlayer);
+
+    // If the test bot died (expected kill or accidental), restart the loop.
+    if (BOT_TEST_ENABLED && _botTestBot &&
+        GetPlayerId(eventPlayer) === GetPlayerId(_botTestBot)) {
+        _botTestBot = undefined;
+        (async () => {
+            await mod.Wait(BOT_TEST_RESTART_DELAY);
+            _BotTestSpawnBot();
+        })();
+    }
 }
 
 export function OnPlayerUndeploy(eventPlayer: mod.Player): void {
