@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.15";
+const VERSION = "1.06.16";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -13095,7 +13095,8 @@ export function OnPortalGadgetFireStop(player: mod.Player): void {
 }
 
 export async function OnGameModeStarted() {
-    mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
+    mod.SetSpawnMode(mod.SpawnModes.Deploy);
+    mod.EnableAllPlayerDeploy(true);
 
     // ---- BOT SURVIVAL TEST MODE: no rounds/timers, ramp infected bot population ----
     if (BOT_SURVIVAL_TEST_MODE) {
