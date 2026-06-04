@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.16";
+const VERSION = "1.06.17";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -3936,6 +3936,7 @@ class PlayerProfile {
     scoreboardUI?: ScoreboardUI;
     gameCountdownUI: GameCountdown;
     loadoutSelectionUI?: LoadoutSelectionMenu;
+    pendingLoadoutOptions?: SlotLoadoutOptions;
     alphaInfectedWidgetInstances: mod.UIWidget[] = [];
 
 
@@ -4074,6 +4075,12 @@ class PlayerProfile {
         });
 
         playerProfile.isDead = false;
+
+        if (!playerProfile.isAI && !playerProfile.isInfectedTeam && !playerProfile.isAlphaInfected &&
+            playerProfile.pendingLoadoutOptions && GameHandler.shouldShowLoadoutSelection) {
+            playerProfile.loadoutSelectionUI?.Show(playerProfile.pendingLoadoutOptions);
+            playerProfile.pendingLoadoutOptions = undefined;
+        }
 
         if (GameHandler.gameState === GameState.GameRoundIsRunning) {
             playerProfile.scoreboardUI?.Show();
@@ -4503,6 +4510,7 @@ class PlayerProfile {
             if (GameHandler.shouldShowLoadoutSelection) {
                 playerProfile.chosenLoadoutThisRound = undefined;
             }
+            playerProfile.pendingLoadoutOptions = undefined;
         })
     }
     /**
@@ -6728,8 +6736,13 @@ class GameHandler {
                     } else if (playerProfile.isAlphaInfected) {
                         // Alpha infected do not receive loadout selection
                         playerProfile.loadoutSelectionUI?.Close();
-                    } else if (playerProfile.loadoutSelectionUI) {
-                        playerProfile.loadoutSelectionUI.Show(options);
+                    } else {
+                        playerProfile.pendingLoadoutOptions = options;
+                        // Show immediately for players already deployed; others will see it on their next deploy via CustomOnPlayerDeployed
+                        if (PlayerProfile._deployedPlayers.has(playerProfile.playerID)) {
+                            playerProfile.loadoutSelectionUI?.Show(options);
+                            playerProfile.pendingLoadoutOptions = undefined;
+                        }
                     }
                 } else {
                     // No alpha selection this round: keep previous loadout selections
@@ -13095,7 +13108,7 @@ export function OnPortalGadgetFireStop(player: mod.Player): void {
 }
 
 export async function OnGameModeStarted() {
-    mod.SetSpawnMode(mod.SpawnModes.Deploy);
+    mod.SetSpawnMode(mod.SpawnModes.AutoSpawn);
     mod.EnableAllPlayerDeploy(true);
 
     // ---- BOT SURVIVAL TEST MODE: no rounds/timers, ramp infected bot population ----
