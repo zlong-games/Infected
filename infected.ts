@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.17";
+const VERSION = "1.06.19";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -38,7 +38,7 @@ const SURVIVOR_AI_SPAWNERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
 const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
-const AI_INFECTED_MELEE_DISTANCE = 2;
+const AI_INFECTED_MELEE_DISTANCE = 3;
 const AI_LEASH_RANGE = 5;
 const AI_MIN_DEF_RANGE = 3;
 
@@ -7657,9 +7657,6 @@ function IsInfectedBotWithinTargetFrontHemisphere(bot: mod.Player, targetPlayer:
 
     const targetPos = mod.GetSoldierState(targetPlayer, mod.SoldierStateVector.GetPosition);
     const botPos = mod.GetSoldierState(bot, mod.SoldierStateVector.GetPosition);
-    if (mod.DistanceBetween(targetPos, botPos) <= 0.25) {
-        return true;
-    }
 
     const targetFacing = flattenDirection(mod.GetSoldierState(targetPlayer, mod.SoldierStateVector.GetFacingDirection));
     const targetToBot = flattenDirection(mod.Subtract(botPos, targetPos));
@@ -7673,10 +7670,8 @@ function SetInfectedBotMeleeAttackEnabled(bot: mod.Player, enabled: boolean): vo
         return;
     }
 
+    // Sledgehammer stays equipped; only clear the AI combat target.
     try { mod.AISetTarget(bot); } catch { }
-    if (mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
-        try { mod.RemoveEquipment(bot, mod.InventorySlots.MeleeWeapon); } catch { }
-    }
 }
 
 function ApplyInfectedBotManualControl(bot: mod.Player): void {
@@ -7703,6 +7698,10 @@ function StartInfectedBotMeleeAttackAtPlayer(slot: InfectedBotSlot, bot: mod.Pla
     }
 
     if (!IsInfectedBotWithinTargetFrontHemisphere(bot, targetPlayer)) {
+        // Bot is in the target's rear hemisphere - strip weapon to prevent backstabs/takedowns.
+        if (mod.HasEquipment(bot, mod.Gadgets.Melee_Sledgehammer)) {
+            try { mod.RemoveEquipment(bot, mod.InventorySlots.MeleeWeapon); } catch { }
+        }
         StopInfectedBotMeleeAttack(slot, bot);
         return;
     }
@@ -8072,6 +8071,15 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
     const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
     const dist = mod.DistanceBetween(infectedBotPos, targetPos);
 
+    // Evaluate hemisphere before any distance gate so the weapon is stripped proactively
+    // on every tick the bot is behind the player within reach, not just at the moment of swing.
+    const targetInFrontHemisphere = IsInfectedBotWithinTargetFrontHemisphere(infectedBot, target);
+    if (!targetInFrontHemisphere && dist <= AI_MELEE_LOADOUT_DISTANCE) {
+        if (mod.HasEquipment(infectedBot, mod.Gadgets.Melee_Sledgehammer)) {
+            try { mod.RemoveEquipment(infectedBot, mod.InventorySlots.MeleeWeapon); } catch { }
+        }
+    }
+
     if (dist >= AI_MELEE_LOADOUT_DISTANCE) {
         StopInfectedBotMeleeAttack(slot, infectedBot);
     }
@@ -8085,7 +8093,6 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
             tick.lastMoveIssuedAt = now;
             tick.lastMovePos = targetPos;
         }
-        const targetInFrontHemisphere = IsInfectedBotWithinTargetFrontHemisphere(infectedBot, target);
         if (!disableAttacks && targetInFrontHemisphere) {
             StartInfectedBotMeleeAttackAtPlayer(slot, infectedBot, target);
             tick.behavior = 'melee_attack_window';
