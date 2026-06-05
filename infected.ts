@@ -56,7 +56,7 @@ const AI_VEHICLE_TARGET_MAX_MOVE_MULTIPLIER = 8;     // cap for velocity-scaled 
 const AI_VEHICLE_TARGET_SPEED_PER_MULTIPLIER_STEP = 10; // linear velocity units needed for each +1 multiplier above minimum
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1;          // balanced on-foot chase interval
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
-const AI_MELEE_LOADOUT_DISTANCE = 2.6;              // keep gadget use (melee) active within this range
+const AI_MELEE_LOADOUT_DISTANCE = 5;              // keep gadget use (melee) active within this range
 const AI_MELEE_FORCE_FIRE_DURATION = 0.05;          // one-off attack pulse duration for AIForceFire
 const AI_MELEE_FORCE_FIRE_COOLDOWN_SECONDS = 0.55;  // minimum delay between forced melee swings
 const AI_MELEE_FORCE_FIRE_VEHICLE_COOLDOWN_SECONDS = 2; // longer cooldown for vehicles to balance out higher damage and reduce stutter risk
@@ -3024,8 +3024,20 @@ class LoadoutSelectionMenu {
     }
 
     private EnsureDefaultSelection() {
-        if (!this.loadoutOptions) return;
         if (!this.hasConfirmedLoadout) {
+            if (!this.loadoutOptions && this._PlayerProfile.pendingLoadoutOptions) {
+                // Menu was never shown (player wasn't deployed when options were generated);
+                // use pending options directly to produce a full default loadout.
+                this._PlayerProfile.chosenLoadoutThisRound = Weapons.BuildDefaultLoadoutFromOptions(this._PlayerProfile.pendingLoadoutOptions);
+                this._PlayerProfile.pendingLoadoutOptions = undefined;
+                this.hasConfirmedLoadout = true;
+                if (Helpers.HasValidObjId(this._PlayerProfile.player) &&
+                    mod.GetSoldierState(this._PlayerProfile.player, mod.SoldierStateBool.IsAlive)) {
+                    RefreshHumanEquipment(this._PlayerProfile.player, this._PlayerProfile);
+                }
+                return;
+            }
+            if (!this.loadoutOptions) return;
             this._PlayerProfile.chosenLoadoutThisRound = this.BuildCurrentLoadout(true);
             this.hasConfirmedLoadout = true;
             if (Helpers.HasValidObjId(this._PlayerProfile.player) &&
@@ -6142,7 +6154,7 @@ class GameHandler {
             PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
             PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Bravo, INFECTED_TEAM);
             // mod.PlayMusic(mod.MusicEvents.Core_PhaseBegin, SURVIVOR_TEAM);
-            LoadoutSelectionMenu.GlobalClose(false);
+            LoadoutSelectionMenu.GlobalClose(true);
             this.RestrictAllInputsAllPlayers(false);
         }
     }
