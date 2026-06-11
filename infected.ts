@@ -1689,7 +1689,6 @@ class UI {
     static battlefieldGreyBg = mod.CreateVector(0.106, 0.137, 0.169);
     static battlefieldYellow = mod.CreateVector(0.961, 0.953, 0.51);
     static battlefieldYellowBg = mod.CreateVector(0.741, 0.729, 0.031);
-    static infectedNightGreen = mod.CreateVector(0.01, 0.02, 0.01);
     static blackColor = mod.CreateVector(0, 0, 0); // pure black
     static darkAmberColor = mod.CreateVector(0.29, 0.157, 0.012);
     static gradientAlpha: number = 0.04;
@@ -2093,25 +2092,8 @@ class UI {
         }
     }
 
-    static CreateInfectedNightOverlay(playerProfile: PlayerProfile): mod.UIWidget {
-        const componentName = `infected_night_overlay_${playerProfile.playerID}`;
-        mod.AddUIContainer(
-            componentName,
-            mod.CreateVector(0, 0, 0),
-            mod.CreateVector(3840, 1080, 0),
-            mod.UIAnchor.Center,
-            playerProfile.player
-        );
-        const widget = mod.FindUIWidgetWithName(componentName) as mod.UIWidget;
-        mod.SetUIWidgetBgFill(widget, mod.UIBgFill.Solid);
-        mod.SetUIWidgetBgColor(widget, UI.infectedNightGreen);
-        mod.SetUIWidgetBgAlpha(widget, 0.5);
-        mod.SetUIWidgetDepth(widget, mod.UIDepth.BelowGameUI);
-        mod.SetUIWidgetVisible(widget, false);
-        return widget;
-    }
-
 }
+
 
 class ScoreboardUI {
 
@@ -3931,7 +3913,6 @@ class PlayerProfile {
     lmsReloadLoopActive: boolean = false;
     youInfectedWidget?: mod.UIWidget;
     infectedByWidget?: mod.UIWidget;
-    infectedNightOverlay?: mod.UIWidget;
     playerAreaNotificationWidget?: mod.UIWidget;
     showSurvivorRoadWarning: boolean = false;
     playerAreaHintIndex: number = 0;
@@ -3992,7 +3973,6 @@ class PlayerProfile {
             this.loadoutSelectionUI = new LoadoutSelectionMenu(this);
             this.youInfectedWidget = UI.CreateYouInfectedAlert(this);
             this.infectedByWidget = UI.CreateInfectedByAlert(this);
-            this.infectedNightOverlay = UI.CreateInfectedNightOverlay(this);
             this.chosenAsAlphaInfectedWidget = [
                 this.CreateAlphaInfectedAlert(),
                 this.CreateAlphaInfectedFadeLineUI(true), //right side
@@ -4148,7 +4128,6 @@ class PlayerProfile {
             }
             ScoreboardUI.GlobalUpdate(TeamNameString.Both);
         }
-        playerProfile.UpdateInfectedNightOverlay();
         mod.SetRedeployTime(player, PLAYER_REDEPLOY_TIME);
         // skipmandown applies to the solider on all future death events
         mod.SkipManDown(player, true);
@@ -4168,7 +4147,6 @@ class PlayerProfile {
             console.log(`DEBUG | SwitchTeam BEFORE | playerID:${this.playerID} | isInfectedTeam:${this.isInfectedTeam} | infectedCount:${GameHandler.infectedCount}`);
             this.isInfectedTeam = true;
             this.isInitialSpawn = true;
-            this.UpdateInfectedNightOverlay(true);
         }
         if (GameHandler.gameState === GameState.GameRoundIsRunning && !GameHandler.suspendWinChecks) {
             Helpers.PlaySoundFX(SFX_SURVIVOR_LOST, 1, SURVIVOR_TEAM);
@@ -4198,14 +4176,6 @@ class PlayerProfile {
         }
 
         return;
-    }
-
-    UpdateInfectedNightOverlay(forceShow?: boolean) {
-        if (!this.infectedNightOverlay || this.isAI) return;
-        const shouldShow = forceShow !== undefined ? forceShow : this.isInfectedTeam;
-        mod.EnableScreenEffect(this.player, mod.ScreenEffects.Stealth, shouldShow);
-        mod.SetUIWidgetVisible(this.infectedNightOverlay, shouldShow);
-        mod.SetUIWidgetDepth(this.infectedNightOverlay, mod.UIDepth.AboveGameUI);
     }
 
     DeletePlayerAreaNotificationWidget() {
@@ -4474,7 +4444,6 @@ class PlayerProfile {
         const singleWidgets: Array<mod.UIWidget | undefined> = [
             this.youInfectedWidget,
             this.infectedByWidget,
-            this.infectedNightOverlay,
             this.playerAreaNotificationWidget,
             this.playerStateWidget,
         ];
@@ -4726,10 +4695,6 @@ class PlayerProfile {
                 if (this.infectedByWidget) {
                     mod.DeleteUIWidget(this.infectedByWidget);
                     this.infectedByWidget = undefined;
-                }
-                if (this.infectedNightOverlay) {
-                    mod.DeleteUIWidget(this.infectedNightOverlay);
-                    this.infectedNightOverlay = undefined;
                 }
                 this.DeletePlayerAreaNotificationWidget();
                 this.DeleteLastManStandingBuffWidgets();
@@ -6445,7 +6410,6 @@ class GameHandler {
             const playerProfile = PlayerProfile.Get(pp);
             playerProfile && (playerProfile.isInfectedTeam = false);
             playerProfile && (playerProfile.isInitialSpawn = false);
-            playerProfile && playerProfile.UpdateInfectedNightOverlay(false);
             if (PlayerIsAliveAndValid(pp)) {
                 mod.UndeployPlayer(pp);
                 mod.SetTeam(pp, mod.GetTeam(1));
@@ -9226,7 +9190,6 @@ function ApplyBotSurvivalTestLMSForSurvivor(player: mod.Player): void {
     playerProfile.isAlphaInfected = false;
     playerProfile.isLastManStanding = true;
     playerProfile.isFinalFive = false;
-    playerProfile.UpdateInfectedNightOverlay(false);
 
     if (mod.GetObjId(mod.GetTeam(player)) !== mod.GetObjId(SURVIVOR_TEAM)) {
         mod.SetTeam(player, SURVIVOR_TEAM);
