@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.06.19";
+const VERSION = "1.07.000";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -831,12 +831,14 @@ class Weapons {
             mod.WeaponAttachments.Ammo_Buckshot,
             mod.WeaponAttachments.Magazine_5_Shell_Tube,
             mod.WeaponAttachments.Barrel_20_Factory,
+            mod.WeaponAttachments.Left_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         m1014: [
             mod.WeaponAttachments.Ammo_Buckshot,
             mod.WeaponAttachments.Magazine_7_Shell_Tube,
             mod.WeaponAttachments.Barrel_185_Factory,
+            mod.WeaponAttachments.Left_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         "185ksk": [
@@ -858,6 +860,7 @@ class Weapons {
             mod.WeaponAttachments.Muzzle_Flash_Hider,
             mod.WeaponAttachments.Magazine_30rnd_Magazine,
             mod.WeaponAttachments.Barrel_415mm_Factory,
+            mod.WeaponAttachments.Right_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         m277: [
@@ -872,6 +875,7 @@ class Weapons {
             mod.WeaponAttachments.Muzzle_Flash_Hider,
             mod.WeaponAttachments.Magazine_30rnd_Magazine,
             mod.WeaponAttachments.Barrel_314mm_Factory,
+            mod.WeaponAttachments.Left_Flashlight,
             mod.WeaponAttachments.Scope_SU_123_150x,
         ],
         rpkm: [
@@ -915,6 +919,7 @@ class Weapons {
             mod.WeaponAttachments.Ammo_FMJ,
             mod.WeaponAttachments.Barrel_5_Pencil,
             mod.WeaponAttachments.Magazine_7rnd_Magazine,
+            mod.WeaponAttachments.Bottom_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         m44: [
@@ -933,18 +938,21 @@ class Weapons {
             mod.WeaponAttachments.Ammo_FMJ,
             mod.WeaponAttachments.Magazine_20rnd_Magazine,
             mod.WeaponAttachments.Barrel_122mm_Factory,
+            mod.WeaponAttachments.Bottom_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         p18: [
             mod.WeaponAttachments.Ammo_FMJ,
             mod.WeaponAttachments.Magazine_17rnd_Magazine,
             mod.WeaponAttachments.Barrel_39_Factory,
+            mod.WeaponAttachments.Bottom_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ],
         g22: [
             mod.WeaponAttachments.Ammo_FMJ,
             mod.WeaponAttachments.Magazine_15rnd_Magazine,
             mod.WeaponAttachments.Barrel_114mm_Factory,
+            mod.WeaponAttachments.Bottom_Flashlight,
             mod.WeaponAttachments.Scope_Iron_Sights,
         ]
         // vz61: [
@@ -1009,14 +1017,14 @@ class Weapons {
         { attachment: mod.WeaponAttachments.Barrel_264mm_Fluted, slot: AttachmentSlot.Barrel, nameKey: "attachment_barrel_264mm_fluted", rarity: 5, compatibleNameKeys: ["ak205", "usg90"] },
         { attachment: mod.WeaponAttachments.Barrel_430mm_Cut, slot: AttachmentSlot.Barrel, nameKey: "attachment_barrel_430mm_cut", rarity: 5, compatibleNameKeys: ["185ksk"] },
         // magazines
-        { attachment: mod.WeaponAttachments.Magazine_5_Shell_Tube, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_5_shell_tube", rarity: 10, compatibleNameKeys: ["m87a1"] },
-        { attachment: mod.WeaponAttachments.Magazine_7_Shell_Tube, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_7_shell_tube", rarity: 10, compatibleNameKeys: ["m1014", "m87a1"] },
+        { attachment: mod.WeaponAttachments.Magazine_5rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_5_fast_mag", rarity: 10, compatibleNameKeys: ["m87a1"] },
+        { attachment: mod.WeaponAttachments.Magazine_7_Shell_Tube, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_7_round_tube", rarity: 10, compatibleNameKeys: ["m1014", "m87a1"] },
         { attachment: mod.WeaponAttachments.Magazine_4rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_4rnd_fast_mag", rarity: 10, compatibleNameKeys: ["185ksk"] },
         { attachment: mod.WeaponAttachments.Magazine_7rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_7rnd_magazine", rarity: 10, compatibleNameKeys: ["m45a1"] },
         { attachment: mod.WeaponAttachments.Magazine_11rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_11rnd_magazine", rarity: 30, compatibleNameKeys: ["m45a1"] },
         { attachment: mod.WeaponAttachments.Magazine_8rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_8rnd_cylinder", rarity: 5, compatibleNameKeys: ["m357"] },
         { attachment: mod.WeaponAttachments.Magazine_8rnd_Moon_Clip, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_8rnd_moon_clip", rarity: 15, compatibleNameKeys: ["m357"] },
-        { attachment: mod.WeaponAttachments.Magazine_8rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_8rnd_magazine", rarity: 25, compatibleNameKeys: ["185ksk"] },
+        { attachment: mod.WeaponAttachments.Magazine_8rnd_Fast_Mag, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_8rnd_fast_mag", rarity: 25, compatibleNameKeys: ["185ksk"] },
         { attachment: mod.WeaponAttachments.Magazine_17rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_17rnd_magazine", rarity: 10, compatibleNameKeys: ["p18"] },
         { attachment: mod.WeaponAttachments.Magazine_20rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_20rnd_magazine", rarity: 15, compatibleNameKeys: ["es57", "g22"] },
         { attachment: mod.WeaponAttachments.Magazine_21rnd_Magazine, slot: AttachmentSlot.Magazine, nameKey: "attachment_magazine_21rnd_magazine", rarity: 20, compatibleNameKeys: ["p18"] },
@@ -4115,6 +4123,8 @@ class PlayerProfile {
             }
         }
 
+        NightMode.SyncNightEffectForPlayer(player);
+
         if (GameHandler.gameState !== GameState.EndOfRound) {
             console.log(`CustomOnPlayerDeployed | Adding PlayerProfile(${playerProfile.playerID}) to _deployedPlayers Map`);
             PlayerProfile._deployedPlayers.set(playerProfile.playerID, playerProfile);
@@ -5036,10 +5046,6 @@ class PlayerProfile {
         this.deaths++;
         this.UpdatePlayerScoreboard();
 
-        if (!this.isInfectedTeam) {
-            // mod.EnableScreenEffect(this.player, mod.ScreenEffects.VL7, false);
-        }
-
         // redraw team indication border after death
         if (!this.teamIndicationWidget) return;
         for (let widget of this.teamIndicationWidget) {
@@ -5069,6 +5075,32 @@ enum GameState {
     GameOver
 }
 
+class NightMode {
+    static nightModeEnabled: boolean = false;
+
+    static Roll(): void {
+        NightMode.nightModeEnabled = Math.random() < 0.60;
+        console.log(`NightMode | Roll: nightModeEnabled=${NightMode.nightModeEnabled}`);
+    }
+
+    static Reset(): void {
+        NightMode.nightModeEnabled = false;
+    }
+
+    static SyncNightEffectForPlayer(player: mod.Player): void {
+        if (!Helpers.HasValidObjId(player)) return;
+        if (SafeIsAISoldier(player)) return;
+        mod.EnableScreenEffect(player, mod.ScreenEffects.Night, NightMode.nightModeEnabled);
+    }
+
+    static SyncNightEffectForAllDeployedPlayers(): void {
+        for (const pp of PlayerProfile._allPlayerProfiles) {
+            if (pp.isAI || !Helpers.HasValidObjId(pp.player)) continue;
+            NightMode.SyncNightEffectForPlayer(pp.player);
+        }
+    }
+}
+
 class Sandstorm {
     static sandstormRollTimeRemaining: number = -1;
     static sandstormRollResolved: boolean = false;
@@ -5087,7 +5119,7 @@ class Sandstorm {
     static sandstormFadeCloud: mod.VL7Cloud | undefined;
 
     static IsSandstormMapEligible(): boolean {
-        return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE;
+        return CURRENT_MAP === MapNames.SAND2 && !LEAP_TEST_MODE && !BOT_SURVIVAL_TEST_MODE && !NightMode.nightModeEnabled;
     }
 
     static IsLmsActiveForSandstormChance(): boolean {
@@ -5259,7 +5291,6 @@ class Sandstorm {
     }
 
     private static SetSandstormLoopSfxAmplitudeForAllListeners(sfx: mod.SFX, amplitude: number): void {
-        // Some runtime builds only honor amplitude updates for scoped listeners.
         try { mod.SetSoundAmplitude(sfx, amplitude); } catch { }
         try { mod.SetSoundAmplitude(sfx, amplitude, SURVIVOR_TEAM); } catch { }
         try { mod.SetSoundAmplitude(sfx, amplitude, INFECTED_TEAM); } catch { }
@@ -5665,7 +5696,9 @@ class GameHandler {
         { id: 1508, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
         { id: 1509, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_XS_01 },
         { id: 1206, object: mod.RuntimeSpawn_Common.FX_Building_FallingDustSand },
+        { id: 1510, object: mod.RuntimeSpawn_Common.FX_BASE_Fire_XL },
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
+        { id: 1512, object: mod.RuntimeSpawn_Common.FX_Car_Fire_M_GS },
         { id: 1513, object: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_A },
         { id: 1540, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1541, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
@@ -13163,6 +13196,8 @@ export async function OnGameModeStarted() {
         ROUND_DURATION = 180;
         GAME_ROUND_LIMIT = 6;
     }
+    NightMode.Reset();
+    NightMode.Roll();
     Sandstorm.StartSandstormTickLoop();
     SpawnTeamVOSoundsAtHQ();
 
