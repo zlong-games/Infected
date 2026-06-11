@@ -12268,7 +12268,7 @@ class PropSpawner {
 
         for (const player of humanSurvivors) {
             const id = mod.GetObjId(player);
-            PropSpawner._propIndex.set(id, 0);
+            PropSpawner._propIndex.set(id, Math.floor(Math.random() * PROP_SPAWNER_POOL.length));
             try { mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
             try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
             PropSpawner._SpawnPreviewIcon(player);

@@ -679,6 +679,9 @@ export function OnGameModeStarted(): void {
 
 export function OnPlayerDeployed(player: mod.Player): void {
     mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget);
+    // Assign a random starting prop so each player gets a different prop on spawn.
+    const id = GetPlayerId(player);
+    playerPropIndex.set(id, Math.floor(Math.random() * PROP_CONFIGS.length));
     // Preview icon is spawned lazily on first raycast hit (GetOrCreatePreviewIcon).
     // Line preview icons are spawned lazily in UpdateLinePreviews on first use.
 }
