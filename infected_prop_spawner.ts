@@ -29,14 +29,15 @@ interface PropConfig {
 // ---- Config ----------------------------------------------------------------
 
 const MAX_SPAWN_DISTANCE = 10;   // metres; also used as the raycast end distance
-const PREVIEW_TICK_INTERVAL = 3;   // fire a preview raycast every N OngoingPlayer ticks
+const PREVIEW_TICK_INTERVAL = 1;   // fire a preview raycast every N OngoingPlayer ticks
 const MIN_FLOOR_NORMAL_Y = 0.5; // reject surfaces whose Y normal is below this (walls/ceilings)
 const MAX_LINE_PROPS = 3;        // maximum number of props that can be placed in a single line row
 const LINE_CURSOR_MAX_DIST = 10; // max metres from anchor for a floor raycast to count as line cursor
 // ---- SFX / VFX identifiers -------------------------------------------------
 const VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
 const VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation; // aggressive VFX for clear feedback
-const VFX_LINE_HINT = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
+const VFX_SLOT_CONFIRM = mod.RuntimeSpawn_Common.FX_RepairTool_FullyHealed;
+const VFX_SLOT_PREVIEW = mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow;
 const SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
 const SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
 
@@ -51,7 +52,7 @@ const ONE_VEC = mod.CreateVector(1, 1, 1);
 
 // ---- Bot test harness config -----------------------------------------------
 // Set to false to disable the looping bot entirely.
-const BOT_TEST_ENABLED = true;
+const BOT_TEST_ENABLED = false;
 // Numeric spawner ID to use for the test bot (must exist on the current map).
 const BOT_TEST_SPAWNER_ID = 1;
 // Seconds after spawn before the bot aims and fires.
@@ -135,6 +136,15 @@ const playerLineFrozen: Set<number> = new Set();
 // Enabled only when the player is "keyholed" (looking toward the anchor).
 const playerLineHintVfx: Map<number, mod.VFX> = new Map();
 
+// Per-slot camera-light VFX spawned when a slot is queued. index 0 = slot 2, index 1 = slot 3.
+const playerLineSlotConfirmVfx: Map<number, mod.VFX[]> = new Map();
+
+// Torch preview VFX on the immediately-next unqueued slot while direction is committed.
+const playerLineSlotTorchVfx: Map<number, mod.VFX[]> = new Map();
+
+// Two torch VFX on either side of the anchor shown as soon as the player enters ADS.
+const playerLineSideTorchVfx: Map<number, mod.VFX[]> = new Map();
+
 // ---- Bot test harness state ------------------------------------------------
 let _botTestBot: mod.Player | undefined;
 
@@ -173,6 +183,19 @@ function GetPropPreviewMessage(prop: SpawnableProp): mod.Message {
     }
 }
 
+function GetFireToPlaceMessage(prop: SpawnableProp): mod.Message {
+    switch (prop) {
+        case mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320:
+            return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_concrete_wall);
+        case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
+            return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_barricade);
+        case mod.RuntimeSpawn_Common.CrateAmmo_01_StackB:
+            return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_ammo_crate);
+        default:
+            return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_unknown);
+    }
+}
+
 function GetOrCreatePreviewIcon(player: mod.Player, pos: mod.Vector): mod.WorldIcon | undefined {
     const id = GetPlayerId(player);
     let icon = playerPreviewIcons.get(id);
@@ -191,7 +214,14 @@ function GetOrCreatePreviewIcon(player: mod.Player, pos: mod.Vector): mod.WorldI
 function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
     const icon = GetOrCreatePreviewIcon(player, pos);
     if (!icon) return;
-    mod.SetWorldIconText(icon, GetPropPreviewMessage(GetPropConfig(player).prop));
+    const id = GetPlayerId(player);
+    const hasPlaced = (playerSpawnedObjects.get(id)?.length ?? 0) > 0;
+    const altPhase = hasPlaced && Math.floor(Date.now() / 2000) % 2 === 0;
+    const msg = altPhase
+        ? mod.Message(mod.stringkeys.prop_spawner_undo)
+        : GetFireToPlaceMessage(GetPropConfig(player).prop);
+    mod.EnableWorldIconText(icon, false);
+    mod.SetWorldIconText(icon, msg);
     mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
     mod.SetWorldIconPosition(icon, pos);
     mod.SetWorldIconOwner(icon, player);
@@ -202,6 +232,7 @@ function ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
 function ShowPreviewIconError(player: mod.Player, pos: mod.Vector, message: mod.Message): void {
     const icon = GetOrCreatePreviewIcon(player, pos);
     if (!icon) return;
+    mod.EnableWorldIconText(icon, false);
     mod.SetWorldIconText(icon, message);
     mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
     mod.SetWorldIconPosition(icon, pos);
@@ -285,18 +316,22 @@ function ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiv
     return 1 + additional;
 }
 
-// Spawn or ensure existence of line preview icons for slots 2..MAX_LINE_PROPS.
-// Icons beyond the current count are hidden; visible ones are positioned.
+// Manage line preview icons, confirm VFX (camera light), and torch VFX per slot.
+// Called only when direction is committed (dist >= lineDragMinDist).
 function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
     const id = GetPlayerId(player);
     const config = GetPropConfig(player);
+
+    // First call with direction committed: unspawn side torches (torch-per-side is replaced
+    // by per-slot torch/confirm management once the direction is known).
+    UnspawnSideTorches(id);
+
+    // Lazily create icon list.
     let icons = playerLinePreviewIcons.get(id);
     if (!icons) {
         icons = [];
         playerLinePreviewIcons.set(id, icons);
     }
-
-    // Ensure we have enough icon objects (spawn lazily at anchor so position is valid)
     while (icons.length < MAX_LINE_PROPS - 1) {
         const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, anchorPos, ZERO_VEC) as mod.WorldIcon;
         if (!icon) break;
@@ -307,27 +342,73 @@ function UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: 
         icons.push(icon);
     }
 
+    // Lazily create confirm and torch lists.
+    let slotConfirmList = playerLineSlotConfirmVfx.get(id);
+    if (!slotConfirmList) { slotConfirmList = []; playerLineSlotConfirmVfx.set(id, slotConfirmList); }
+    let slotTorchList = playerLineSlotTorchVfx.get(id);
+    if (!slotTorchList) { slotTorchList = []; playerLineSlotTorchVfx.set(id, slotTorchList); }
+
     // Slot index 0 = second prop, 1 = third prop, etc.
     for (let i = 0; i < icons.length; i++) {
         const slotIndex = i + 1; // 1-based offset from anchor
         const icon = icons[i];
+        const offset = slotIndex * effectiveStep;
+        const pos = mod.CreateVector(
+            mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+            mod.YComponentOf(anchorPos),
+            mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+        );
+
+        const prevConfirm = slotConfirmList[i] as mod.VFX | undefined;
+        const prevTorch   = slotTorchList[i]   as mod.VFX | undefined;
+
         if (slotIndex < count) {
-            // Position along the line using effective step that accounts for prop facing angle
-            const offset = slotIndex * effectiveStep;
-            const pos = mod.CreateVector(
-                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
-                mod.YComponentOf(anchorPos),
-                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
-            );
+            // Slot is queued: show icon + confirm VFX, remove torch.
             mod.SetWorldIconText(icon, GetPropPreviewMessage(config.prop));
             mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
             mod.SetWorldIconPosition(icon, pos);
             mod.SetWorldIconOwner(icon, player);
             mod.EnableWorldIconImage(icon, true);
             mod.EnableWorldIconText(icon, true);
+            if (!prevConfirm) {
+                const cv = mod.SpawnObject(VFX_SLOT_CONFIRM, pos, ZERO_VEC) as mod.VFX;
+                if (cv) mod.EnableVFX(cv, true);
+                slotConfirmList[i] = cv;
+            } else {
+                mod.MoveVFX(prevConfirm, pos, ZERO_VEC);
+                mod.EnableVFX(prevConfirm, true);
+            }
+            if (prevTorch) {
+                mod.EnableVFX(prevTorch, false);
+                try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
+                slotTorchList[i] = undefined as unknown as mod.VFX;
+            }
         } else {
+            // Slot is not queued: hide icon + confirm, show torch only for the immediately next slot.
             mod.EnableWorldIconImage(icon, false);
             mod.EnableWorldIconText(icon, false);
+            if (prevConfirm) {
+                mod.EnableVFX(prevConfirm, false);
+                try { mod.UnspawnObject(prevConfirm as unknown as mod.Object); } catch { }
+                slotConfirmList[i] = undefined as unknown as mod.VFX;
+            }
+            if (slotIndex === count) {
+                // This is the next-to-queue slot: show/move torch here.
+                if (!prevTorch) {
+                    const tv = mod.SpawnObject(VFX_SLOT_PREVIEW, pos, ZERO_VEC) as mod.VFX;
+                    if (tv) mod.EnableVFX(tv, true);
+                    slotTorchList[i] = tv;
+                } else {
+                    mod.MoveVFX(prevTorch, pos, ZERO_VEC);
+                }
+            } else {
+                // Beyond the next slot — unspawn torch if present.
+                if (prevTorch) {
+                    mod.EnableVFX(prevTorch, false);
+                    try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
+                    slotTorchList[i] = undefined as unknown as mod.VFX;
+                }
+            }
         }
     }
 
@@ -362,6 +443,67 @@ function PlaySFX3DForPlayer(sfx: mod.RuntimeSpawn_Common, amplitude: number, pla
     if (sfxObj) mod.PlaySound(sfxObj, amplitude, player);
 }
 
+// Compute the left and right torch positions on either side of the anchor prop.
+// The line extends along the prop's right axis (perpendicular to facing), so one step in
+// either direction is exactly config.width (effective step when line is fully sideways).
+function GetSideTorchPositions(anchorPos: mod.Vector, facingYaw: number, config: PropConfig): [mod.Vector, mod.Vector] {
+    const step = config.width;
+    const rx = Math.cos(facingYaw);
+    const rz = -Math.sin(facingYaw);
+    const right = mod.CreateVector(
+        mod.XComponentOf(anchorPos) + rx * step,
+        mod.YComponentOf(anchorPos),
+        mod.ZComponentOf(anchorPos) + rz * step
+    );
+    const left = mod.CreateVector(
+        mod.XComponentOf(anchorPos) - rx * step,
+        mod.YComponentOf(anchorPos),
+        mod.ZComponentOf(anchorPos) - rz * step
+    );
+    return [left, right];
+}
+
+function UnspawnVfxList(list: mod.VFX[]): void {
+    for (const vfx of list) {
+        if (vfx) {
+            mod.EnableVFX(vfx, false);
+            try { mod.UnspawnObject(vfx as unknown as mod.Object); } catch { }
+        }
+    }
+}
+
+function UnspawnSideTorches(id: number): void {
+    const list = playerLineSideTorchVfx.get(id);
+    if (list) { UnspawnVfxList(list); playerLineSideTorchVfx.delete(id); }
+}
+
+function UnspawnSlotTorches(id: number): void {
+    const list = playerLineSlotTorchVfx.get(id);
+    if (list) { UnspawnVfxList(list); playerLineSlotTorchVfx.delete(id); }
+}
+
+function SpawnOrMoveSideTorches(player: mod.Player, anchorPos: mod.Vector): void {
+    const id = GetPlayerId(player);
+    const config = GetPropConfig(player);
+    const facingYaw = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
+    const [leftPos, rightPos] = GetSideTorchPositions(anchorPos, facingYaw, config);
+    let list = playerLineSideTorchVfx.get(id);
+    if (!list) {
+        list = [];
+        playerLineSideTorchVfx.set(id, list);
+    }
+    for (let i = 0; i < 2; i++) {
+        const pos = i === 0 ? leftPos : rightPos;
+        if (list[i]) {
+            mod.MoveVFX(list[i], pos, ZERO_VEC);
+        } else {
+            const vfx = mod.SpawnObject(VFX_SLOT_PREVIEW, pos, ZERO_VEC) as mod.VFX;
+            if (vfx) mod.EnableVFX(vfx, true);
+            list[i] = vfx;
+        }
+    }
+}
+
 // Play a spatialised 3D sound audible to all players within RATCHET_ATTEN metres.
 function PlaySFX3DAtPos(sfx: mod.RuntimeSpawn_Common, amplitude: number, pos: mod.Vector): void {
     const sfxObj = mod.SpawnObject(sfx, pos, ZERO_VEC) as mod.SFX;
@@ -371,11 +513,17 @@ function PlaySFX3DAtPos(sfx: mod.RuntimeSpawn_Common, amplitude: number, pos: mo
 function HideLinePreviews(player: mod.Player): void {
     const id = GetPlayerId(player);
     const icons = playerLinePreviewIcons.get(id);
-    if (!icons) return;
-    for (const icon of icons) {
-        mod.EnableWorldIconImage(icon, false);
-        mod.EnableWorldIconText(icon, false);
+    if (icons) {
+        for (const icon of icons) {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+        }
     }
+    const slotConfirmList = playerLineSlotConfirmVfx.get(id);
+    if (slotConfirmList) {
+        for (const sv of slotConfirmList) if (sv) mod.EnableVFX(sv, false);
+    }
+    UnspawnSlotTorches(id);
     playerLineCount.set(id, 1);
 }
 
@@ -398,6 +546,7 @@ function ShowStatusIcon(player: mod.Player, pos: mod.Vector, message: mod.Messag
         mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
         playerStatusIcons.set(id, icon);
     }
+    mod.EnableWorldIconText(icon, false);
     mod.SetWorldIconText(icon, message);
     mod.SetWorldIconColor(icon, color);
     mod.SetWorldIconPosition(icon, pos);
@@ -517,6 +666,13 @@ function FinalizeLinePlacement(player: mod.Player): void {
         try { mod.UnspawnObject(finalizeHintVfx as unknown as mod.Object); } catch { }
         playerLineHintVfx.delete(id);
     }
+    UnspawnSideTorches(id);
+    UnspawnSlotTorches(id);
+    const finalizeSlotConfirm = playerLineSlotConfirmVfx.get(id);
+    if (finalizeSlotConfirm) {
+        for (const sv of finalizeSlotConfirm) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+        playerLineSlotConfirmVfx.delete(id);
+    }
     HideLinePreviews(player);
     HideStatusIcon(player);
 
@@ -553,6 +709,13 @@ function CancelLinePlacement(player: mod.Player): void {
         mod.EnableVFX(cancelHintVfx, false);
         try { mod.UnspawnObject(cancelHintVfx as unknown as mod.Object); } catch { }
         playerLineHintVfx.delete(id);
+    }
+    UnspawnSideTorches(id);
+    UnspawnSlotTorches(id);
+    const cancelSlotConfirm = playerLineSlotConfirmVfx.get(id);
+    if (cancelSlotConfirm) {
+        for (const sv of cancelSlotConfirm) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+        playerLineSlotConfirmVfx.delete(id);
     }
     HideLinePreviews(player);
     HideStatusIcon(player);
@@ -596,6 +759,14 @@ function CleanupPlayerObjects(player: mod.Player): void {
         try { mod.UnspawnObject(hintVfxCleanup as unknown as mod.Object); } catch { }
         playerLineHintVfx.delete(id);
     }
+
+    const slotConfirmCleanup = playerLineSlotConfirmVfx.get(id);
+    if (slotConfirmCleanup) {
+        for (const sv of slotConfirmCleanup) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+        playerLineSlotConfirmVfx.delete(id);
+    }
+    UnspawnSideTorches(id);
+    UnspawnSlotTorches(id);
 }
 
 function ResetPlayerState(player: mod.Player): void {
@@ -615,7 +786,10 @@ function ResetPlayerState(player: mod.Player): void {
     playerLineCount.delete(id);
     playerLineCursorState.delete(id);
     playerLineFrozen.delete(id);
-    playerLineHintVfx.delete(id); // object already unspawned by CleanupPlayerObjects
+    playerLineHintVfx.delete(id);        // object already unspawned by CleanupPlayerObjects
+    playerLineSlotConfirmVfx.delete(id); // objects already unspawned by CleanupPlayerObjects
+    playerLineSlotTorchVfx.delete(id);   // objects already unspawned by CleanupPlayerObjects
+    playerLineSideTorchVfx.delete(id);   // objects already unspawned by CleanupPlayerObjects
 }
 
 // ---- Bot test harness helpers ---------------------------------------------
@@ -686,17 +860,46 @@ export function OnPlayerDeployed(player: mod.Player): void {
     // Line preview icons are spawned lazily in UpdateLinePreviews on first use.
 }
 
-// Tactical Device button (toggle laser/light): toggles line-mode extension freeze.
-export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
+// Aim button pressed: activate line-mode extension (unfreeze line drag).
+export function OnPortalGadgetAimStart(player: mod.Player): void {
     const id = GetPlayerId(player);
     if (!playerLineMode.has(id)) return;
     if (playerLineFrozen.has(id)) {
         playerLineFrozen.delete(id);
-        // Show hint VFX as a directional cue when extension/draw mode is activated
+        // Hide keyhole hint — side torches take over as positional guidance in ADS.
         const hintVfx = playerLineHintVfx.get(id);
-        if (hintVfx) mod.EnableVFX(hintVfx, true);
-    } else {
+        if (hintVfx) mod.EnableVFX(hintVfx, false);
+        // Spawn the two side torches at ±1 step from the anchor.
+        const anchorPos = playerLineAnchorPos.get(id);
+        if (anchorPos) SpawnOrMoveSideTorches(player, anchorPos);
+    }
+}
+
+// Aim button released: deactivate line-mode extension (re-freeze line drag).
+export function OnPortalGadgetAimStop(player: mod.Player): void {
+    const id = GetPlayerId(player);
+    if (!playerLineMode.has(id)) return;
+    if (!playerLineFrozen.has(id)) {
         playerLineFrozen.add(id);
+        UnspawnSideTorches(id);
+        UnspawnSlotTorches(id);
+    }
+}
+
+// Tactical Device button: undo the placed anchor prop (or all placed props if finalized),
+// reverting to pre-placement state so the player can try again with the same prop.
+export function OnPortalGadgetLaserToggle(player: mod.Player, _eventBoolean: boolean): void {
+    const id = GetPlayerId(player);
+    const savedPropIndex = playerPropIndex.get(id);
+    if (playerLineMode.has(id)) {
+        CancelLinePlacement(player);
+    } else {
+        CleanupPlayerObjects(player);
+        ResetPlayerState(player);
+    }
+    // Restore prop index so undo doesn't roll a new random prop
+    if (savedPropIndex !== undefined) {
+        playerPropIndex.set(id, savedPropIndex);
     }
 }
 
@@ -777,18 +980,6 @@ export function OngoingPlayer(player: mod.Player): void {
                     const hFz = mod.ZComponentOf(facing);
                     const hFLen = Math.sqrt(hFx * hFx + hFz * hFz);
                     if (hFLen > 0.001) {
-                        const config = GetPropConfig(player);
-                        const anchorRotY = mod.YComponentOf(playerLineAnchorRot.get(id) ?? ZERO_VEC);
-                        const tentativeDir = mod.CreateVector(hFx / hFLen, 0, hFz / hFLen);
-                        const step = ComputeEffectiveStep(tentativeDir, anchorRotY, config);
-                        // Height = effective step: the Trophy Range Indicator projects a
-                        // circle whose radius matches its height above the ground, so the
-                        // circle edge aligns with where the first extension prop would land.
-                        const hintPos = mod.CreateVector(
-                            mod.XComponentOf(anchorPos),
-                            mod.YComponentOf(anchorPos) + step,
-                            mod.ZComponentOf(anchorPos)
-                        );
                         // Keyholed: player facing aligns with direction toward anchor
                         const dax = mod.XComponentOf(anchorPos) - mod.XComponentOf(eyePos);
                         const day = mod.YComponentOf(anchorPos) - mod.YComponentOf(eyePos);
@@ -798,7 +989,6 @@ export function OngoingPlayer(player: mod.Player): void {
                             ? (mod.XComponentOf(facing) * dax + mod.YComponentOf(facing) * day + mod.ZComponentOf(facing) * daz) / daLen
                             : 0;
                         if (dotToAnchor >= GetPropConfig(player).keyholeMinDot) {
-                            try { mod.SetObjectTransform(frozenHintVfx as unknown as mod.Object, mod.CreateTransform(hintPos, ZERO_VEC)); } catch { }
                             mod.EnableVFX(frozenHintVfx, true);
                         } else {
                             mod.EnableVFX(frozenHintVfx, false);
@@ -809,7 +999,7 @@ export function OngoingPlayer(player: mod.Player): void {
                 }
 
                 ShowStatusIcon(player, aimPoint,
-                    mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                    mod.Message(mod.stringkeys.prop_spawner_hold_ads_extend),
                     mod.CreateVector(0.8, 0.8, 1.0));
                 return;
             }
@@ -849,7 +1039,9 @@ export function OngoingPlayer(player: mod.Player): void {
                     const objectPos = ComputeObjectPosFromPivot(anchorPos, yaw, GetPropConfig(player));
                     try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
                 }
-                HideLinePreviews(player);
+                HideLinePreviews(player); // also unspawns slot torches
+                // Keep side torches updated as the anchor rotates.
+                SpawnOrMoveSideTorches(player, anchorPos);
                 HideStatusIcon(player);
             } else {
                 // Cursor is far enough - engage line drag.
@@ -877,8 +1069,11 @@ export function OngoingPlayer(player: mod.Player): void {
                         if (count === 1) {
                             HideStatusIcon(player);
                         } else {
+                            const altPhase = Math.floor(Date.now() / 2000) % 2 === 0;
                             ShowStatusIcon(player, statusPos,
-                                mod.Message(mod.stringkeys.prop_spawner_fire_to_place),
+                                altPhase
+                                    ? mod.Message(mod.stringkeys.prop_spawner_fire_to_confirm, count)
+                                    : mod.Message(mod.stringkeys.prop_spawner_undo),
                                 mod.CreateVector(0.2, 1, 0.2));
                         }
 
@@ -977,19 +1172,6 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
             if (anchorVfx) mod.EnableVFX(anchorVfx, true);
             playerRatchetAngle.delete(id);
             playerRatchetNotch.set(id, 0);
-
-            // Hint VFX: spawned at anchor, disabled until the player is keyholed
-            const existingHintVfx = playerLineHintVfx.get(id);
-            if (existingHintVfx) {
-                try { mod.UnspawnObject(existingHintVfx as unknown as mod.Object); } catch { }
-            }
-            const hintVfx = mod.SpawnObject(VFX_LINE_HINT, spawnPos, ZERO_VEC) as mod.VFX;
-            if (hintVfx) {
-                mod.EnableVFX(hintVfx, false);
-                playerLineHintVfx.set(id, hintVfx);
-            } else {
-                playerLineHintVfx.delete(id);
-            }
 
             // Keep the cursor preview icon hidden during line-drag
             HidePreviewIcon(eventPlayer);

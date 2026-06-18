@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.07.001";
+const VERSION = "1.07.010";
 
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
@@ -12185,7 +12185,8 @@ const PROP_SPAWNER_MAX_LINE_PROPS = 3;
 const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 10;
 const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
 const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation;
-const PROP_SPAWNER_VFX_LINE_HINT = mod.RuntimeSpawn_Common.FX_Gadget_Trophy_Range_Indicator;
+const PROP_SPAWNER_VFX_SLOT_CONFIRM = mod.RuntimeSpawn_Common.FX_RepairTool_FullyHealed;
+const PROP_SPAWNER_VFX_SLOT_PREVIEW = mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow;
 const PROP_SPAWNER_SFX_CHILD_PREVIEW = mod.RuntimeSpawn_Common.SFX_Gadgets_C4_Activate_OneShot3D;
 const PROP_SPAWNER_SFX_RATCHET = mod.RuntimeSpawn_Common.SFX_Gadgets_Defibrillator_Equipped_ChargeRub_OneShot3D;
 // ---- Ratchet tuning
@@ -12236,10 +12237,16 @@ class PropSpawner {
     static readonly _lineCursorState: Map<number, "valid" | "invalid_surface" | "out_of_range"> = new Map();
     static readonly _statusIcons: Map<number, mod.WorldIcon> = new Map();
 
-    // Players in line mode whose updates are frozen (laser toggle activates extension).
+    // Players in line mode whose updates are frozen (ADS activates extension).
     static readonly _lineFrozen: Set<number> = new Set();
-    // Persistent hint VFX at the first-extension-slot; visible only when keyholed.
+    // Persistent hint VFX at the anchor; visible only when keyholed (frozen mode).
     static readonly _lineHintVfx: Map<number, mod.VFX> = new Map();
+    // Per-slot camera-light VFX spawned when a slot is queued. index 0 = slot 2, index 1 = slot 3.
+    static readonly _lineSlotConfirmVfx: Map<number, mod.VFX[]> = new Map();
+    // Torch preview VFX on the immediately-next unqueued slot while direction is committed.
+    static readonly _lineSlotTorchVfx: Map<number, mod.VFX[]> = new Map();
+    // Two torch VFX on either side of the anchor shown as soon as the player enters ADS.
+    static readonly _lineSideTorchVfx: Map<number, mod.VFX[]> = new Map();
 
     static GetPlacementStatus(): { placed: number; total: number } {
         return { placed: PropSpawner._hasPlaced.size, total: PropSpawner._survivorsInPhase.length };
@@ -12349,6 +12356,14 @@ class PropSpawner {
             try { mod.UnspawnObject(hintVfxClean as unknown as mod.Object); } catch { }
             PropSpawner._lineHintVfx.delete(id);
         }
+        // Clean up slot confirm VFX
+        const slotConfirmClean = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (slotConfirmClean) {
+            for (const sv of slotConfirmClean) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+            PropSpawner._lineSlotConfirmVfx.delete(id);
+        }
+        PropSpawner._UnspawnSideTorches(id);
+        PropSpawner._UnspawnSlotTorches(id);
         PropSpawner._HidePreviewIcon(id);
         PropSpawner._CleanupPreviewIcon(id);
         PropSpawner._CleanupPlayerState(id);
@@ -12383,7 +12398,10 @@ class PropSpawner {
         PropSpawner._graceMode.delete(id);
         PropSpawner._lineCursorState.delete(id);
         PropSpawner._lineFrozen.delete(id);
-        PropSpawner._lineHintVfx.delete(id); // object already unspawned by CleanupPlayer
+        PropSpawner._lineHintVfx.delete(id);        // object already unspawned by CleanupPlayer
+        PropSpawner._lineSlotConfirmVfx.delete(id); // objects already unspawned by CleanupPlayer
+        PropSpawner._lineSlotTorchVfx.delete(id);   // objects already unspawned by CleanupPlayer
+        PropSpawner._lineSideTorchVfx.delete(id);   // objects already unspawned by CleanupPlayer
     }
 
     private static _HidePreviewIcon(id: number): void {
@@ -12415,12 +12433,86 @@ class PropSpawner {
         }
     }
 
+    private static _GetFireToPlaceMessage(config: PropSpawnerConfig): mod.Message {
+        switch (config.prop) {
+            case mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320:
+                return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_concrete_wall);
+            case mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B:
+                return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_barricade);
+            case mod.RuntimeSpawn_Common.CrateAmmo_01_StackB:
+                return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_ammo_crate);
+            default:
+                return mod.Message(mod.stringkeys.prop_spawner_fire_to_place_unknown);
+        }
+    }
+
+    private static _GetSideTorchPositions(anchorPos: mod.Vector, facingYaw: number, config: PropSpawnerConfig): [mod.Vector, mod.Vector] {
+        const step = config.width;
+        const rx = Math.cos(facingYaw);
+        const rz = -Math.sin(facingYaw);
+        const right = mod.CreateVector(
+            mod.XComponentOf(anchorPos) + rx * step,
+            mod.YComponentOf(anchorPos),
+            mod.ZComponentOf(anchorPos) + rz * step
+        );
+        const left = mod.CreateVector(
+            mod.XComponentOf(anchorPos) - rx * step,
+            mod.YComponentOf(anchorPos),
+            mod.ZComponentOf(anchorPos) - rz * step
+        );
+        return [left, right];
+    }
+
+    private static _UnspawnVfxList(list: mod.VFX[]): void {
+        for (const vfx of list) {
+            if (vfx) {
+                mod.EnableVFX(vfx, false);
+                try { mod.UnspawnObject(vfx as unknown as mod.Object); } catch { }
+            }
+        }
+    }
+
+    private static _UnspawnSideTorches(id: number): void {
+        const list = PropSpawner._lineSideTorchVfx.get(id);
+        if (list) { PropSpawner._UnspawnVfxList(list); PropSpawner._lineSideTorchVfx.delete(id); }
+    }
+
+    private static _UnspawnSlotTorches(id: number): void {
+        const list = PropSpawner._lineSlotTorchVfx.get(id);
+        if (list) { PropSpawner._UnspawnVfxList(list); PropSpawner._lineSlotTorchVfx.delete(id); }
+    }
+
+    private static _SpawnOrMoveSideTorches(player: mod.Player, anchorPos: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        const config = PropSpawner._GetPropConfig(id);
+        const facingYaw = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
+        const [leftPos, rightPos] = PropSpawner._GetSideTorchPositions(anchorPos, facingYaw, config);
+        let list = PropSpawner._lineSideTorchVfx.get(id);
+        if (!list) { list = []; PropSpawner._lineSideTorchVfx.set(id, list); }
+        for (let i = 0; i < 2; i++) {
+            const pos = i === 0 ? leftPos : rightPos;
+            if (list[i]) {
+                mod.MoveVFX(list[i], pos, PROP_SPAWNER_ZERO_VEC);
+            } else {
+                const vfx = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_PREVIEW, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (vfx) mod.EnableVFX(vfx, true);
+                list[i] = vfx;
+            }
+        }
+    }
+
     private static _ShowPreviewIconValid(player: mod.Player, pos: mod.Vector): void {
         const id = mod.GetObjId(player);
         const icon = PropSpawner._previewIcons.get(id);
         if (!icon) return;
         const config = PropSpawner._GetPropConfig(id);
-        mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
+        const hasPlaced = PropSpawner._hasPlaced.has(id);
+        const altPhase = hasPlaced && Math.floor(Date.now() / 2000) % 2 === 0;
+        const msg = altPhase
+            ? mod.Message(mod.stringkeys.prop_spawner_undo)
+            : PropSpawner._GetFireToPlaceMessage(config);
+        mod.EnableWorldIconText(icon, false);
+        mod.SetWorldIconText(icon, msg);
         mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
         mod.SetWorldIconPosition(icon, pos);
         mod.SetWorldIconOwner(icon, player);
@@ -12432,6 +12524,7 @@ class PropSpawner {
         const id = mod.GetObjId(player);
         const icon = PropSpawner._previewIcons.get(id);
         if (!icon) return;
+        mod.EnableWorldIconText(icon, false);
         mod.SetWorldIconText(icon, message);
         mod.SetWorldIconColor(icon, mod.CreateVector(1, 0.35, 0));
         mod.SetWorldIconPosition(icon, pos);
@@ -12470,11 +12563,26 @@ class PropSpawner {
         return mod.CreateVector(0, yaw, 0);
     }
 
-    static OnAimStart(_player: mod.Player): void { }
+    static OnAimStart(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (!PropSpawner._lineMode.has(id)) return;
+        if (PropSpawner._lineFrozen.has(id)) {
+            PropSpawner._lineFrozen.delete(id);
+            // Hide keyhole hint — side torches take over as positional guidance in ADS.
+            const hintVfx = PropSpawner._lineHintVfx.get(id);
+            if (hintVfx) mod.EnableVFX(hintVfx, false);
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            if (anchorPos) PropSpawner._SpawnOrMoveSideTorches(player, anchorPos);
+        }
+    }
 
     static OnAimStop(player: mod.Player): void {
-        if (GameHandler.propPlacementPhaseActive) {
-            PropSpawner._HidePreviewIcon(mod.GetObjId(player));
+        const id = mod.GetObjId(player);
+        if (!PropSpawner._lineMode.has(id)) return;
+        if (!PropSpawner._lineFrozen.has(id)) {
+            PropSpawner._lineFrozen.add(id);
+            PropSpawner._UnspawnSideTorches(id);
+            PropSpawner._UnspawnSlotTorches(id);
         }
     }
 
@@ -12542,25 +12650,13 @@ class PropSpawner {
                         const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
                         try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
                     }
-                    // Keyhole hint VFX: show first-extension-slot when player looks toward anchor.
+                    // Keyhole hint VFX: show at anchor when player looks toward it.
                     const frozenHintVfx = PropSpawner._lineHintVfx.get(id);
                     if (frozenHintVfx) {
                         const hFx = mod.XComponentOf(facing);
                         const hFz = mod.ZComponentOf(facing);
                         const hFLen = Math.sqrt(hFx * hFx + hFz * hFz);
                         if (hFLen > 0.001) {
-                            const config = PropSpawner._GetPropConfig(id);
-                            const anchorRotY = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
-                            const tentativeDir = mod.CreateVector(hFx / hFLen, 0, hFz / hFLen);
-                            const step = PropSpawner._ComputeEffectiveStep(tentativeDir, anchorRotY, config);
-                            // Height = effective step: the Trophy Range Indicator projects a
-                            // circle whose radius matches its height above the ground, so the
-                            // circle edge aligns with where the first extension prop would land.
-                            const hintPos = mod.CreateVector(
-                                mod.XComponentOf(anchorPos),
-                                mod.YComponentOf(anchorPos) + step,
-                                mod.ZComponentOf(anchorPos)
-                            );
                             const dax = mod.XComponentOf(anchorPos) - mod.XComponentOf(eyePos);
                             const day = mod.YComponentOf(anchorPos) - mod.YComponentOf(eyePos);
                             const daz = mod.ZComponentOf(anchorPos) - mod.ZComponentOf(eyePos);
@@ -12569,7 +12665,6 @@ class PropSpawner {
                                 ? (mod.XComponentOf(facing) * dax + mod.YComponentOf(facing) * day + mod.ZComponentOf(facing) * daz) / daLen
                                 : 0;
                             if (dotToAnchor >= PropSpawner._GetPropConfig(id).keyholeMinDot) {
-                                try { mod.SetObjectTransform(frozenHintVfx as unknown as mod.Object, mod.CreateTransform(hintPos, PROP_SPAWNER_ZERO_VEC)); } catch { }
                                 mod.EnableVFX(frozenHintVfx, true);
                             } else {
                                 mod.EnableVFX(frozenHintVfx, false);
@@ -12579,7 +12674,7 @@ class PropSpawner {
                         }
                     }
                     PropSpawner._ShowStatusIcon(player, aimPoint,
-                        mod.Message(mod.stringkeys.prop_spawner_toggle_to_extend),
+                        mod.Message(mod.stringkeys.prop_spawner_hold_ads_extend),
                         mod.CreateVector(0.8, 0.8, 1.0));
                     return;
                 }
@@ -12613,6 +12708,7 @@ class PropSpawner {
                         try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
                     }
                     PropSpawner._HideLinePreviews(player);
+                    PropSpawner._SpawnOrMoveSideTorches(player, anchorPos);
                     PropSpawner._HideStatusIcon(id);
                 } else {
                     const lineDir = PropSpawner._ComputeLineDirection(anchorPos, cursorPos);
@@ -12638,8 +12734,11 @@ class PropSpawner {
                             if (count === 1) {
                                 PropSpawner._HideStatusIcon(id);
                             } else {
+                                const altPhase = Math.floor(Date.now() / 2000) % 2 === 0;
                                 PropSpawner._ShowStatusIcon(player, statusPos,
-                                    mod.Message(mod.stringkeys.prop_spawner_fire_to_place),
+                                    altPhase
+                                        ? mod.Message(mod.stringkeys.prop_spawner_fire_to_confirm, count)
+                                        : mod.Message(mod.stringkeys.prop_spawner_undo),
                                     mod.CreateVector(0.2, 1, 0.2));
                             }
 
@@ -12721,18 +12820,6 @@ class PropSpawner {
                 if (anchorVfx) mod.EnableVFX(anchorVfx, true);
                 PropSpawner._ratchetAngle.delete(id);
                 PropSpawner._ratchetNotch.set(id, 0);
-                // Hint VFX: spawned at anchor, disabled until laser-toggle activates draw mode
-                const existingHintVfx = PropSpawner._lineHintVfx.get(id);
-                if (existingHintVfx) {
-                    try { mod.UnspawnObject(existingHintVfx as unknown as mod.Object); } catch { }
-                }
-                const hintVfx = mod.SpawnObject(PROP_SPAWNER_VFX_LINE_HINT, pivotPos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
-                if (hintVfx) {
-                    mod.EnableVFX(hintVfx, false);
-                    PropSpawner._lineHintVfx.set(id, hintVfx);
-                } else {
-                    PropSpawner._lineHintVfx.delete(id);
-                }
                 PropSpawner._HidePreviewIcon(id);
             }
         } else if (purpose === "line_cursor") {
@@ -12771,14 +12858,8 @@ class PropSpawner {
         const id = mod.GetObjId(player);
         if (!GameHandler.propPlacementPhaseActive && !PropSpawner._graceMode.has(id)) return;
         if (!PropSpawner._lineMode.has(id)) return;
-        if (PropSpawner._lineFrozen.has(id)) {
-            PropSpawner._lineFrozen.delete(id);
-            // Show hint VFX as a directional cue when extension/draw mode is activated
-            const hintVfx = PropSpawner._lineHintVfx.get(id);
-            if (hintVfx) mod.EnableVFX(hintVfx, true);
-        } else {
-            PropSpawner._lineFrozen.add(id);
-        }
+        // Laser toggle is undo: cancel the in-progress anchor placement.
+        PropSpawner._CancelLinePlacement(player);
     }
 
     private static _GetPropConfig(id: number): PropSpawnerConfig {
@@ -12832,6 +12913,10 @@ class PropSpawner {
     private static _UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
         const id = mod.GetObjId(player);
         const config = PropSpawner._GetPropConfig(id);
+
+        // Direction is now committed — unspawn side torches (per-slot VFX takes over).
+        PropSpawner._UnspawnSideTorches(id);
+
         let icons = PropSpawner._linePreviewIcons.get(id);
         if (!icons) {
             icons = [];
@@ -12846,27 +12931,73 @@ class PropSpawner {
             mod.EnableWorldIconText(icon, false);
             icons.push(icon);
         }
+
+        let slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (!slotConfirmList) { slotConfirmList = []; PropSpawner._lineSlotConfirmVfx.set(id, slotConfirmList); }
+        let slotTorchList = PropSpawner._lineSlotTorchVfx.get(id);
+        if (!slotTorchList) { slotTorchList = []; PropSpawner._lineSlotTorchVfx.set(id, slotTorchList); }
+
         for (let i = 0; i < icons.length; i++) {
             const slotIndex = i + 1;
             const icon = icons[i];
+            const offset = slotIndex * effectiveStep;
+            const pos = mod.CreateVector(
+                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+                mod.YComponentOf(anchorPos),
+                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+            );
+            const prevConfirm = slotConfirmList[i] as mod.VFX | undefined;
+            const prevTorch   = slotTorchList[i]   as mod.VFX | undefined;
+
             if (slotIndex < count) {
-                const offset = slotIndex * effectiveStep;
-                const pos = mod.CreateVector(
-                    mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
-                    mod.YComponentOf(anchorPos),
-                    mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
-                );
+                // Slot is queued: show icon + confirm VFX, remove torch.
+                mod.EnableWorldIconText(icon, false);
                 mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
                 mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
                 mod.SetWorldIconPosition(icon, pos);
                 mod.SetWorldIconOwner(icon, player);
                 mod.EnableWorldIconImage(icon, true);
                 mod.EnableWorldIconText(icon, true);
+                if (!prevConfirm) {
+                    const cv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_CONFIRM, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                    if (cv) mod.EnableVFX(cv, true);
+                    slotConfirmList[i] = cv;
+                } else {
+                    mod.MoveVFX(prevConfirm, pos, PROP_SPAWNER_ZERO_VEC);
+                    mod.EnableVFX(prevConfirm, true);
+                }
+                if (prevTorch) {
+                    mod.EnableVFX(prevTorch, false);
+                    try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
+                    slotTorchList[i] = undefined as unknown as mod.VFX;
+                }
             } else {
+                // Slot not queued: hide icon + confirm, show torch only for the immediately next slot.
                 mod.EnableWorldIconImage(icon, false);
                 mod.EnableWorldIconText(icon, false);
+                if (prevConfirm) {
+                    mod.EnableVFX(prevConfirm, false);
+                    try { mod.UnspawnObject(prevConfirm as unknown as mod.Object); } catch { }
+                    slotConfirmList[i] = undefined as unknown as mod.VFX;
+                }
+                if (slotIndex === count) {
+                    if (!prevTorch) {
+                        const tv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_PREVIEW, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                        if (tv) mod.EnableVFX(tv, true);
+                        slotTorchList[i] = tv;
+                    } else {
+                        mod.MoveVFX(prevTorch, pos, PROP_SPAWNER_ZERO_VEC);
+                    }
+                } else {
+                    if (prevTorch) {
+                        mod.EnableVFX(prevTorch, false);
+                        try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
+                        slotTorchList[i] = undefined as unknown as mod.VFX;
+                    }
+                }
             }
         }
+
         const prevCount = PropSpawner._lineCount.get(id) ?? 1;
         if (count > prevCount) {
             const newSlotOffset = (count - 1) * effectiveStep;
@@ -12883,11 +13014,17 @@ class PropSpawner {
     private static _HideLinePreviews(player: mod.Player): void {
         const id = mod.GetObjId(player);
         const icons = PropSpawner._linePreviewIcons.get(id);
-        if (!icons) return;
-        for (const icon of icons) {
-            mod.EnableWorldIconImage(icon, false);
-            mod.EnableWorldIconText(icon, false);
+        if (icons) {
+            for (const icon of icons) {
+                mod.EnableWorldIconImage(icon, false);
+                mod.EnableWorldIconText(icon, false);
+            }
         }
+        const slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (slotConfirmList) {
+            for (const sv of slotConfirmList) if (sv) mod.EnableVFX(sv, false);
+        }
+        PropSpawner._UnspawnSlotTorches(id);
         PropSpawner._lineCount.set(id, 1);
     }
 
@@ -12908,6 +13045,7 @@ class PropSpawner {
             mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
             PropSpawner._statusIcons.set(id, icon);
         }
+        mod.EnableWorldIconText(icon, false);
         mod.SetWorldIconText(icon, message);
         mod.SetWorldIconColor(icon, color);
         mod.SetWorldIconPosition(icon, pos);
@@ -13029,6 +13167,13 @@ class PropSpawner {
             try { mod.UnspawnObject(finalizeHintVfx as unknown as mod.Object); } catch { }
             PropSpawner._lineHintVfx.delete(id);
         }
+        const finalizeSlotConfirm = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (finalizeSlotConfirm) {
+            for (const sv of finalizeSlotConfirm) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+            PropSpawner._lineSlotConfirmVfx.delete(id);
+        }
+        PropSpawner._UnspawnSideTorches(id);
+        PropSpawner._UnspawnSlotTorches(id);
         PropSpawner._HideLinePreviews(player);
         PropSpawner._HideStatusIcon(id);
         PropSpawner._HidePreviewIcon(id);
@@ -13064,6 +13209,13 @@ class PropSpawner {
             try { mod.UnspawnObject(cancelHintVfx as unknown as mod.Object); } catch { }
             PropSpawner._lineHintVfx.delete(id);
         }
+        const cancelSlotConfirm = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (cancelSlotConfirm) {
+            for (const sv of cancelSlotConfirm) if (sv) { mod.EnableVFX(sv, false); try { mod.UnspawnObject(sv as unknown as mod.Object); } catch { } }
+            PropSpawner._lineSlotConfirmVfx.delete(id);
+        }
+        PropSpawner._UnspawnSideTorches(id);
+        PropSpawner._UnspawnSlotTorches(id);
         PropSpawner._HideLinePreviews(player);
         PropSpawner._HideStatusIcon(id);
         PropSpawner._HidePreviewIcon(id);
