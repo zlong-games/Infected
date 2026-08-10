@@ -2,6 +2,49 @@
 
 const VERSION = "1.07.010";
 
+/*
+//
+///---------------------///
+// NOTES/GENERAL COMMENTS
+///------------------///
+
+Survivor Flow:
+- all players spawn on survivor team at game start
+- an 'Alpha Infected' is chosen to start if conditions are met (i.e. no survivors on previous round)
+- fight off infected bots and players
+- round ends when ROUND_DURATION expires
+Infected Flow:
+- if infected, either spawn as infected at round start, after being chosen as 'Alpha Infected', or becoming infected by another infected player
+- hunt down and infect survivors to convert them to Infected team
+- round ends when all survivors are elminated and converted
+
+- 12 2-minute rounds
+
+
+* My desired game rules created challenges for consistent numbers across different End of Round(Eor) conditions and player states
+* The engine completely removes AI/bots from the server after death. This made consistent teamcounts challenging
+* I kept track of them through the BotProfile(BP) and PlayerProfile(PP) classes
+* BotProfiles(BP) are used to track the bot's state, properties, and to handle different team callbacks
+* PlayerProfiles(PP) are used to track human players' state, properties
+* The BPs are still buggy, bot names can be used by multiple bots, but mostly work for this project's needs
+
+/
+//
+///-----///
+// CREDITS
+///----///
+
+Battlefield Dad's Domination Template was referenced when creating the simple scoring system 
+This was modified to fit the PlayerProfile(PP) class
+https://github.com/BattlefieldDad/Battlefield-6-Portal---Domination-Template/
+
+Almost all of the UI classes and methods were cloned and modified from example projects by DICE/EA
+
+Dealing with bots leaving the server and keeping track of persistence was really difficult for me
+Some of the infected logic and some UI things were vibe coded >_<
+
+*/
+
 // resolved at mode start by matching HQ position and resupply interact positions
 let CURRENT_MAP: MapNames | undefined;
 
@@ -268,9 +311,22 @@ RESUPPLY_CONFIG_BY_MAP.set(MapNames.SAND2, {
     ]),
 });
 
-const POSITION_HQ1 = mod.GetObjectPosition(mod.GetHQ(1));
-const POSITION_HQ2 = mod.GetObjectPosition(mod.GetHQ(2));
+// NOTE: these used to be `const`, resolved once at module-load time via mod.GetHQ(1)/(2).
+// That runs before the level's spatial objects (HQs included) are guaranteed to be
+// registered with the engine -- see WaitForCurrentMapGate -- so the captured position could
+// silently be garbage (e.g. zero vector) depending on load-order timing. Every 2D SFX
+// (Helpers.PlaySoundFX) and VO call (SpawnTeamVOSoundsAtHQ) spawns its sound object at this
+// fixed anchor, so a bad capture here goes silent for *all* of them, while positional/3D
+// sounds -- which compute their own live location at call time -- are unaffected. Now `let`,
+// refreshed by RefreshHQPositions() after the map gate resolves in OnGameModeStarted.
+let POSITION_HQ1: mod.Vector = mod.GetObjectPosition(mod.GetHQ(1));
+let POSITION_HQ2: mod.Vector = mod.GetObjectPosition(mod.GetHQ(2));
 const ZERO_VEC: mod.Vector = mod.CreateVector(0, 0, 0);
+
+function RefreshHQPositions(): void {
+    POSITION_HQ1 = mod.GetObjectPosition(mod.GetHQ(1));
+    POSITION_HQ2 = mod.GetObjectPosition(mod.GetHQ(2));
+}
 
 function SpawnTeamVOSoundsAtHQ(): void {
     VOSoundsSurvivor = mod.SpawnObject(VOModule, POSITION_HQ1, ZERO_VEC, ZERO_VEC);
@@ -401,50 +457,6 @@ function LogAlphaState(context: string, player?: mod.Player, playerProfile?: Pla
         `bpAlpha:${resolvedBotProfile?.isAlphaInfected} bpInfected:${resolvedBotProfile?.isInfectedTeam} state:${GameHandler.gameState}`
     );
 }
-
-/*
-//
-///---------------------///
-// NOTES/GENERAL COMMENTS
-///------------------///
-
-Survivor Flow:
-- all players spawn on survivor team at game start
-- an 'Alpha Infected' is chosen to start if conditions are met (i.e. no survivors on previous round)
-- fight off infected bots and players
-- round ends when ROUND_DURATION expires
-Infected Flow:
-- if infected, either spawn as infected at round start, after being chosen as 'Alpha Infected', or becoming infected by another infected player
-- hunt down and infect survivors to convert them to Infected team
-- round ends when all survivors are elminated and converted
-
-- 12 2-minute rounds
-
-
-* My desired game rules created challenges for consistent numbers across different End of Round(Eor) conditions and player states
-* The engine completely removes AI/bots from the server after death. This made consistent teamcounts challenging
-* I kept track of them through the BotProfile(BP) and PlayerProfile(PP) classes
-* BotProfiles(BP) are used to track the bot's state, properties, and to handle different team callbacks
-* PlayerProfiles(PP) are used to track human players' state, properties
-* The BPs are still buggy, bot names can be used by multiple bots, but mostly work for this project's needs
-
-/
-//
-///-----///
-// CREDITS
-///----///
-
-Battlefield Dad's Domination Template was referenced when creating the simple scoring system 
-This was modified to fit the PlayerProfile(PP) class
-https://github.com/BattlefieldDad/Battlefield-6-Portal---Domination-Template/
-
-Almost all of the UI classes and methods were cloned and modified from example projects by DICE/EA
-
-Dealing with bots leaving the server and keeping track of persistence was really difficult for me
-Some of the infected logic and some UI things were vibe coded >_<
-
-*/
-
 
 /////////////////////////////////////////////////////////////
 ///////------------------- HELPERS -------------------///////
@@ -9400,6 +9412,23 @@ const LEAP_TEST_WORLDICON_SPAWN = 901;
 const LEAP_TEST_WORLDICON_CAMERA = 902;
 const LEAP_TEST_WORLDICON_CLEANUP = 903;
 
+/** Seconds to pause between a scenario's cleanup and the next automated respawn. */
+const LEAP_TEST_LOOP_RESPAWN_DELAY = 2.0;
+
+/** Safety watchdog: force cleanup/respawn if a scenario runs longer than this (bot stuck, etc). */
+const LEAP_TEST_LOOP_MAX_DURATION = 30.0;
+
+/** Poll interval while waiting for the current scenario to resolve. */
+const LEAP_TEST_LOOP_POLL_DELAY = 0.5;
+
+/** Vertical offset (meters) used when teleporting the survivor bot to the vehicle, so it
+ *  lands clear of the vehicle's collision mesh instead of clipping into it. */
+const LEAP_TEST_SURVIVOR_TELEPORT_HEIGHT = 2.5;
+
+/** Max time to wait for the infected AI to actually come up (spawn is async) before
+ *  treating the attempt as failed and retrying, rather than tearing down mid-spawn. */
+const LEAP_TEST_LOOP_SETTLE_TIMEOUT = 5.0;
+
 function ShouldTrackVehicleDistanceWorldIcon(): boolean {
     return LEAP_TEST_MODE || (BOT_SURVIVAL_TEST_MODE && BOT_SURVIVAL_TEST_ICONS);
 }
@@ -9424,6 +9453,8 @@ const LeapTestHarness = {
     trackedHumanObjId: -1,
     /** Player-owned world icon showing nearest vehicle distance. */
     vehicleDistanceIcon: undefined as mod.WorldIcon | undefined,
+    /** Token used to cancel/restart the self-driving scenario loop. */
+    loopToken: 0,
 
     /** Resolve spawner positions once at startup. */
     resolveGrid() {
@@ -9553,10 +9584,23 @@ const LeapTestHarness = {
         const vehicleSpawner = mod.GetVehicleSpawner(LEAP_TEST_DEBUG_VEHICLE_SPAWNER_ID);
         mod.SetVehicleSpawnerVehicleType(vehicleSpawner, mod.VehicleList.Vector);
         mod.ForceVehicleSpawnerSpawn(vehicleSpawner);
-        // OnVehicleSpawned will set SPAWNED_ACTIVE_VEHICLE; wait for it.
-        await mod.Wait(1.0);
+        console.log(`[LeapTest] Force-spawn requested on spawner ${LEAP_TEST_DEBUG_VEHICLE_SPAWNER_ID}`);
+
+        // OnVehicleSpawned will set SPAWNED_ACTIVE_VEHICLE; poll for it rather than a single
+        // fixed wait so a slightly slow spawn doesn't get misreported as a failure.
+        const VEHICLE_SPAWN_POLL_DELAY = 0.5;
+        const VEHICLE_SPAWN_TIMEOUT = 3.0;
+        let waited = 0;
+        while (!SPAWNED_ACTIVE_VEHICLE && waited < VEHICLE_SPAWN_TIMEOUT) {
+            await mod.Wait(VEHICLE_SPAWN_POLL_DELAY);
+            waited += VEHICLE_SPAWN_POLL_DELAY;
+        }
         this.activeVehicle = SPAWNED_ACTIVE_VEHICLE;
-        console.log(`[LeapTest] Vehicle spawned. SPAWNED_ACTIVE_VEHICLE set: ${!!this.activeVehicle}`);
+        if (this.activeVehicle) {
+            console.log(`[LeapTest] Vehicle spawned after ${waited.toFixed(1)}s | objId=${mod.GetObjId(this.activeVehicle)}`);
+        } else {
+            console.log(`[LeapTest] WARNING: No OnVehicleSpawned callback within ${VEHICLE_SPAWN_TIMEOUT}s -- verify spawner ${LEAP_TEST_DEBUG_VEHICLE_SPAWNER_ID} is wired up and reachable in the level`);
+        }
 
         // --- Survivor bot (will ride the vehicle) ---
         // Use the first survivor spawner closest to the vehicle position.
@@ -9583,6 +9627,69 @@ const LeapTestHarness = {
         console.log('[LeapTest] Infected bot spawn requested');
     },
 
+    /** Self-driving scenario cycle: spawn -> wait for resolution -> cleanup -> repeat.
+     *  Runs forever with no human interaction required; restartLoop() bumps the token to
+     *  cancel any in-flight wait and start a fresh cycle immediately (e.g. manual interact). */
+    async runLoop() {
+        const token = ++this.loopToken;
+        while (token === this.loopToken) {
+            console.log('[LeapTest] Loop: spawning new scenario');
+            await this.spawnScenario();
+            if (token !== this.loopToken) break;
+
+            // spawnScenario only *requests* the bots -- they arrive asynchronously via
+            // OnSpawnerSpawned -> onBotSpawned (itself gated behind a 0.5s delay), so
+            // this.infectedBot isn't populated yet the instant spawnScenario returns.
+            // Give it a settle window before we start watching for "resolved" below --
+            // otherwise the very first liveness check sees no infected bot yet, reads
+            // that as "scenario over", and tears everything down (killing the survivor
+            // bot / clearing activeVehicle) while onBotSpawned is still mid-seat-attempt.
+            let settleElapsed = 0;
+            while (token === this.loopToken
+                && settleElapsed < LEAP_TEST_LOOP_SETTLE_TIMEOUT
+                && !(this.infectedBot && PlayerIsAliveAndValid(this.infectedBot))) {
+                await mod.Wait(LEAP_TEST_LOOP_POLL_DELAY);
+                settleElapsed += LEAP_TEST_LOOP_POLL_DELAY;
+            }
+            if (token !== this.loopToken) break;
+            if (!(this.infectedBot && PlayerIsAliveAndValid(this.infectedBot))) {
+                console.log('[LeapTest] Loop: infected bot never came up, cleaning up and retrying');
+                this.cleanup();
+                await mod.Wait(LEAP_TEST_LOOP_RESPAWN_DELAY);
+                continue;
+            }
+
+            // Wait for the scenario to resolve. The infected AI kills itself once its chase
+            // loop ends (driver dead, vehicle gone, or the bot itself died) -- see
+            // InitLeapSystem's AI branch -- so tracking its liveness plus the vehicle's
+            // validity covers every natural end state. A watchdog forces cleanup if the
+            // bot ever gets stuck and neither condition trips.
+            let elapsed = 0;
+            while (token === this.loopToken) {
+                const infectedAlive = !!this.infectedBot && PlayerIsAliveAndValid(this.infectedBot);
+                const vehicleAlive = IsVehicleRefValid(this.activeVehicle);
+                if (!infectedAlive || !vehicleAlive) break;
+                if (elapsed >= LEAP_TEST_LOOP_MAX_DURATION) {
+                    console.log('[LeapTest] Loop: watchdog timeout, forcing cleanup');
+                    break;
+                }
+                await mod.Wait(LEAP_TEST_LOOP_POLL_DELAY);
+                elapsed += LEAP_TEST_LOOP_POLL_DELAY;
+            }
+            if (token !== this.loopToken) break;
+
+            console.log('[LeapTest] Loop: scenario resolved, cleaning up');
+            this.cleanup();
+            await mod.Wait(LEAP_TEST_LOOP_RESPAWN_DELAY);
+        }
+    },
+
+    /** Cancels any running/waiting loop cycle and starts a fresh one immediately. */
+    restartLoop() {
+        this.cleanup();
+        this.runLoop();
+    },
+
     /** Called from OnSpawnerSpawned when LEAP_TEST_MODE is active. */
     async onBotSpawned(player: mod.Player, spawnerObjId: number) {
         await mod.Wait(0.5);
@@ -9593,12 +9700,11 @@ const LeapTestHarness = {
             this.survivorBot = player;
             mod.SetPlayerMaxHealth(player, 50);
             mod.AIIdleBehavior(player);
-
-            // Wait for vehicle, move toward it, then force seat entry.
             if (this.activeVehicle) {
                 const vehiclePos = mod.GetVehicleState(this.activeVehicle, mod.VehicleStateVector.VehiclePosition);
-                mod.AIMoveToBehavior(player, vehiclePos);
-                await mod.Wait(0.75);
+                const teleportPos = mod.Add(vehiclePos, mod.CreateVector(0, LEAP_TEST_SURVIVOR_TELEPORT_HEIGHT, 0));
+                mod.Teleport(player, teleportPos, 0);
+                await mod.Wait(0.2);
 
                 let seated = false;
                 for (let attempt = 0; attempt < 8; attempt++) {
@@ -9611,9 +9717,26 @@ const LeapTestHarness = {
                 }
 
                 if (seated) {
-                    console.log('[LeapTest] Survivor bot moved to and seated in vehicle');
+                    console.log('[LeapTest] Survivor bot teleported to and seated in vehicle');
                 } else {
-                    console.log('[LeapTest] WARNING: Survivor bot could not be seated in vehicle');
+                    console.log('[LeapTest] WARNING: Teleport-seat failed, falling back to move order');
+                    mod.AIMoveToBehavior(player, vehiclePos);
+                    await mod.Wait(0.75);
+
+                    for (let attempt = 0; attempt < 8; attempt++) {
+                        mod.ForcePlayerToSeat(player, this.activeVehicle, 0);
+                        await mod.Wait(0.15);
+                        if (mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) {
+                            seated = true;
+                            break;
+                        }
+                    }
+
+                    if (seated) {
+                        console.log('[LeapTest] Survivor bot moved to and seated in vehicle (fallback)');
+                    } else {
+                        console.log('[LeapTest] WARNING: Survivor bot could not be seated in vehicle');
+                    }
                 }
             } else {
                 console.log('[LeapTest] WARNING: No active vehicle to seat survivor bot');
@@ -9634,8 +9757,8 @@ const LeapTestHarness = {
     onInteract(eventPlayer: mod.Player, eventObject: mod.Object) {
         const objId = mod.GetObjId(eventObject);
         if (objId === LEAP_TEST_INTERACT_SPAWN) {
-            console.log('[LeapTest] Interact: Spawn Scenario');
-            this.spawnScenario();
+            console.log('[LeapTest] Interact: Force respawn scenario (manual override -- loop resumes automatically)');
+            this.restartLoop();
         } else if (objId === LEAP_TEST_CHANGE_TEAM) {
             let teamToSwitchTo: mod.Team;
             if (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(SURVIVOR_TEAM)) {
@@ -9646,14 +9769,22 @@ const LeapTestHarness = {
             // mod.Kill(eventPlayer);
             mod.SetTeam(eventPlayer, teamToSwitchTo);
         } else if (objId === LEAP_TEST_INTERACT_CLEANUP) {
-            console.log('[LeapTest] Interact: Cleanup');
-            this.cleanup();
+            console.log('[LeapTest] Interact: Cleanup (loop will respawn automatically)');
+            this.restartLoop();
         }
     },
 
     /** Main entry -- replaces OnGameModeStarted flow when LEAP_TEST_MODE. */
     async start(eventPlayer?: mod.Player) {
         console.log('[LeapTest] === LEAP TEST MODE ACTIVE ===');
+
+        // OnGameModeStarted can fire before the level's spatial objects (spawners, HQs)
+        // are actually registered with the engine -- BOT_SURVIVAL_TEST_MODE waits on this
+        // same gate before touching vehicle spawners for that reason. Without it, the very
+        // first ForceVehicleSpawnerSpawn call can silently no-op (no OnVehicleSpawned ever
+        // fires) because the spawner reference isn't live yet.
+        await WaitForCurrentMapGate(false);
+
         this.resolveGrid();
 
         // Enable interact points for spawn/cleanup controls.
@@ -9691,7 +9822,11 @@ const LeapTestHarness = {
             console.log('[LeapTest] WARNING: Could not configure test world icons -- verify IDs 901, 902 & 903 exist in the level');
         }
 
-        console.log('[LeapTest] Waiting for human player deploy...');
+        // No human interaction required: the scenario loop self-drives (spawn -> resolve ->
+        // cleanup -> respawn) as soon as the game mode loads. Fire-and-forget so we don't
+        // block OnGameModeStarted -- the interact points above remain as manual overrides.
+        console.log('[LeapTest] Starting automated scenario loop...');
+        this.runLoop();
     },
 
     /** Called when the human deploys in test mode. */
@@ -9780,8 +9915,8 @@ const LEAP_PREVIEW_TRACK_REST_DELAY = 0.12;
  *  the path just after the snaphot are still caught. */
 let LEAP_VEHICLE_PREDICT_MARGIN = 0.1;
 
-/** Fake impulse distance (meters) applied to vehicles hit by leap collision logic. */
-let LEAP_VEHICLE_FAKE_IMPULSE_DISTANCE = 2.0;
+/** Impulse magnitude applied to vehicles hit by leap collision logic via mod.ApplyImpulse. */
+let LEAP_VEHICLE_IMPULSE_MAGNITUDE = 2.0;
 
 /** Seconds to hold third-person camera + VFX after landing before switching back */
 let LEAP_LANDING_LINGER = 1.0;
@@ -9898,7 +10033,7 @@ function syncLeapVehicleWarningLoop(playerPos: mod.Vector, state: LeapState): vo
         state.chargeWarningTargets.clear();
     } else {
         try {
-            mod.SetObjectTransform(state.chargeWarningLoopSfx, mod.CreateTransform(playerPos, ZERO_VEC));
+            mod.SetObjectTransform(state.chargeWarningLoopSfx as mod.SFX, mod.CreateTransform(playerPos, ZERO_VEC));
         } catch {
             try { mod.UnspawnObject(state.chargeWarningLoopSfx); } catch { }
             state.chargeWarningLoopSfx = mod.SpawnObject(
@@ -10485,19 +10620,12 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
         : -1;
     let vehicleImpulseApplied = false;
 
-    const applyVehicleFakeImpulse = () => {
+    const applyVehicleImpulse = () => {
         if (vehicleImpulseApplied || !vehicleHitRef) return;
         vehicleImpulseApplied = true;
         try {
             const vehiclePosNow = mod.GetVehicleState(vehicleHitRef, mod.VehicleStateVector.VehiclePosition);
-            const vehicleFacingDir = mod.GetVehicleState(vehicleHitRef, mod.VehicleStateVector.FacingDirection);
-            const vehicleYaw = directionToYaw(vehicleFacingDir);
-            const impulseDestination = mod.Add(
-                vehiclePosNow,
-                mod.Multiply(leapDir, LEAP_VEHICLE_FAKE_IMPULSE_DISTANCE)
-            );
-            mod.Teleport(vehicleHitRef, impulseDestination, vehicleYaw);
-            vehicleHitPos = impulseDestination;
+            mod.ApplyImpulse(vehicleHitRef, vehiclePosNow, leapDir, LEAP_VEHICLE_IMPULSE_MAGNITUDE);
         } catch { }
     };
 
@@ -10519,16 +10647,16 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     mod.EnableVFX(trailVfx, true);
     // move VFX along with the player steps, gives trail effect under their feet
     for (let i = 0; i < travelSteps.length - 1; i++) {
-        // Apply fake vehicle impulse 2 step positions before knockback when possible.
+        // Apply vehicle impulse 2 step positions before knockback when possible.
         if (i === vehicleImpulseStepIndex) {
-            applyVehicleFakeImpulse();
+            applyVehicleImpulse();
         }
         mod.Teleport(player, travelSteps[i], yaw);
         mod.MoveVFX(trailVfx, travelSteps[i], ZERO_VEC);
         await mod.Wait(LEAP_STEP_DELAY);
     }
     // Fallback: if we couldn't apply 2 steps early, apply at collision/final-teleport moment.
-    applyVehicleFakeImpulse();
+    applyVehicleImpulse();
     // mod.MoveObject(leapSfx, finalDest);
     mod.EnableVFX(trailVfx, false);
     // Final teleport: exact collision backstep if applicable, otherwise last arc step
@@ -11986,6 +12114,9 @@ function QueueBotSurvivalTestVehicleSpawn(
 }
 
 export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
+    if (LEAP_TEST_MODE) {
+        console.log(`[LeapTest] OnVehicleSpawned fired | objId=${mod.GetObjId(eventVehicle)}`);
+    }
     mod.SetVehicleMaxHealthMultiplier(eventVehicle, 1);
     for (const id of VEHICLE_SPAWNER_IDS) {
         mod.SetVehicleSpawnerTimeUntilAbandon(mod.GetVehicleSpawner(id), 3);
@@ -12648,7 +12779,7 @@ class PropSpawner {
                         const rot = mod.CreateVector(0, yaw, 0);
                         PropSpawner._lineAnchorRot.set(id, rot);
                         const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
-                        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+                        try { mod.SetObjectTransform(anchor as mod.SpatialObject, mod.CreateTransform(objectPos, rot)); } catch { }
                     }
                     // Keyhole hint VFX: show at anchor when player looks toward it.
                     const frozenHintVfx = PropSpawner._lineHintVfx.get(id);
@@ -12705,7 +12836,7 @@ class PropSpawner {
                         const rot = mod.CreateVector(0, yaw, 0);
                         PropSpawner._lineAnchorRot.set(id, rot);
                         const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
-                        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+                        try { mod.SetObjectTransform(anchor as mod.SpatialObject, mod.CreateTransform(objectPos, rot)); } catch { }
                     }
                     PropSpawner._HideLinePreviews(player);
                     PropSpawner._SpawnOrMoveSideTorches(player, anchorPos);
@@ -13082,7 +13213,7 @@ class PropSpawner {
         const rot = mod.CreateVector(0, yaw, 0);
         PropSpawner._lineAnchorRot.set(id, rot);
         const objectPos = PropSpawner._ComputeObjectPosFromPivot(anchorPos, yaw, PropSpawner._GetPropConfig(id));
-        try { mod.SetObjectTransform(anchor, mod.CreateTransform(objectPos, rot)); } catch { }
+        try { mod.SetObjectTransform(anchor as mod.SpatialObject, mod.CreateTransform(objectPos, rot)); } catch { }
     }
 
     private static _FinalizeLinePlacement(player: mod.Player): void {
@@ -13314,6 +13445,9 @@ export async function OnGameModeStarted() {
     NightMode.Reset();
     NightMode.Roll();
     Sandstorm.StartSandstormTickLoop();
+    // Re-resolve HQ positions now that the map gate confirms the level is loaded --
+    // POSITION_HQ1/2 anchor every 2D SFX and VO spawn (see RefreshHQPositions comment).
+    RefreshHQPositions();
     SpawnTeamVOSoundsAtHQ();
 
     gameStateMessageToast.close();
