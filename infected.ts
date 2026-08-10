@@ -69,7 +69,6 @@ let BOT_SURVIVAL_TEST_DESIRED_INFECTED_BOTS = 0;
 const BOT_SURVIVAL_TEST_VEHICLE_RESPAWN_DELAY_SECONDS = 1.0;
 
 const LOADOUT_SELECTION_TIME = 40;
-const PROP_PLACEMENT_TIME = 25;        // extra seconds survivors have to place a fortification prop
 const GAME_COUNTDOWN_TIME = FAST_START ? 5 : LOADOUT_SELECTION_TIME;
 const WAIT_FOR_SPAWN_TIMEOUT = 3;
 
@@ -131,6 +130,14 @@ const SFX_ALPHA_SELECTED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_
 const SFX_ALPHA_LEAP_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_EpiPen_Charge_OneShot2D;
 const SFX_ALPHA_LEAP_VEHICLE_WARNING_LOOP_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_GameModes_BR_Mission_Wreckage_BombBeeping_Loop_SimpleLoop3D;
 const SFX_ALPHA_LEAP_EXECUTE_WARN_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Fire_OneShot3D;
+// Played (targeted to the alpha player only) when they cross in/out of the leap attack area trigger.
+const SFX_ALPHA_LEAP_AREA_ENTER_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_ObjectiveOnEnter_OneShot2D;
+const SFX_ALPHA_LEAP_AREA_EXIT_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_ObjectiveOnExit_OneShot2D;
+
+// The only other AreaTrigger placed in Sand2 besides the vault-kill trigger (9091) -- already
+// used to boost infected AI sprint speed while chasing a vehicle target (see
+// ApplyInfectedAIAreaMoveSpeedMultiplier). The leap attack is now gated to this same zone.
+const LEAP_ATTACK_AREA_TRIGGER_ID = 901;
 
 const SFX_TICKDOWN_START: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Appear_OneShot2D;
 const SFX_TICKDOWN: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Shared_Countdown_Tick_OneShot2D;
@@ -394,7 +401,6 @@ const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0.02;
 // Tracked vehicle reference -- set in OnVehicleSpawned, used by infected AI logic
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
 let BOT_SURVIVAL_TEST_VEHICLE_SPAWN_REQUEST_ID = 0;
-let LEAP_ATTACK_UNLOCKED_THIS_ROUND = false;
 
 // Vehicle spawner IDs to randomly pick from when final five triggers
 const VEHICLE_SPAWNER_IDS: number[] = [202, 203];
@@ -482,10 +488,17 @@ function ResolveStringKeyMessage(key: string): mod.Message {
     return MakeMessage((mod.stringkeys as Record<string, string>)[key] ?? key);
 }
 
-function IsLeapAttackAvailableNow(): boolean {
+// Leap is no longer gated by a per-round "unlocked" flag tied to Final Five/vehicle spawn.
+// It's available to alpha infected only, only while a round is actually in progress, and
+// only while they're standing inside LEAP_ATTACK_AREA_TRIGGER_ID (see OnPlayerEnterAreaTrigger
+// / OnPlayerExitAreaTrigger, which maintain PlayerProfile.isInLeapAttackArea).
+function IsLeapAttackAvailableNow(player?: mod.Player): boolean {
     if (LEAP_TEST_MODE || BOT_SURVIVAL_TEST_MODE) return true;
-    return CURRENT_MAP === MapNames.SAND2
-        && LEAP_ATTACK_UNLOCKED_THIS_ROUND;
+    if (CURRENT_MAP !== MapNames.SAND2) return false;
+    if (GameHandler.gameState !== GameState.GameRoundIsRunning) return false;
+    if (!player) return false;
+    const pp = PlayerProfile.Get(player);
+    return !!pp?.isAlphaInfected && !!pp?.isInLeapAttackArea;
 }
 
 function IsPlayerOnInfectedTeamForLeap(player: mod.Player, playerProfile?: PlayerProfile): boolean {
@@ -505,26 +518,26 @@ function LogLeapRuntime(key: string, message: string, cooldownSeconds: number = 
     console.log(`[LeapRuntime] ${message}`);
 }
 
-function GetInfectedHintKeysForCurrentRound(): readonly string[] {
-    return IsLeapAttackAvailableNow()
+function GetInfectedHintKeysForCurrentRound(player?: mod.Player): readonly string[] {
+    return IsLeapAttackAvailableNow(player)
         ? INFECTED_HINT_STRING_KEYS
         : INFECTED_HINT_STRING_KEYS_NO_LEAP;
 }
 
-function GetAlphaInfectedHintKeysForCurrentRound(): readonly string[] {
-    return IsLeapAttackAvailableNow()
+function GetAlphaInfectedHintKeysForCurrentRound(player?: mod.Player): readonly string[] {
+    return IsLeapAttackAvailableNow(player)
         ? INFECTED_ALPHA_HINT_STRING_KEYS
         : INFECTED_ALPHA_HINT_STRING_KEYS_NO_LEAP;
 }
 
-function GetInfectedHintMessage(index: number): mod.Message {
-    const hintKeys = GetInfectedHintKeysForCurrentRound();
+function GetInfectedHintMessage(index: number, player?: mod.Player): mod.Message {
+    const hintKeys = GetInfectedHintKeysForCurrentRound(player);
     const normalizedIndex = ((index % hintKeys.length) + hintKeys.length) % hintKeys.length;
     return ResolveStringKeyMessage(hintKeys[normalizedIndex]);
 }
 
-function GetAlphaInfectedHintMessage(index: number): mod.Message {
-    const hintKeys = GetAlphaInfectedHintKeysForCurrentRound();
+function GetAlphaInfectedHintMessage(index: number, player?: mod.Player): mod.Message {
+    const hintKeys = GetAlphaInfectedHintKeysForCurrentRound(player);
     const normalizedIndex = ((index % hintKeys.length) + hintKeys.length) % hintKeys.length;
     return ResolveStringKeyMessage(hintKeys[normalizedIndex]);
 }
@@ -533,8 +546,8 @@ function GetLastManStandingBuffMessages(): mod.Message[] {
     return LMS_BUFF_STRING_KEYS.map((key) => ResolveStringKeyMessage(key));
 }
 
-function GetAlphaInfectedBuffMessages(): mod.Message[] {
-    const buffKeys = IsLeapAttackAvailableNow()
+function GetAlphaInfectedBuffMessages(player?: mod.Player): mod.Message[] {
+    const buffKeys = IsLeapAttackAvailableNow(player)
         ? ALPHA_BUFF_STRING_KEYS
         : ALPHA_BUFF_STRING_KEYS_NO_LEAP;
     return buffKeys.map((key) => ResolveStringKeyMessage(key));
@@ -1344,17 +1357,19 @@ class Weapons {
 
     static baseSurvivorGadgets: PooledItemDef[] = [
         { nameKey: "flash_grenade", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Flash_Grenade },
-        { nameKey: "frag_grenade_mini", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Mini_Frag_Grenade },
-        { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
-        { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
-        { nameKey: "supply_pouch", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
+        { nameKey: "prop_spawner_gadget", rarity: 5, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
+        /*{ nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
+        { nameKey: "supply_pouch", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
-        { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
-        { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
         { nameKey: "thermobaric_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
-        { nameKey: "he_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_High_Explosive },
-        { nameKey: "incendiary_airburst", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Incendiary_Airburst },
+        { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
+        */
+        // { nameKey: "frag_grenade_mini", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Mini_Frag_Grenade },
+        // { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
+        // { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
+        // { nameKey: "he_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_High_Explosive },
+        // { nameKey: "incendiary_airburst", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Incendiary_Airburst },
     ]
 
     static GetLoadoutFromPlayerProfile(playerProfile: PlayerProfile): Array<EquippedItem> | undefined {
@@ -2710,7 +2725,6 @@ class GameCountdown {
 
     private ShouldShowCountdownPopup(): boolean {
         if (GameHandler.gameState !== GameState.GameStartCountdown) return false;
-        if (GameHandler.propPlacementPhaseActive) return true; // show for all players during prop phase
         if (this._PlayerProfile.isAlphaInfected) return true;
         return !!this._PlayerProfile.loadoutSelectionUI?.HasSelected();
     }
@@ -2728,13 +2742,6 @@ class GameCountdown {
         const subheaderWidget = mod.FindUIWidgetWithName(`${this.uiID}_subheader_${this._PlayerProfile.playerID}`);
 
         if (!subheaderWidget) return;
-
-        if (GameHandler.propPlacementPhaseActive) {
-            const { placed, total } = PropSpawner.GetPlacementStatus();
-            mod.SetUITextLabel(subheaderWidget, MakeMessage(mod.stringkeys.prop_spawner_countdown, placed, total));
-            mod.SetUITextColor(subheaderWidget, this._PlayerProfile.isInfectedTeam || this._PlayerProfile.isAlphaInfected ? UI.battlefieldRed : UI.allyBlue);
-            return;
-        }
 
         const { readyHumans, totalSelectingHumans } = this.GetReadyCountState();
         if (totalSelectingHumans > 0) {
@@ -3917,6 +3924,10 @@ class PlayerProfile {
     isAI: boolean = false;
     isDead: boolean;
     isAlphaInfected: boolean = false;
+    /** Whether this (infected) player is currently inside LEAP_ATTACK_AREA_TRIGGER_ID.
+     *  Tracked for all infected (AI included) but only consumed for alpha infected --
+     *  see IsLeapAttackAvailableNow. */
+    isInLeapAttackArea: boolean = false;
     isInfectedTeam: boolean = false;
     invehicle: boolean = false;
     isLastManStanding: boolean = false;
@@ -4228,7 +4239,7 @@ class PlayerProfile {
             return;
         }
 
-        const buffMessages = GetAlphaInfectedBuffMessages();
+        const buffMessages = GetAlphaInfectedBuffMessages(this.player);
         for (let index = 0; index < buffMessages.length; index++) {
             const message = buffMessages[index];
             if (!this.alphaBuffWidgets[index]) {
@@ -4318,7 +4329,7 @@ class PlayerProfile {
         }
 
         const now = Date.now() / 1000;
-        const leapAvailable = IsLeapAttackAvailableNow();
+        const leapAvailable = IsLeapAttackAvailableNow(this.player);
 
         // Alpha infected: show leap charge status when crouching, rotate alpha tips when idle
         if (this.isAlphaInfected) {
@@ -4370,17 +4381,17 @@ class PlayerProfile {
                 this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
                     this.player,
                     this.playerID,
-                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex),
+                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex, this.player),
                 );
                 this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
             } else if (now >= this.nextPlayerAreaHintRotationAt) {
-                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetAlphaInfectedHintKeysForCurrentRound().length;
+                this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetAlphaInfectedHintKeysForCurrentRound(this.player).length;
                 this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
             }
             if (this.playerAreaNotificationWidget) {
                 UI.UpdatePlayerAreaNotification(
                     this,
-                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex),
+                    GetAlphaInfectedHintMessage(this.playerAreaHintIndex, this.player),
                     mod.UIImageType.QuestionMark,
                     UI.battlefieldRedBg
                 );
@@ -4393,17 +4404,17 @@ class PlayerProfile {
             this.playerAreaNotificationWidget = UI.CreatePlayerAreaNotificationWidget(
                 this.player,
                 this.playerID,
-                GetInfectedHintMessage(this.playerAreaHintIndex),
+                GetInfectedHintMessage(this.playerAreaHintIndex, this.player),
             );
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         } else if (now >= this.nextPlayerAreaHintRotationAt) {
-            this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetInfectedHintKeysForCurrentRound().length;
+            this.playerAreaHintIndex = (this.playerAreaHintIndex + 1) % GetInfectedHintKeysForCurrentRound(this.player).length;
             this.nextPlayerAreaHintRotationAt = now + INFECTED_HINT_ROTATION_SECONDS;
         }
         if (this.playerAreaNotificationWidget) {
             UI.UpdatePlayerAreaNotification(
                 this,
-                GetInfectedHintMessage(this.playerAreaHintIndex),
+                GetInfectedHintMessage(this.playerAreaHintIndex, this.player),
                 mod.UIImageType.QuestionMark,
                 UI.battlefieldRedBg
             );
@@ -5791,7 +5802,6 @@ class GameHandler {
 
     // game states
     static gameState = GameState.PreGame
-    static propPlacementPhaseActive: boolean = false;
     static currentRound: number = 1;
     static survivorsRoundsWon: number = 0;
     /**
@@ -6225,10 +6235,6 @@ class GameHandler {
                 const finalFiveMessage = MakeMessage(mod.stringkeys.final_five);
                 GameHandler.DisplayGameStateNotification(finalFiveMessage);
                 Helpers.PlaySoundFX(SFX_FINAL_FIVE, 1);
-                if (CURRENT_MAP === MapNames.SAND2 && !GameHandler.vehicleSpawnedThisRound) {
-                    GameHandler.vehicleSpawnedThisRound = true;
-                    GameHandler.SpawnVehicle();
-                }
                 PlayVOForTeam(mod.VoiceOverEvents2D.ProgressMidLosing, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
                 PlayVOForTeam(mod.VoiceOverEvents2D.PlayerCountEnemyLow, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
                 for (let playerProfile of PlayerProfile._allPlayerProfiles) {
@@ -6673,7 +6679,6 @@ class GameHandler {
             }
         });
         GameHandler.vehicleSpawnedThisRound = false;
-        LEAP_ATTACK_UNLOCKED_THIS_ROUND = false;
 
         GameHandler.isSpawnCheckRunning = false;
         GameHandler.currentRound++;
@@ -6786,10 +6791,17 @@ class GameHandler {
 
         this.RestrictAllInputsAllPlayers(true);
         await this.RoundStartCountdown();
-        await PropSpawner.RunPhase();
         console.log('Game is starting. Current Round: ' + GameHandler.currentRound);
         this.gameState = GameState.GameRoundIsRunning;
         Sandstorm.InitializeSandstormEventForRound();
+
+        // Spawn this round's vehicle (random spawn point, random type -- see SpawnVehicle) up
+        // front rather than waiting for a Final Five milestone. Cleanup at round end is
+        // unchanged (see EndRoundCleanup).
+        if (CURRENT_MAP === MapNames.SAND2 && !GameHandler.vehicleSpawnedThisRound) {
+            GameHandler.vehicleSpawnedThisRound = true;
+            GameHandler.SpawnVehicle();
+        }
 
         for (let playerProfile of PlayerProfile._allPlayerProfiles) {
             if (playerProfile.isAI) continue;
@@ -6811,10 +6823,6 @@ class GameHandler {
             const finalFiveMessage = MakeMessage(mod.stringkeys.final_five_upgraded);
             GameHandler.DisplayGameStateNotification(finalFiveMessage);
             Helpers.PlaySoundFX(SFX_FINAL_FIVE, 1);
-            if (CURRENT_MAP === MapNames.SAND2) {
-                GameHandler.vehicleSpawnedThisRound = true;
-                GameHandler.SpawnVehicle();
-            }
             for (let playerProfile of PlayerProfile._allPlayerProfiles) {
                 playerProfile.ShowAlphaFeedback(finalFiveMessage);
                 if (playerProfile.isInfectedTeam) continue;
@@ -7849,7 +7857,7 @@ function IssueInfectedBotMove(slot: InfectedBotSlot, bot: mod.Player, destinatio
 
 /** Trigger the charge-leap for an alpha infected bot. Manages its own async flow; the tick is skipped while leaping. */
 async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Promise<void> {
-    if (!IsLeapAttackAvailableNow()) return;
+    if (!IsLeapAttackAvailableNow(bot)) return;
     if (slot.tick.leapInProgress) return;
     slot.tick.leapInProgress = true;
     StopInfectedBotMeleeAttack(slot, bot);
@@ -8069,7 +8077,7 @@ function InfectedBotLogicTick(slot: InfectedBotSlot): void {
                 StopInfectedBotMeleeAttack(slot, infectedBot);
                 if (vehicleMeleeProfile.blockedByHeadOnCone) {
                     tick.behavior = 'vehicle_melee_no_attack';
-                } else if (slot.isAlpha && !disableAttacks && IsLeapAttackAvailableNow()) {
+                } else if (slot.isAlpha && !disableAttacks && IsLeapAttackAvailableNow(infectedBot)) {
                     TriggerAIChargeLeap(slot, infectedBot);
                     tick.behavior = 'vehicle_chase_leap';
                 } else {
@@ -8350,6 +8358,10 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     const isInfected = playerProfile.isInfectedTeam || (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM));
     const isAI = playerProfile.isAI;
 
+    // Clear any stale PropSpawner tracking from a previous loadout -- this round's roll may
+    // no longer include the gadget, and re-equipping it below re-initializes fresh state anyway.
+    PropSpawner.CleanupPlayer(eventPlayer);
+
     // apply gear from loadout
     for (const item of loadout) {
         if (!item) {
@@ -8400,6 +8412,11 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
             if (item.gadget === mod.Gadgets.Misc_Assault_Ladder)
                 await mod.Wait(1); // delay to avoid ladder being selected over sledgehammer
             mod.AddEquipment(eventPlayer, item.gadget as mod.Gadgets);
+            // PropSpawner's fire/aim-driven placement flow is human-input only; pick this
+            // player's starting prop and ready their preview icon (see PropSpawner.InitPlayer).
+            if (item.gadget === mod.Gadgets.Misc_PortalGadget && !isAI) {
+                PropSpawner.InitPlayer(eventPlayer);
+            }
         }
     }
 
@@ -8422,6 +8439,16 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
 // Refresh human player equipment to match the current round rules.
 function RefreshHumanEquipment(eventPlayer: mod.Player, playerProfile: PlayerProfile) {
     if (!PlayerIsAliveAndValid(eventPlayer) || SafeIsAISoldier(eventPlayer)) return;
+
+    // Don't interrupt an in-progress prop placement -- ripping every slot (including the
+    // gadget currently in their hands) out mid-row-edit is jarring and can strand the
+    // already-placed anchor. Defer until they finish; PropSpawner flushes this once the
+    // placement is finalized or cancelled (see PropSpawner._FlushDeferredEquipmentRefresh).
+    if (PropSpawner.IsMidPlacement(eventPlayer)) {
+        PropSpawner.DeferEquipmentRefresh(eventPlayer, playerProfile);
+        return;
+    }
+
     // Clear equipment first to avoid duplicates or stale packages
     try {
         console.log(`RefreshHumanEquipment | Removing existing equipment for Player(${mod.GetObjId(eventPlayer)})`);
@@ -9133,11 +9160,6 @@ function CheckForBannedWeapons(player: mod.Player) {
     }
 
     if (GameHandler.gameState !== GameState.GameRoundIsRunning || GameHandler.suspendWinChecks) {
-        return false;
-    }
-
-    // Skip banned-weapon check while a survivor is still in the prop-placement grace window.
-    if (PropSpawner._graceMode.has(mod.GetObjId(player))) {
         return false;
     }
 
@@ -10671,27 +10693,26 @@ async function executeLeap(player: mod.Player, state: LeapState): Promise<void> 
     if (finalLandingOverride && (isVehicleCollision || isWallCollision)) {
         // Apply vehicle damage now that the arc is complete. The player stopped short of
         // the vehicle (never teleported into it), so the entity is still alive and valid.
+        // Applies whether or not the vehicle currently has anyone in it -- the impulse and
+        // hit reaction are a property of hitting the vehicle itself, not its occupants.
         if (vehicleHitRef && vehicleHitPos) {
-            const vehicleOccupants = ConvertArray(mod.GetAllPlayersInVehicle(vehicleHitRef)) as mod.Player[];
-            if (vehicleOccupants.length > 0) {
-                const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
-                const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
-                mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
-                mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
-                if (state.hitVfx) {
-                    mod.UnspawnObject(state.hitVfx);
-                    state.hitVfx = undefined;
-                }
-                const hitVfx = mod.SpawnObject(
-                    mod.RuntimeSpawn_Common.FX_Missile_MBTLAW_Hit_Glancing,
-                    vehicleHitPos,
-                    mod.CreateVector(0, 0, 0),
-                    mod.CreateVector(1, 1, 1)
-                ) as mod.VFX;
-                mod.EnableVFX(hitVfx, true);
-                state.hitVfx = hitVfx;
-                leapHitVfx = hitVfx;
+            const playerHealth = mod.GetSoldierState(player, mod.SoldierStateNumber.CurrentHealth);
+            const damageToDeal = Math.min(LEAP_DAMAGE * 0.75, playerHealth * 0.50); // soft cap to prevent leap suicides
+            mod.DealDamage(vehicleHitRef, LEAP_DAMAGE);
+            mod.DealDamage(player, damageToDeal, player); // self-damage for balance and feedback
+            if (state.hitVfx) {
+                mod.UnspawnObject(state.hitVfx);
+                state.hitVfx = undefined;
             }
+            const hitVfx = mod.SpawnObject(
+                mod.RuntimeSpawn_Common.FX_Missile_MBTLAW_Hit_Glancing,
+                vehicleHitPos,
+                mod.CreateVector(0, 0, 0),
+                mod.CreateVector(1, 1, 1)
+            ) as mod.VFX;
+            mod.EnableVFX(hitVfx, true);
+            state.hitVfx = hitVfx;
+            leapHitVfx = hitVfx;
         }
 
         // Concussion ringing plays only for the leaping player (2D - no world position needed)
@@ -10795,7 +10816,7 @@ async function InitLeapSystem(player: mod.Player, activeVehicle?: mod.Vehicle): 
     const teamObjId = mod.GetObjId(mod.GetTeam(player));
     LogLeapRuntime(
         `init_enter_${objId}`,
-        `InitLeapSystem enter | player=${objId} map=${CURRENT_MAP ?? 'undefined'} test=${LEAP_TEST_MODE} unlocked=${LEAP_ATTACK_UNLOCKED_THIS_ROUND} teamObjId=${teamObjId} ppInfected=${profile?.isInfectedTeam} ppAlpha=${profile?.isAlphaInfected}`,
+        `InitLeapSystem enter | player=${objId} map=${CURRENT_MAP ?? 'undefined'} test=${LEAP_TEST_MODE} inArea=${profile?.isInLeapAttackArea} teamObjId=${teamObjId} ppInfected=${profile?.isInfectedTeam} ppAlpha=${profile?.isAlphaInfected}`,
         0.2
     );
     if (objId < 0) {
@@ -11030,10 +11051,10 @@ function TickLeap(player: mod.Player): void {
         return;
     }
 
-    if (!IsLeapAttackAvailableNow()) {
+    if (!IsLeapAttackAvailableNow(player)) {
         LogLeapRuntime(
             `tick_gate_unavailable_${objId}`,
-            `TickLeap skip unavailable | player=${objId} map=${CURRENT_MAP ?? 'undefined'} unlocked=${LEAP_ATTACK_UNLOCKED_THIS_ROUND} test=${LEAP_TEST_MODE}`
+            `TickLeap skip unavailable | player=${objId} map=${CURRENT_MAP ?? 'undefined'} test=${LEAP_TEST_MODE}`
         );
         resetLeapChargeState(state);
         return;
@@ -11761,6 +11782,7 @@ export async function OnPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlay
 }
 
 export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) {
+    const areaTriggerObjId = mod.GetObjId(eventAreaTrigger);
     if (mod.GetObjId(mod.GetTeam(eventPlayer)) !== mod.GetObjId(INFECTED_TEAM)) {
         const survivorProfile = PlayerProfile.Get(eventPlayer);
         if (survivorProfile && !survivorProfile.isAI) {
@@ -11776,6 +11798,13 @@ export function OnPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigge
         if (slot) {
             slot.tick.inAreaTrigger = false;
             slot.tick.lastAreaMoveSpeedMultiplier = undefined;
+        }
+    }
+
+    if (areaTriggerObjId === LEAP_ATTACK_AREA_TRIGGER_ID && playerProfile) {
+        playerProfile.isInLeapAttackArea = false;
+        if (playerProfile.isAlphaInfected && !playerProfile.isAI) {
+            Helpers.PlaySoundFX(SFX_ALPHA_LEAP_AREA_EXIT_2D, 1, eventPlayer);
         }
     }
 }
@@ -11806,7 +11835,13 @@ export async function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAre
         ApplyInfectedAIAreaMoveSpeedMultiplier(eventPlayer, slot, pp.currentTarget);
     }
 
-
+    if (areaTriggerObjId === LEAP_ATTACK_AREA_TRIGGER_ID && pp) {
+        pp.isInLeapAttackArea = true;
+        if (pp.isAlphaInfected && !pp.isAI) {
+            pp.ShowAlphaFeedback(ResolveStringKeyMessage("alpha_leap_available"));
+            Helpers.PlaySoundFX(SFX_ALPHA_LEAP_AREA_ENTER_2D, 1, eventPlayer);
+        }
+    }
 }
 
 function EnsureVL7TransitionOverlay(player: mod.Player): mod.UIWidget | undefined {
@@ -12123,38 +12158,10 @@ export function OnVehicleSpawned(eventVehicle: mod.Vehicle) {
     }
     SPAWNED_ACTIVE_VEHICLE = eventVehicle;
 
-    // Mark leap unlock only when the round had already requested a final-five spawn.
-    if (CURRENT_MAP === MapNames.SAND2) {
-        if (GameHandler.vehicleSpawnedThisRound) {
-            LEAP_ATTACK_UNLOCKED_THIS_ROUND = true;
-        }
-    }
-
-    // Notify all players via the alpha feedback banner and attempt a VO on both teams.
-    const vehicleSpawnedMessage = ResolveStringKeyMessage("vehicle_spawned");
-    const alphaLeapReadyMessage = ResolveStringKeyMessage("alpha_leap_available");
-    const leapIsNowAvailable = IsLeapAttackAvailableNow();
-
-    // If leap just unlocked, grant leap state to currently deployed alpha infected players now.
-    if (leapIsNowAvailable) {
-        for (const playerProfile of PlayerProfile._allPlayerProfiles) {
-            if (!playerProfile.isAlphaInfected) continue;
-            if (!Helpers.HasValidObjId(playerProfile.player)) continue;
-            if (!mod.GetSoldierState(playerProfile.player, mod.SoldierStateBool.IsAlive)) continue;
-            InitLeapSystem(playerProfile.player);
-        }
-    }
-
-    for (const playerProfile of PlayerProfile._allPlayerProfiles) {
-        const notifyAlphaLeapReady = leapIsNowAvailable
-            && playerProfile.isInfectedTeam
-            && playerProfile.isAlphaInfected;
-        playerProfile.ShowAlphaFeedback(notifyAlphaLeapReady ? alphaLeapReadyMessage : vehicleSpawnedMessage);
-    }
-    if (VOSoundsSurvivor || VOSoundsInfected) {
-        PlayVOForTeam(mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
-        PlayVOForTeam(mod.VoiceOverEvents2D.VehicleArmoredSpawn, mod.VoiceOverFlags.Alpha, INFECTED_TEAM);
-    }
+    // No leap-unlock or notification/VO fanfare here anymore -- the vehicle now spawns
+    // automatically at round start (see PreGameSetup) rather than as a Final Five milestone,
+    // and leap availability is driven entirely by LEAP_ATTACK_AREA_TRIGGER_ID enter/exit
+    // (see OnPlayerEnterAreaTrigger / OnPlayerExitAreaTrigger).
 }
 
 export function OnVehicleDestroyed(eventVehicle: mod.Vehicle) {
@@ -12179,8 +12186,8 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
 
     if (!IsPlayerDeployed(eventPlayer)) return;
 
-    // PropSpawner preview tick for human survivors during placement phase or grace window
-    if (!isAISoldier && (GameHandler.propPlacementPhaseActive || PropSpawner._graceMode.has(playerObjId))) {
+    // PropSpawner preview tick for human survivors who currently have the gadget equipped.
+    if (!isAISoldier && PropSpawner._propIndex.has(playerObjId)) {
         PropSpawner.OngoingTick(eventPlayer);
     }
 
@@ -12190,7 +12197,7 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
         if (playerProfile
             && playerProfile.isAlphaInfected
             && IsPlayerOnInfectedTeamForLeap(eventPlayer, playerProfile)
-            && IsLeapAttackAvailableNow()
+            && IsLeapAttackAvailableNow(eventPlayer)
             && !LEAP_STATES.has(playerObjId)) {
             LogLeapRuntime(`ongoing_safety_init_${playerObjId}`, `OngoingPlayer safety init triggered | player=${playerObjId} alpha=${playerProfile.isAlphaInfected} infected=${playerProfile.isInfectedTeam}`, 0.3);
             InitLeapSystem(eventPlayer);
@@ -12312,8 +12319,9 @@ const PROP_SPAWNER_PREVIEW_TICK_INTERVAL = 3;
 const PROP_SPAWNER_MIN_FLOOR_NORMAL_Y = 0.5;
 const PROP_SPAWNER_ZERO_VEC = mod.CreateVector(0, 0, 0);
 const PROP_SPAWNER_ONE_VEC = mod.CreateVector(1, 1, 1);
-const PROP_SPAWNER_MAX_LINE_PROPS = 3;
 const PROP_SPAWNER_LINE_CURSOR_MAX_DIST = 10;
+// Seconds a player must wait after finishing a placement before they can start another.
+const PROP_SPAWNER_COOLDOWN_SECONDS = 10;
 const PROP_SPAWNER_VFX_ANCHOR_LAUNCH = mod.RuntimeSpawn_Common.FX_Impact_LootCrate_Dirt;
 const PROP_SPAWNER_VFX_PROP_LAND = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Submunition_Detonation;
 const PROP_SPAWNER_VFX_SLOT_CONFIRM = mod.RuntimeSpawn_Common.FX_RepairTool_FullyHealed;
@@ -12337,12 +12345,17 @@ interface PropSpawnerConfig {
     lineDragMinDist: number;
     // Minimum dot-product (player facing vs direction-to-anchor) for hint VFX keyhole visibility.
     keyholeMinDot: number;
+    // Max props placeable in a single row (anchor + extensions) for this prop type.
+    maxLineProps: number;
 }
 
 const PROP_SPAWNER_POOL: PropSpawnerConfig[] = [
-    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 0.96, width: 1.92, depth: 0.3, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
-    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 0.5, width: 1.0, depth: 0.2, lineDragMinDist: 1.0, keyholeMinDot: 0.65 },
-    { prop: mod.RuntimeSpawn_Common.CrateAmmo_01_StackB, forwardOffset: 0, rightOffset: 0, width: 2.0, depth: 1.0, lineDragMinDist: 2.0, keyholeMinDot: 0.80 },
+    // Barricade (concrete wall)
+    { prop: mod.RuntimeSpawn_Sand.BarrierConcreteWall_01_192x320, forwardOffset: 0, rightOffset: 0.96, width: 1.92, depth: 0.3, lineDragMinDist: 2.0, keyholeMinDot: 0.80, maxLineProps: 3 },
+    // Wooden barriers
+    { prop: mod.RuntimeSpawn_Sand.BarricadeboardsWood_01_B, forwardOffset: 0, rightOffset: 0.5, width: 1.0, depth: 0.2, lineDragMinDist: 1.0, keyholeMinDot: 0.65, maxLineProps: 5 },
+    // Ammo crate
+    { prop: mod.RuntimeSpawn_Common.CrateAmmo_01_StackB, forwardOffset: 0, rightOffset: 0, width: 2.0, depth: 1.0, lineDragMinDist: 2.0, keyholeMinDot: 0.80, maxLineProps: 3 },
 ];
 
 class PropSpawner {
@@ -12350,21 +12363,25 @@ class PropSpawner {
     static readonly _raycastInFlight: Set<number> = new Set();
     static readonly _raycastPurpose: Map<number, "preview" | "spawn" | "line_cursor"> = new Map();
     static readonly _previewTick: Map<number, number> = new Map();
-    static readonly _hasPlaced: Set<number> = new Set();
+    static readonly _cooldownUntil: Map<number, number> = new Map();
+    // An equipment refresh requested while the player was mid-placement (anchor already
+    // committed, still editing the row) -- applied once they finalize or cancel instead of
+    // yanking their held gadget out from under them. See RefreshHumanEquipment.
+    static readonly _pendingEquipmentRefresh: Map<number, PlayerProfile> = new Map();
     static readonly _previewIcons: Map<number, mod.WorldIcon> = new Map();
     static readonly _allPlacedObjects: mod.Object[] = [];
-    static _survivorsInPhase: mod.Player[] = [];
     static readonly _playerSpawnedObjects: Map<number, mod.Object[]> = new Map();
     static readonly _lineMode: Set<number> = new Set();
     static readonly _lineAnchorPos: Map<number, mod.Vector> = new Map();
     static readonly _lineAnchorRot: Map<number, mod.Vector> = new Map();
-    static readonly _linePreviewIcons: Map<number, mod.WorldIcon[]> = new Map();
+    // Only the first and last queued slot get a world icon (not one per slot).
+    static readonly _lineStartIcon: Map<number, mod.WorldIcon> = new Map();
+    static readonly _lineEndIcon: Map<number, mod.WorldIcon> = new Map();
     static readonly _lineCount: Map<number, number> = new Map();
     static readonly _lineDir: Map<number, mod.Vector> = new Map();
     static readonly _lineCursorPos: Map<number, mod.Vector> = new Map();
     static readonly _ratchetAngle: Map<number, number> = new Map();
     static readonly _ratchetNotch: Map<number, number> = new Map();
-    static readonly _graceMode: Set<number> = new Set();
     static readonly _lineCursorState: Map<number, "valid" | "invalid_surface" | "out_of_range"> = new Map();
     static readonly _statusIcons: Map<number, mod.WorldIcon> = new Map();
 
@@ -12379,72 +12396,47 @@ class PropSpawner {
     // Two torch VFX on either side of the anchor shown as soon as the player enters ADS.
     static readonly _lineSideTorchVfx: Map<number, mod.VFX[]> = new Map();
 
-    static GetPlacementStatus(): { placed: number; total: number } {
-        return { placed: PropSpawner._hasPlaced.size, total: PropSpawner._survivorsInPhase.length };
-    }
-
     static HasRaycastInFlight(id: number): boolean {
         return PropSpawner._raycastInFlight.has(id);
     }
 
-    static AllSurvivorsPlaced(): boolean {
-        if (PropSpawner._survivorsInPhase.length === 0) return false;
-        return PropSpawner._survivorsInPhase.every(p => PropSpawner._hasPlaced.has(mod.GetObjId(p)));
+    /** Called from InitializePlayerEquipment when a survivor's loadout rolls this gadget.
+     *  Picks their starting prop and readies the preview icon -- no phase/countdown involved,
+     *  the gadget is now a normal continuously-usable loadout item (see OnFireStart cooldown). */
+    static InitPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        PropSpawner._propIndex.set(id, Math.floor(Math.random() * PROP_SPAWNER_POOL.length));
+        PropSpawner._cooldownUntil.delete(id);
+        PropSpawner._SpawnPreviewIcon(player);
     }
 
-    static async RunPhase(): Promise<void> {
-        const humanSurvivors = PlayerProfile._allPlayerProfiles
-            .filter(pp => !pp.isAI && !pp.isInfectedTeam && !pp.isAlphaInfected)
-            .map(pp => pp.player)
-            .filter(p => Helpers.HasValidObjId(p));
+    /** True while the player has an anchor already committed and is still editing the row
+     *  (dragging/ratcheting length before confirming). Interrupting this is the jarring case --
+     *  merely holding the gadget out without having fired yet is fine to refresh through. */
+    static IsMidPlacement(player: mod.Player): boolean {
+        return PropSpawner._lineMode.has(mod.GetObjId(player));
+    }
 
-        if (humanSurvivors.length === 0) return;
+    /** Queue an equipment refresh to run once the player finishes their current placement,
+     *  instead of interrupting it now. Flushed from _FinalizeLinePlacement/_CancelLinePlacement
+     *  and opportunistically from OngoingTick as a safety net. */
+    static DeferEquipmentRefresh(player: mod.Player, playerProfile: PlayerProfile): void {
+        PropSpawner._pendingEquipmentRefresh.set(mod.GetObjId(player), playerProfile);
+    }
 
-        PropSpawner._survivorsInPhase = humanSurvivors;
-        GameHandler.propPlacementPhaseActive = true;
-        GameHandler.countdownTimeRemaining = PROP_PLACEMENT_TIME;
+    private static _FlushDeferredEquipmentRefresh(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        const pending = PropSpawner._pendingEquipmentRefresh.get(id);
+        if (!pending) return;
+        PropSpawner._pendingEquipmentRefresh.delete(id);
+        RefreshHumanEquipment(player, pending);
+    }
 
-        for (const player of humanSurvivors) {
-            const id = mod.GetObjId(player);
-            PropSpawner._propIndex.set(id, Math.floor(Math.random() * PROP_SPAWNER_POOL.length));
-            try { mod.AddEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
-            try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
-            PropSpawner._SpawnPreviewIcon(player);
-        }
-
-        GameCountdown.GlobalUpdate();
-
-        while (GameHandler.countdownTimeRemaining > 0) {
-            if (PropSpawner.AllSurvivorsPlaced()) break;
-            const timeText = Helpers.FormatTime(GameHandler.countdownTimeRemaining);
-            GameCountdown.GlobalTickDown(timeText[0], timeText[1], timeText[2]);
-            if (GameHandler.countdownTimeRemaining <= 5) {
-                Helpers.PlaySoundFX(SFX_ROUND_COUNTDOWN, 1);
-            }
-            await mod.Wait(1);
-            GameHandler.countdownTimeRemaining--;
-        }
-
-        GameCountdown.GlobalClose();
-        GameHandler.propPlacementPhaseActive = false;
-
-        // For each survivor: anyone who hasn't placed yet gets a grace period to finish
-        // placing before their gadget is swapped back; already-placed players are cleaned up now.
-        for (const player of humanSurvivors) {
-            const id = mod.GetObjId(player);
-            if (!PropSpawner._hasPlaced.has(id)) {
-                // Haven't placed yet -- keep the gadget so they can finish.
-                PropSpawner._graceMode.add(id);
-            } else {
-                // Already placed -- strip gadget immediately.
-                PropSpawner._HidePreviewIcon(id);
-                PropSpawner._CleanupPreviewIcon(id);
-                PropSpawner._CleanupPlayerState(id);
-                if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
-            }
-        }
-        PropSpawner._hasPlaced.clear();
-        PropSpawner._survivorsInPhase = [];
+    /** Seconds remaining before `id` can place again; 0 if ready now. */
+    static GetCooldownRemaining(id: number): number {
+        const until = PropSpawner._cooldownUntil.get(id);
+        if (!until) return 0;
+        return Math.max(0, until - (Date.now() / 1000));
     }
 
     static CleanupAllObjects(): void {
@@ -12466,13 +12458,16 @@ class PropSpawner {
                 PropSpawner._playerSpawnedObjects.delete(id);
             }
         }
-        // Clean up line preview icons
-        const lineIcons = PropSpawner._linePreviewIcons.get(id);
-        if (lineIcons) {
-            for (const li of lineIcons) {
-                try { mod.UnspawnObject(li as unknown as mod.Object); } catch { }
-            }
-            PropSpawner._linePreviewIcons.delete(id);
+        // Clean up line start/end preview icons
+        const lineStartIcon = PropSpawner._lineStartIcon.get(id);
+        if (lineStartIcon) {
+            try { mod.UnspawnObject(lineStartIcon as unknown as mod.Object); } catch { }
+            PropSpawner._lineStartIcon.delete(id);
+        }
+        const lineEndIcon = PropSpawner._lineEndIcon.get(id);
+        if (lineEndIcon) {
+            try { mod.UnspawnObject(lineEndIcon as unknown as mod.Object); } catch { }
+            PropSpawner._lineEndIcon.delete(id);
         }
         // Clean up status icon
         const statusIcon = PropSpawner._statusIcons.get(id);
@@ -12526,7 +12521,8 @@ class PropSpawner {
         PropSpawner._lineCount.delete(id);
         PropSpawner._ratchetAngle.delete(id);
         PropSpawner._ratchetNotch.delete(id);
-        PropSpawner._graceMode.delete(id);
+        PropSpawner._cooldownUntil.delete(id);
+        PropSpawner._pendingEquipmentRefresh.delete(id);
         PropSpawner._lineCursorState.delete(id);
         PropSpawner._lineFrozen.delete(id);
         PropSpawner._lineHintVfx.delete(id);        // object already unspawned by CleanupPlayer
@@ -12637,14 +12633,14 @@ class PropSpawner {
         const icon = PropSpawner._previewIcons.get(id);
         if (!icon) return;
         const config = PropSpawner._GetPropConfig(id);
-        const hasPlaced = PropSpawner._hasPlaced.has(id);
-        const altPhase = hasPlaced && Math.floor(Date.now() / 2000) % 2 === 0;
-        const msg = altPhase
-            ? mod.Message(mod.stringkeys.prop_spawner_undo)
+        const cooldownRemaining = PropSpawner.GetCooldownRemaining(id);
+        const onCooldown = cooldownRemaining > 0 && !PropSpawner._lineMode.has(id);
+        const msg = onCooldown
+            ? MakeMessage((mod.stringkeys as Record<string, string>).prop_spawner_on_cooldown ?? "prop_spawner_on_cooldown", Math.ceil(cooldownRemaining))
             : PropSpawner._GetFireToPlaceMessage(config);
         mod.EnableWorldIconText(icon, false);
         mod.SetWorldIconText(icon, msg);
-        mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+        mod.SetWorldIconColor(icon, onCooldown ? mod.CreateVector(1, 0.6, 0.2) : mod.CreateVector(0.2, 1, 0.2));
         mod.SetWorldIconPosition(icon, pos);
         mod.SetWorldIconOwner(icon, player);
         mod.EnableWorldIconImage(icon, true);
@@ -12719,14 +12715,14 @@ class PropSpawner {
 
     static OnFireStart(player: mod.Player): void {
         const id = mod.GetObjId(player);
-        const inGrace = PropSpawner._graceMode.has(id);
-        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
-        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
-        if (PropSpawner._hasPlaced.has(id)) return;
+        if (!PropSpawner._propIndex.has(id)) return; // doesn't have this gadget equipped
         if (PropSpawner._lineMode.has(id)) {
+            // Confirming an in-progress placement is always allowed -- cooldown only
+            // gates *starting* a new one.
             PropSpawner._FinalizeLinePlacement(player);
             return;
         }
+        if (PropSpawner.GetCooldownRemaining(id) > 0) return;
         if (PropSpawner._raycastInFlight.has(id)) {
             PropSpawner._raycastPurpose.set(id, "spawn");
         } else {
@@ -12744,9 +12740,22 @@ class PropSpawner {
     static OngoingTick(player: mod.Player): void {
         if (!mod.IsPlayerValid(player)) return;
         const id = mod.GetObjId(player);
-        const inGrace = PropSpawner._graceMode.has(id);
-        if (!GameHandler.propPlacementPhaseActive && !inGrace) return;
-        if (!PropSpawner._propIndex.has(id) && !inGrace) return;
+        if (!PropSpawner._propIndex.has(id)) return;
+
+        // Safety net: normally flushed directly from finalize/cancel, but catch any case where
+        // line mode ended some other way without going through either.
+        if (!PropSpawner._lineMode.has(id)) {
+            PropSpawner._FlushDeferredEquipmentRefresh(player);
+        }
+
+        // Only actively preview/raycast while the gadget is the player's held weapon.
+        // Owning the gadget in loadout no longer implies a mandatory placement phase, so
+        // without this check every survivor who ever rolled it would raycast in the
+        // background for the entire round regardless of what weapon they're actually using.
+        if (!PropSpawner._lineMode.has(id) && !mod.IsInventorySlotActive(player, mod.InventorySlots.GadgetOne)) {
+            PropSpawner._HidePreviewIcon(id);
+            return;
+        }
 
         if (PropSpawner._lineMode.has(id)) {
             const anchorPos = PropSpawner._lineAnchorPos.get(id);
@@ -12858,7 +12867,7 @@ class PropSpawner {
                             PropSpawner._RotateAnchorProp(player, lineDir);
                             const facingYaw = mod.YComponentOf(PropSpawner._lineAnchorRot.get(id) ?? PROP_SPAWNER_ZERO_VEC);
                             const effectiveStep = PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config);
-                            const count = PropSpawner._ComputeLineCount(anchorPos, cursorPos, effectiveStep);
+                            const count = PropSpawner._ComputeLineCount(anchorPos, cursorPos, effectiveStep, config.maxLineProps);
                             const prevRatchetCount = PropSpawner._lineCount.get(id) ?? 1;
                             PropSpawner._UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
 
@@ -12909,7 +12918,6 @@ class PropSpawner {
         }
 
         if (PropSpawner._raycastInFlight.has(id)) return;
-        try { mod.ForceSwitchInventory(player, mod.InventorySlots.GadgetOne); } catch { }
         const tick = (PropSpawner._previewTick.get(id) ?? 0) + 1;
         PropSpawner._previewTick.set(id, tick);
         if (tick % PROP_SPAWNER_PREVIEW_TICK_INTERVAL !== 0) return;
@@ -12987,7 +12995,7 @@ class PropSpawner {
 
     static OnLaserToggle(player: mod.Player, _eventBoolean: boolean): void {
         const id = mod.GetObjId(player);
-        if (!GameHandler.propPlacementPhaseActive && !PropSpawner._graceMode.has(id)) return;
+        if (!PropSpawner._propIndex.has(id)) return;
         if (!PropSpawner._lineMode.has(id)) return;
         // Laser toggle is undo: cancel the in-progress anchor placement.
         PropSpawner._CancelLinePlacement(player);
@@ -13018,9 +13026,9 @@ class PropSpawner {
         return config.width * Math.abs(Math.sin(angle)) + config.depth * Math.abs(Math.cos(angle));
     }
 
-    private static _ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiveStep: number): number {
+    private static _ComputeLineCount(anchorPos: mod.Vector, cursorPos: mod.Vector, effectiveStep: number, maxLineProps: number): number {
         const dist = PropSpawner._HorizontalDistance(anchorPos, cursorPos);
-        const additional = Math.min(Math.floor(dist / effectiveStep), PROP_SPAWNER_MAX_LINE_PROPS - 1);
+        const additional = Math.min(Math.floor(dist / effectiveStep), maxLineProps - 1);
         return 1 + additional;
     }
 
@@ -13041,6 +13049,15 @@ class PropSpawner {
         if (sfxObj) mod.PlaySound(sfxObj, amplitude, pos, PROP_SPAWNER_RATCHET_ATTEN);
     }
 
+    private static _LineSlotPosition(anchorPos: mod.Vector, lineDir: mod.Vector, slotIndex: number, effectiveStep: number): mod.Vector {
+        const offset = slotIndex * effectiveStep;
+        return mod.CreateVector(
+            mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
+            mod.YComponentOf(anchorPos),
+            mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
+        );
+    }
+
     private static _UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
         const id = mod.GetObjId(player);
         const config = PropSpawner._GetPropConfig(id);
@@ -13048,47 +13065,21 @@ class PropSpawner {
         // Direction is now committed — unspawn side torches (per-slot VFX takes over).
         PropSpawner._UnspawnSideTorches(id);
 
-        let icons = PropSpawner._linePreviewIcons.get(id);
-        if (!icons) {
-            icons = [];
-            PropSpawner._linePreviewIcons.set(id, icons);
-        }
-        while (icons.length < PROP_SPAWNER_MAX_LINE_PROPS - 1) {
-            const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, anchorPos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
-            if (!icon) break;
-            mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
-            mod.SetWorldIconOwner(icon, player);
-            mod.EnableWorldIconImage(icon, false);
-            mod.EnableWorldIconText(icon, false);
-            icons.push(icon);
-        }
-
         let slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
         if (!slotConfirmList) { slotConfirmList = []; PropSpawner._lineSlotConfirmVfx.set(id, slotConfirmList); }
         let slotTorchList = PropSpawner._lineSlotTorchVfx.get(id);
         if (!slotTorchList) { slotTorchList = []; PropSpawner._lineSlotTorchVfx.set(id, slotTorchList); }
 
-        for (let i = 0; i < icons.length; i++) {
+        const maxSlots = config.maxLineProps - 1;
+        for (let i = 0; i < maxSlots; i++) {
             const slotIndex = i + 1;
-            const icon = icons[i];
-            const offset = slotIndex * effectiveStep;
-            const pos = mod.CreateVector(
-                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * offset,
-                mod.YComponentOf(anchorPos),
-                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * offset
-            );
+            const pos = PropSpawner._LineSlotPosition(anchorPos, lineDir, slotIndex, effectiveStep);
             const prevConfirm = slotConfirmList[i] as mod.VFX | undefined;
             const prevTorch   = slotTorchList[i]   as mod.VFX | undefined;
 
             if (slotIndex < count) {
-                // Slot is queued: show icon + confirm VFX, remove torch.
-                mod.EnableWorldIconText(icon, false);
-                mod.SetWorldIconText(icon, PropSpawner._GetPropPreviewMessage(config));
-                mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
-                mod.SetWorldIconPosition(icon, pos);
-                mod.SetWorldIconOwner(icon, player);
-                mod.EnableWorldIconImage(icon, true);
-                mod.EnableWorldIconText(icon, true);
+                // Slot is queued: show confirm VFX, remove torch. (World icon handled separately
+                // below -- only the first and last queued slots get one, not every slot.)
                 if (!prevConfirm) {
                     const cv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_CONFIRM, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
                     if (cv) mod.EnableVFX(cv, true);
@@ -13103,9 +13094,7 @@ class PropSpawner {
                     slotTorchList[i] = undefined as unknown as mod.VFX;
                 }
             } else {
-                // Slot not queued: hide icon + confirm, show torch only for the immediately next slot.
-                mod.EnableWorldIconImage(icon, false);
-                mod.EnableWorldIconText(icon, false);
+                // Slot not queued: hide confirm, show torch only for the immediately next slot.
                 if (prevConfirm) {
                     mod.EnableVFX(prevConfirm, false);
                     try { mod.UnspawnObject(prevConfirm as unknown as mod.Object); } catch { }
@@ -13129,28 +13118,89 @@ class PropSpawner {
             }
         }
 
+        PropSpawner._UpdateLineEndpointIcons(player, config, anchorPos, lineDir, count, effectiveStep);
+
         const prevCount = PropSpawner._lineCount.get(id) ?? 1;
         if (count > prevCount) {
-            const newSlotOffset = (count - 1) * effectiveStep;
-            const newSlotPos = mod.CreateVector(
-                mod.XComponentOf(anchorPos) + mod.XComponentOf(lineDir) * newSlotOffset,
-                mod.YComponentOf(anchorPos),
-                mod.ZComponentOf(anchorPos) + mod.ZComponentOf(lineDir) * newSlotOffset
-            );
+            const newSlotPos = PropSpawner._LineSlotPosition(anchorPos, lineDir, count - 1, effectiveStep);
             PropSpawner._PlaySFX2DForPlayer(PROP_SPAWNER_SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
         }
         PropSpawner._lineCount.set(id, count);
     }
 
+    /** Only the first queued slot ("start") and the last queued slot ("end") get a world icon --
+     *  everything in between is left to the confirm/torch VFX above. When exactly one slot is
+     *  queued, start and end are the same position, so only the start icon is shown. */
+    private static _UpdateLineEndpointIcons(
+        player: mod.Player,
+        config: PropSpawnerConfig,
+        anchorPos: mod.Vector,
+        lineDir: mod.Vector,
+        count: number,
+        effectiveStep: number,
+    ): void {
+        const id = mod.GetObjId(player);
+
+        if (count < 2) {
+            PropSpawner._HideLineEndpointIcons(id);
+            return;
+        }
+
+        const startSlot = 1;
+        const endSlot = count - 1;
+        const previewMsg = PropSpawner._GetPropPreviewMessage(config);
+
+        const showEndpointIcon = (
+            getter: Map<number, mod.WorldIcon>,
+            slotIndex: number,
+        ): void => {
+            const pos = PropSpawner._LineSlotPosition(anchorPos, lineDir, slotIndex, effectiveStep);
+            let icon = getter.get(id);
+            if (!icon) {
+                icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, PROP_SPAWNER_ZERO_VEC) as mod.WorldIcon;
+                if (!icon) return;
+                mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+                mod.SetWorldIconOwner(icon, player);
+                getter.set(id, icon);
+            }
+            mod.EnableWorldIconText(icon, false);
+            mod.SetWorldIconText(icon, previewMsg);
+            mod.SetWorldIconColor(icon, mod.CreateVector(0.2, 1, 0.2));
+            mod.SetWorldIconPosition(icon, pos);
+            mod.SetWorldIconOwner(icon, player);
+            mod.EnableWorldIconImage(icon, true);
+            mod.EnableWorldIconText(icon, true);
+        };
+
+        showEndpointIcon(PropSpawner._lineStartIcon, startSlot);
+
+        if (endSlot === startSlot) {
+            PropSpawner._HideLineEndIcon(id);
+        } else {
+            showEndpointIcon(PropSpawner._lineEndIcon, endSlot);
+        }
+    }
+
+    private static _HideLineEndIcon(id: number): void {
+        const endIcon = PropSpawner._lineEndIcon.get(id);
+        if (endIcon) {
+            mod.EnableWorldIconImage(endIcon, false);
+            mod.EnableWorldIconText(endIcon, false);
+        }
+    }
+
+    private static _HideLineEndpointIcons(id: number): void {
+        const startIcon = PropSpawner._lineStartIcon.get(id);
+        if (startIcon) {
+            mod.EnableWorldIconImage(startIcon, false);
+            mod.EnableWorldIconText(startIcon, false);
+        }
+        PropSpawner._HideLineEndIcon(id);
+    }
+
     private static _HideLinePreviews(player: mod.Player): void {
         const id = mod.GetObjId(player);
-        const icons = PropSpawner._linePreviewIcons.get(id);
-        if (icons) {
-            for (const icon of icons) {
-                mod.EnableWorldIconImage(icon, false);
-                mod.EnableWorldIconText(icon, false);
-            }
-        }
+        PropSpawner._HideLineEndpointIcons(id);
         const slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
         if (slotConfirmList) {
             for (const sv of slotConfirmList) if (sv) mod.EnableVFX(sv, false);
@@ -13274,10 +13324,8 @@ class PropSpawner {
             })();
         }
 
-        // Mark placed for phase progress on first finalize
-        if (!PropSpawner._hasPlaced.has(id)) {
-            PropSpawner._hasPlaced.add(id);
-        }
+        // Start the cooldown before this player can place again.
+        PropSpawner._cooldownUntil.set(id, (Date.now() / 1000) + PROP_SPAWNER_COOLDOWN_SECONDS);
 
         // Advance prop cycle index so next row uses the next prop
         const currentIdx = PropSpawner._propIndex.get(id) ?? 0;
@@ -13309,12 +13357,8 @@ class PropSpawner {
         PropSpawner._HideStatusIcon(id);
         PropSpawner._HidePreviewIcon(id);
 
-        // If we're past the countdown (grace mode), strip the gadget now.
-        if (PropSpawner._graceMode.has(id)) {
-            PropSpawner._CleanupPreviewIcon(id);
-            PropSpawner._CleanupPlayerState(id);
-            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
-        }
+        // Placement is done -- apply any equipment refresh that was held back while it was in progress.
+        PropSpawner._FlushDeferredEquipmentRefresh(player);
     }
 
     private static _CancelLinePlacement(player: mod.Player): void {
@@ -13351,21 +13395,8 @@ class PropSpawner {
         PropSpawner._HideStatusIcon(id);
         PropSpawner._HidePreviewIcon(id);
 
-        // If we're past the countdown (grace mode), strip the gadget on cancel too.
-        if (PropSpawner._graceMode.has(id)) {
-            PropSpawner._CleanupPreviewIcon(id);
-            PropSpawner._CleanupPlayerState(id);
-            if (Helpers.HasValidObjId(player)) PropSpawner._RemoveGadgetAndCleanup(player);
-        }
-    }
-
-    private static _RemoveGadgetAndCleanup(player: mod.Player): void {
-        try { mod.RemoveEquipment(player, mod.Gadgets.Misc_PortalGadget); } catch { }
-        const pp = PlayerProfile.Get(player);
-        const gadgetItem = pp?.chosenLoadoutThisRound?.find(item => item.inventorySlot === InventorySlot.Gadget);
-        if (gadgetItem?.gadget) {
-            try { mod.AddEquipment(player, gadgetItem.gadget as mod.Gadgets); } catch { }
-        }
+        // Placement is done -- apply any equipment refresh that was held back while it was in progress.
+        PropSpawner._FlushDeferredEquipmentRefresh(player);
     }
 }
 
