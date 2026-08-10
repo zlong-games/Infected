@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.07.010";
+const VERSION = "1.08.010";
 
 /*
 //
