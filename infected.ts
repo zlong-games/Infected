@@ -402,8 +402,7 @@ const SANDSTORM_LOOP_SFX_MIN_AMPLITUDE = 0.02;
 let SPAWNED_ACTIVE_VEHICLE: mod.Vehicle | undefined = undefined;
 let BOT_SURVIVAL_TEST_VEHICLE_SPAWN_REQUEST_ID = 0;
 
-// Vehicle spawner IDs to randomly pick from when final five triggers
-const VEHICLE_SPAWNER_IDS: number[] = [202, 203];
+const VEHICLE_SPAWNER_IDS: number[] = [202, 203, 204];
 
 // Pool of vehicle types randomly selected each time the final five vehicle spawns
 const VEHICLE_TYPES: mod.VehicleList[] = [
@@ -1358,13 +1357,13 @@ class Weapons {
     static baseSurvivorGadgets: PooledItemDef[] = [
         { nameKey: "flash_grenade", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Flash_Grenade },
         { nameKey: "prop_spawner_gadget", rarity: 5, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
-        /*{ nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
+        { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
         { nameKey: "supply_pouch", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
         { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         { nameKey: "thermobaric_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
         { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
-        */
+        
         // { nameKey: "frag_grenade_mini", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Mini_Frag_Grenade },
         // { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
         // { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
@@ -8440,10 +8439,6 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
 function RefreshHumanEquipment(eventPlayer: mod.Player, playerProfile: PlayerProfile) {
     if (!PlayerIsAliveAndValid(eventPlayer) || SafeIsAISoldier(eventPlayer)) return;
 
-    // Don't interrupt an in-progress prop placement -- ripping every slot (including the
-    // gadget currently in their hands) out mid-row-edit is jarring and can strand the
-    // already-placed anchor. Defer until they finish; PropSpawner flushes this once the
-    // placement is finalized or cancelled (see PropSpawner._FlushDeferredEquipmentRefresh).
     if (PropSpawner.IsMidPlacement(eventPlayer)) {
         PropSpawner.DeferEquipmentRefresh(eventPlayer, playerProfile);
         return;
