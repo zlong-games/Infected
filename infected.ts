@@ -1592,6 +1592,30 @@ class Weapons {
         };
     }
 
+    /**
+     * Regenerates the weapon options for a single inventory slot (used by the loadout
+     * re-roll button). Only the requested slot's pool is touched - the other
+     * previously-generated slot options are left untouched.
+     */
+    static RerollSlotOptions(slot: InventorySlot, count: number = 3): EquippedItem[] {
+        switch (slot) {
+            case InventorySlot.Primary: {
+                const primaryWeapons = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.primary);
+                return Weapons.buildWeaponOptions(primaryWeapons, InventorySlot.Primary, count);
+            }
+            case InventorySlot.LMS: {
+                const lmsWeapons = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.LMS);
+                return Weapons.buildWeaponOptions(lmsWeapons, InventorySlot.LMS, count);
+            }
+            case InventorySlot.Sidearm: {
+                const sidearmWeapons = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.sidearm);
+                return Weapons.buildWeaponOptions(sidearmWeapons, InventorySlot.Sidearm, count);
+            }
+            default:
+                return [];
+        }
+    }
+
     static getRandomWeaponFromRarity(weapons: Array<PooledItemDef>, excludeNames: Array<string> = []): PooledItemDef | undefined {
         const filteredWeapons = weapons.filter(w => !excludeNames.includes(w.nameKey));
 
@@ -2886,6 +2910,10 @@ class LoadoutSelectionMenu {
     private currentSlotIndex: number = 0;
     private revealToken: number = 0;
     private selectedSlots: Map<InventorySlot, EquippedItem> = new Map();
+    private rerollsRemaining: number = 1;
+    private rerollButton: mod.UIWidget | undefined;
+    private rerollButtonText: mod.UIWidget | undefined;
+    private rerollStatusText: mod.UIWidget | undefined;
     private readonly slotOrder: InventorySlot[] = [
         InventorySlot.Sidearm,
         InventorySlot.Primary,
@@ -2896,7 +2924,7 @@ class LoadoutSelectionMenu {
     loadoutOptions: SlotLoadoutOptions | undefined;
 
     width = 1200;
-    height = 420;
+    height = 480;
     rowWidth = this.width * 0.9;
     rowHeight = 170;
     padding = 20;
@@ -2932,6 +2960,7 @@ class LoadoutSelectionMenu {
         this.hasConfirmedLoadout = false;
         this.currentSlotIndex = 0;
         this.selectedSlots.clear();
+        this.rerollsRemaining = 1;
 
         if (!this.rootWidget) {
             this.rootWidget = this.CreateBaseUI() as mod.UIWidget;
@@ -2942,6 +2971,7 @@ class LoadoutSelectionMenu {
 
         // Build the option cards for the current slot
         this.BuildLoadoutCards();
+        this.UpdateRerollUI();
 
         if (this.tipText) {
             mod.SetUITextLabel(this.tipText, this.GetRandomTipMessage());
@@ -2993,6 +3023,49 @@ class LoadoutSelectionMenu {
             this.BuildLoadoutCards();
         } else {
             this.ConfirmSelection();
+        }
+    }
+
+    UseReroll() {
+        if (this.rerollsRemaining <= 0) return;
+        if (!this.loadoutOptions) return;
+
+        const slot = this.slotOrder[this.currentSlotIndex];
+        const newOptions = Weapons.RerollSlotOptions(slot, 3);
+        if (newOptions.length === 0) return;
+
+        switch (slot) {
+            case InventorySlot.Primary:
+                this.loadoutOptions.primaryOptions = newOptions;
+                break;
+            case InventorySlot.LMS:
+                this.loadoutOptions.lmsOptions = newOptions;
+                break;
+            case InventorySlot.Sidearm:
+                this.loadoutOptions.sidearmOptions = newOptions;
+                break;
+        }
+
+        // Prior selection for this slot no longer matches the newly rolled options
+        this.selectedSlots.delete(slot);
+        this._PlayerProfile.chosenLoadoutThisRound = this.BuildCurrentLoadout(false);
+
+        this.rerollsRemaining--;
+        this.UpdateRerollUI();
+
+        // Rebuild the cards for the currently presented category; this replays the reveal animation
+        this.BuildLoadoutCards();
+    }
+
+    private UpdateRerollUI() {
+        if (this.rerollStatusText) {
+            const message = this.rerollsRemaining > 0
+                ? MakeMessage(mod.stringkeys.loadout_reroll_remaining_one)
+                : MakeMessage(mod.stringkeys.loadout_reroll_remaining_zero);
+            mod.SetUITextLabel(this.rerollStatusText, message);
+        }
+        if (this.rerollButton) {
+            mod.SetUIButtonEnabled(this.rerollButton, this.rerollsRemaining > 0);
         }
     }
 
@@ -3186,6 +3259,42 @@ class LoadoutSelectionMenu {
                     bgAlpha: 0,
                 },
                 {
+                    type: "Button",
+                    name: `loadout_reroll_btn_${this._PlayerProfile.playerID}`,
+                    position: [0, 350],
+                    size: [220, 34],
+                    anchor: mod.UIAnchor.TopCenter,
+                    bgFill: mod.UIBgFill.GradientBottom,
+                    bgColor: UI.battlefieldGreyBg,
+                    bgAlpha: 0.9,
+                    depth: mod.UIDepth.AboveGameUI,
+                    playerId: this._PlayerProfile.player,
+                },
+                {
+                    type: "Text",
+                    name: `loadout_reroll_btn_text_${this._PlayerProfile.playerID}`,
+                    position: [0, 350],
+                    size: [220, 34],
+                    anchor: mod.UIAnchor.TopCenter,
+                    textAnchor: mod.UIAnchor.Center,
+                    textLabel: MakeMessage(mod.stringkeys.loadout_reroll_button),
+                    textSize: 18,
+                    textColor: UI.battlefieldWhiteAlt,
+                    bgAlpha: 0,
+                },
+                {
+                    type: "Text",
+                    name: `loadout_reroll_status_${this._PlayerProfile.playerID}`,
+                    position: [0, 388],
+                    size: [this.width, 20],
+                    anchor: mod.UIAnchor.TopCenter,
+                    textAnchor: mod.UIAnchor.Center,
+                    textLabel: MakeMessage(mod.stringkeys.loadout_reroll_remaining_one),
+                    textSize: 16,
+                    textColor: UI.battlefieldGrey,
+                    bgAlpha: 0,
+                },
+                {
                     type: "Text",
                     name: `loadout_select_tips_${this._PlayerProfile.playerID}`,
                     position: [0, 20],
@@ -3205,6 +3314,9 @@ class LoadoutSelectionMenu {
             this.slotLabelText = mod.FindUIWidgetWithName(`loadout_select_slot_${this._PlayerProfile.playerID}`) as mod.UIWidget;
             this.cycleText = mod.FindUIWidgetWithName(`loadout_select_cycle_${this._PlayerProfile.playerID}`) as mod.UIWidget;
             this.tipText = mod.FindUIWidgetWithName(`loadout_select_tips_${this._PlayerProfile.playerID}`) as mod.UIWidget;
+            this.rerollButton = mod.FindUIWidgetWithName(`loadout_reroll_btn_${this._PlayerProfile.playerID}`) as mod.UIWidget;
+            this.rerollButtonText = mod.FindUIWidgetWithName(`loadout_reroll_btn_text_${this._PlayerProfile.playerID}`) as mod.UIWidget;
+            this.rerollStatusText = mod.FindUIWidgetWithName(`loadout_reroll_status_${this._PlayerProfile.playerID}`) as mod.UIWidget;
         }
 
         return rootWidget;
@@ -11716,6 +11828,11 @@ export function OnPlayerUIButtonEvent(
                 playerProfile?.loadoutSelectionUI?.SelectOption(index);
                 Helpers.PlaySoundFX(SFX_LOADOUT_SELECT, 1, eventPlayer);
             }
+        }
+    } else if (widgetName.includes('loadout_reroll_btn_')) {
+        if (eventUIButtonEvent === mod.UIButtonEvent.ButtonUp) {
+            playerProfile?.loadoutSelectionUI?.UseReroll();
+            Helpers.PlaySoundFX(SFX_LOADOUT_SELECT, 1, eventPlayer);
         }
     }
 }
