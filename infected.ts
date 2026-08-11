@@ -131,8 +131,8 @@ const SFX_ALPHA_LEAP_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_G
 const SFX_ALPHA_LEAP_VEHICLE_WARNING_LOOP_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_GameModes_BR_Mission_Wreckage_BombBeeping_Loop_SimpleLoop3D;
 const SFX_ALPHA_LEAP_EXECUTE_WARN_3D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Fire_OneShot3D;
 // Played (targeted to the alpha player only) when they cross in/out of the leap attack area trigger.
-const SFX_ALPHA_LEAP_AREA_ENTER_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_ObjectiveOnEnter_OneShot2D;
-const SFX_ALPHA_LEAP_AREA_EXIT_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_ObjectiveOnExit_OneShot2D;
+const SFX_ALPHA_LEAP_AREA_ENTER_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_CaptureNeutralize_OneShot2D;
+const SFX_ALPHA_LEAP_AREA_EXIT_2D: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gamemode_Shared_CaptureObjectives_CaptureStartedByEnemy_OneShot2D;
 
 // The only other AreaTrigger placed in Sand2 besides the vault-kill trigger (9091) -- already
 // used to boost infected AI sprint speed while chasing a vehicle target (see
@@ -147,11 +147,13 @@ const SFX_ROUND_COUNTDOWN: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX
 const SFX_AMMO_FULL: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_DataUpload_DataDepositStop_OneShot2D;
 const SFX_ACTION_BLOCKED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Map_MapMovement_ZoomBlocked_OneShot2D;
 const SFX_LOADOUT_SELECT: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Loadout_ClickSelectLoadout_OneShot2D;
+const SFX_LOADOUT_REROLL: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Challenges_RerollConfirm_OneShot2D;
 const SFX_LOADOUT_HOVER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Home_PlayItemHover_OneShot2D;
 const SFX_LOADOUT_CONFIRM: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Loadout_ScreenArrive_OneShot2D;
-const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_EOR_XP_OneShot2D;
-const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Gauntlet_EOM_ReinforcementCardReveal_OneShot2D;
-const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_FieldUpgrade_Main_OneShot2D;
+const SFX_LOADOUT_REVEAL_COMMON: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_EOR_RankUp_Normal_OneShot2D;
+const SFX_LOADOUT_REVEAL_RARE: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_Primary_C_2D;
+const SFX_LOADOUT_REVEAL_LEGENDARY: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_Primary_G_2D;
+const SFX_LOADOUT_REVEAL_COUNTER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Notification_SectorBonus_NumberChange_OneShot2D;
 const SFX_SLEDGE_REMINDER: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_MenuNavigation_Notification_ToasterPopUp_OneShot2D;
 const SFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.SFX_UI_Deploy_Screen_ActionSuccess_OneShot2D;
 const VFX_PROP_PLACED: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Impact_SafeImpact_Generic;
@@ -2909,6 +2911,9 @@ class LoadoutSelectionMenu {
     private isOpen: boolean = false;
     private currentSlotIndex: number = 0;
     private revealToken: number = 0;
+    // The looping "counting" sfx object currently playing ahead of a card reveal, if any.
+    // Tracked so it can be stopped immediately on interruption instead of looping forever.
+    private activeCounterSfx: mod.SFX | undefined;
     private selectedSlots: Map<InventorySlot, EquippedItem> = new Map();
     private rerollsRemaining: number = 1;
     private rerollButton: mod.UIWidget | undefined;
@@ -2990,6 +2995,9 @@ class LoadoutSelectionMenu {
     }
 
     Close() {
+        // Stop any in-flight reveal (queued counter sfx + pending card reveals) so nothing
+        // keeps playing after the menu is no longer visible.
+        this.InterruptReveal();
         if (this.rootWidget) {
             mod.SetUIWidgetVisible(this.rootWidget, false);
             mod.EnableUIInputMode(false, this._PlayerProfile.player);
@@ -2998,6 +3006,7 @@ class LoadoutSelectionMenu {
     }
 
     Delete() {
+        this.InterruptReveal();
         if (this.rootWidget) {
             mod.DeleteUIWidget(this.rootWidget);
             this.rootWidget = undefined;
@@ -3007,12 +3016,28 @@ class LoadoutSelectionMenu {
         if (i !== -1) LoadoutSelectionMenu.instances.splice(i, 1);
     }
 
+    // Cancels any pending card-reveal animation (RevealCardsSequentially) and immediately
+    // stops the looping "counting" sfx if one is mid-playback. Called whenever a selection
+    // is made before all options finish revealing, and whenever the menu closes, so sounds
+    // never double up or keep playing after the fact.
+    private InterruptReveal(): void {
+        this.revealToken++;
+        if (this.activeCounterSfx) {
+            try { mod.StopSound(this.activeCounterSfx, this._PlayerProfile.player); } catch { }
+            this.activeCounterSfx = undefined;
+        }
+    }
+
     SelectOption(index: number) {
         if (!this.loadoutOptions) return;
         const slot = this.slotOrder[this.currentSlotIndex];
         const options = this.GetOptionsForSlot(slot);
         const selected = options[index];
         if (!selected) return;
+
+        // Player chose before all cards finished revealing - stop the pending reveal(s)
+        // and any currently-looping counter sfx right away.
+        this.InterruptReveal();
 
         this.selectedSlots.set(slot, selected);
         this._PlayerProfile.chosenLoadoutThisRound = this.BuildCurrentLoadout(false);
@@ -3394,12 +3419,32 @@ class LoadoutSelectionMenu {
     ) {
         for (const card of cards) {
             if (token !== this.revealToken) return;
-            const isLegendary = (card.item.rarity ?? 0) >= 90;
-            const revealDelay = isLegendary ? 1.3 : 0.9;
+            const isLegendary = (card.item.rarity ?? 0) >= RARITY_LEGENDARY_THRESHOLD;
+            const revealDelay = isLegendary ? 1.1 : 0.9;
+
+            // Looping "counting" sfx plays for the duration of the delay leading up to this
+            // card's reveal. Tracked on the instance so InterruptReveal() can stop it the
+            // moment a selection is made, rather than letting a loop sound run indefinitely.
+            const counterSfx = mod.SpawnObject(SFX_LOADOUT_REVEAL_COUNTER, POSITION_HQ1, ZERO_VEC) as mod.SFX;
+            if (counterSfx) {
+                mod.PlaySound(counterSfx, 1, this._PlayerProfile.player);
+                this.activeCounterSfx = counterSfx;
+            }
+
             await mod.Wait(revealDelay);
+
+            // Stop this card's counter loop regardless of whether we're still the active reveal
+            if (this.activeCounterSfx === counterSfx) {
+                try { mod.StopSound(counterSfx, this._PlayerProfile.player); } catch { }
+                this.activeCounterSfx = undefined;
+            }
+
+            if (token !== this.revealToken) return;
+
             this.PlayRevealSfxForRarity(card.item.rarity);
             mod.SetUIWidgetVisible(card.widget, true);
             mod.SetUIWidgetVisible(card.button, true);
+            if (isLegendary) await mod.Wait(3);
         }
     }
 
@@ -11830,10 +11875,8 @@ export function OnPlayerUIButtonEvent(
             }
         }
     } else if (widgetName.includes('loadout_reroll_btn_')) {
-        if (eventUIButtonEvent === mod.UIButtonEvent.ButtonUp) {
-            playerProfile?.loadoutSelectionUI?.UseReroll();
-            Helpers.PlaySoundFX(SFX_LOADOUT_SELECT, 1, eventPlayer);
-        }
+        playerProfile?.loadoutSelectionUI?.UseReroll();
+        Helpers.PlaySoundFX(SFX_LOADOUT_REROLL, 1, eventPlayer);
     }
 }
 
@@ -12507,6 +12550,10 @@ class PropSpawner {
     static readonly _lineSlotTorchVfx: Map<number, mod.VFX[]> = new Map();
     // Two torch VFX on either side of the anchor shown as soon as the player enters ADS.
     static readonly _lineSideTorchVfx: Map<number, mod.VFX[]> = new Map();
+    // 0-based index into _lineSlotConfirmVfx currently being live-updated while the player
+    // actively drags (unfrozen line/cursor mode). Only this one slot's confirm VFX is
+    // spawned/moved per aim tick -- see _UpdateLastLineSlotLive / _RevealAllLineSlots.
+    static readonly _lineLiveSlotIdx: Map<number, number> = new Map();
 
     static HasRaycastInFlight(id: number): boolean {
         return PropSpawner._raycastInFlight.has(id);
@@ -12641,6 +12688,7 @@ class PropSpawner {
         PropSpawner._lineSlotConfirmVfx.delete(id); // objects already unspawned by CleanupPlayer
         PropSpawner._lineSlotTorchVfx.delete(id);   // objects already unspawned by CleanupPlayer
         PropSpawner._lineSideTorchVfx.delete(id);   // objects already unspawned by CleanupPlayer
+        PropSpawner._lineLiveSlotIdx.delete(id);
     }
 
     private static _HidePreviewIcon(id: number): void {
@@ -12822,6 +12870,19 @@ class PropSpawner {
             PropSpawner._lineFrozen.add(id);
             PropSpawner._UnspawnSideTorches(id);
             PropSpawner._UnspawnSlotTorches(id);
+
+            // Leaving active line/cursor mode: fully reconcile every in-between queued slot's
+            // VFX now that per-tick updates are paused (see _UpdateLastLineSlotLive).
+            const anchorPos = PropSpawner._lineAnchorPos.get(id);
+            const lineDir = PropSpawner._lineDir.get(id);
+            const count = PropSpawner._lineCount.get(id) ?? 1;
+            if (anchorPos && lineDir && count > 1) {
+                const anchorRot = PropSpawner._lineAnchorRot.get(id);
+                const facingYaw = anchorRot !== undefined ? mod.YComponentOf(anchorRot) : 0;
+                const config = PropSpawner._GetPropConfig(id);
+                const effectiveStep = PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config);
+                PropSpawner._RevealAllLineSlots(player, anchorPos, lineDir, count, effectiveStep);
+            }
         }
     }
 
@@ -12981,7 +13042,7 @@ class PropSpawner {
                             const effectiveStep = PropSpawner._ComputeEffectiveStep(lineDir, facingYaw, config);
                             const count = PropSpawner._ComputeLineCount(anchorPos, cursorPos, effectiveStep, config.maxLineProps);
                             const prevRatchetCount = PropSpawner._lineCount.get(id) ?? 1;
-                            PropSpawner._UpdateLinePreviews(player, anchorPos, lineDir, count, effectiveStep);
+                            PropSpawner._UpdateLastLineSlotLive(player, anchorPos, lineDir, count, effectiveStep);
 
                             if (count === 1) {
                                 PropSpawner._HideStatusIcon(id);
@@ -13170,65 +13231,47 @@ class PropSpawner {
         );
     }
 
-    private static _UpdateLinePreviews(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
+    /** Per-tick preview update while the player is actively dragging (unfrozen line/cursor
+     *  mode). Only the most-recently-queued ("last") slot's confirm VFX and the start/end
+     *  world icons are spawned/moved here -- re-issuing MoveVFX/SpawnObject for every queued
+     *  slot on every single aim tick was the per-tick cost that made things feel laggy once
+     *  2+ props were queued. Earlier queued ("in-between") slots are left exactly where they
+     *  are while dragging, and are fully reconciled in one pass by _RevealAllLineSlots() once
+     *  the player leaves line/cursor mode (see OnAimStop). The aim-tracking hint/status icon
+     *  is handled separately by _ShowStatusIcon and always tracks the player's current aim. */
+    private static _UpdateLastLineSlotLive(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
         const id = mod.GetObjId(player);
         const config = PropSpawner._GetPropConfig(id);
 
-        // Direction is now committed — unspawn side torches (per-slot VFX takes over).
+        // Direction is now committed — unspawn side torches and any leftover next-slot torch
+        // preview; that hint is no longer spawned/moved live (see class doc above).
         PropSpawner._UnspawnSideTorches(id);
+        PropSpawner._UnspawnSlotTorches(id);
 
         let slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
         if (!slotConfirmList) { slotConfirmList = []; PropSpawner._lineSlotConfirmVfx.set(id, slotConfirmList); }
-        let slotTorchList = PropSpawner._lineSlotTorchVfx.get(id);
-        if (!slotTorchList) { slotTorchList = []; PropSpawner._lineSlotTorchVfx.set(id, slotTorchList); }
 
-        const maxSlots = config.maxLineProps - 1;
-        for (let i = 0; i < maxSlots; i++) {
-            const slotIndex = i + 1;
-            const pos = PropSpawner._LineSlotPosition(anchorPos, lineDir, slotIndex, effectiveStep);
-            const prevConfirm = slotConfirmList[i] as mod.VFX | undefined;
-            const prevTorch   = slotTorchList[i]   as mod.VFX | undefined;
+        const lastIdx = count - 2; // 0-based index of the most recently queued slot; -1 while only the anchor is queued
+        const prevLiveIdx = PropSpawner._lineLiveSlotIdx.get(id);
+        if (prevLiveIdx !== undefined && prevLiveIdx !== lastIdx) {
+            // Cheap visibility toggle for the slot that was live a moment ago -- no spawn/move.
+            const prevVfx = slotConfirmList[prevLiveIdx] as mod.VFX | undefined;
+            if (prevVfx) mod.EnableVFX(prevVfx, false);
+        }
 
-            if (slotIndex < count) {
-                // Slot is queued: show confirm VFX, remove torch. (World icon handled separately
-                // below -- only the first and last queued slots get one, not every slot.)
-                if (!prevConfirm) {
-                    const cv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_CONFIRM, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
-                    if (cv) mod.EnableVFX(cv, true);
-                    slotConfirmList[i] = cv;
-                } else {
-                    mod.MoveVFX(prevConfirm, pos, PROP_SPAWNER_ZERO_VEC);
-                    mod.EnableVFX(prevConfirm, true);
-                }
-                if (prevTorch) {
-                    mod.EnableVFX(prevTorch, false);
-                    try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
-                    slotTorchList[i] = undefined as unknown as mod.VFX;
-                }
+        if (lastIdx >= 0) {
+            const pos = PropSpawner._LineSlotPosition(anchorPos, lineDir, lastIdx + 1, effectiveStep);
+            const prevConfirm = slotConfirmList[lastIdx] as mod.VFX | undefined;
+            if (!prevConfirm) {
+                const cv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_CONFIRM, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                if (cv) mod.EnableVFX(cv, true);
+                slotConfirmList[lastIdx] = cv;
             } else {
-                // Slot not queued: hide confirm, show torch only for the immediately next slot.
-                if (prevConfirm) {
-                    mod.EnableVFX(prevConfirm, false);
-                    try { mod.UnspawnObject(prevConfirm as unknown as mod.Object); } catch { }
-                    slotConfirmList[i] = undefined as unknown as mod.VFX;
-                }
-                if (slotIndex === count) {
-                    if (!prevTorch) {
-                        const tv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_PREVIEW, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
-                        if (tv) mod.EnableVFX(tv, true);
-                        slotTorchList[i] = tv;
-                    } else {
-                        mod.MoveVFX(prevTorch, pos, PROP_SPAWNER_ZERO_VEC);
-                    }
-                } else {
-                    if (prevTorch) {
-                        mod.EnableVFX(prevTorch, false);
-                        try { mod.UnspawnObject(prevTorch as unknown as mod.Object); } catch { }
-                        slotTorchList[i] = undefined as unknown as mod.VFX;
-                    }
-                }
+                mod.MoveVFX(prevConfirm, pos, PROP_SPAWNER_ZERO_VEC);
+                mod.EnableVFX(prevConfirm, true);
             }
         }
+        PropSpawner._lineLiveSlotIdx.set(id, lastIdx);
 
         PropSpawner._UpdateLineEndpointIcons(player, config, anchorPos, lineDir, count, effectiveStep);
 
@@ -13238,6 +13281,41 @@ class PropSpawner {
             PropSpawner._PlaySFX2DForPlayer(PROP_SPAWNER_SFX_CHILD_PREVIEW, 0.7, player, newSlotPos);
         }
         PropSpawner._lineCount.set(id, count);
+    }
+
+    /** Fully reconciles every queued in-between line slot's confirm VFX in one pass. Called
+     *  when the player leaves line/cursor mode (releases ADS) so the whole row is shown
+     *  accurately, without paying that per-slot cost on every aim tick while still dragging
+     *  (see _UpdateLastLineSlotLive). */
+    private static _RevealAllLineSlots(player: mod.Player, anchorPos: mod.Vector, lineDir: mod.Vector, count: number, effectiveStep: number): void {
+        const id = mod.GetObjId(player);
+        const config = PropSpawner._GetPropConfig(id);
+
+        let slotConfirmList = PropSpawner._lineSlotConfirmVfx.get(id);
+        if (!slotConfirmList) { slotConfirmList = []; PropSpawner._lineSlotConfirmVfx.set(id, slotConfirmList); }
+
+        const maxSlots = config.maxLineProps - 1;
+        for (let i = 0; i < maxSlots; i++) {
+            const slotIndex = i + 1;
+            const prevConfirm = slotConfirmList[i] as mod.VFX | undefined;
+            if (slotIndex < count) {
+                const pos = PropSpawner._LineSlotPosition(anchorPos, lineDir, slotIndex, effectiveStep);
+                if (!prevConfirm) {
+                    const cv = mod.SpawnObject(PROP_SPAWNER_VFX_SLOT_CONFIRM, pos, PROP_SPAWNER_ZERO_VEC) as mod.VFX;
+                    if (cv) mod.EnableVFX(cv, true);
+                    slotConfirmList[i] = cv;
+                } else {
+                    mod.MoveVFX(prevConfirm, pos, PROP_SPAWNER_ZERO_VEC);
+                    mod.EnableVFX(prevConfirm, true);
+                }
+            } else if (prevConfirm) {
+                mod.EnableVFX(prevConfirm, false);
+                try { mod.UnspawnObject(prevConfirm as unknown as mod.Object); } catch { }
+                slotConfirmList[i] = undefined as unknown as mod.VFX;
+            }
+        }
+
+        PropSpawner._lineLiveSlotIdx.delete(id);
     }
 
     /** Only the first queued slot ("start") and the last queued slot ("end") get a world icon --
@@ -13318,6 +13396,7 @@ class PropSpawner {
             for (const sv of slotConfirmList) if (sv) mod.EnableVFX(sv, false);
         }
         PropSpawner._UnspawnSlotTorches(id);
+        PropSpawner._lineLiveSlotIdx.delete(id);
         PropSpawner._lineCount.set(id, 1);
     }
 
