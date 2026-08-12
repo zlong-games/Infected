@@ -1359,6 +1359,7 @@ class Weapons {
     static baseSurvivorGadgets: PooledItemDef[] = [
         { nameKey: "flash_grenade", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Flash_Grenade },
         { nameKey: "prop_spawner_gadget", rarity: 5, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
+        { nameKey: "decoy_gadget", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
         { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
         { nameKey: "supply_pouch", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
@@ -3395,17 +3396,18 @@ class LoadoutSelectionMenu {
         const cardWidth = Math.floor((this.rowWidth - (this.padding * 2)) / 3);
         const startX = -this.rowWidth / 2 + (cardWidth / 2);
 
-        const revealItems: Array<{ widget: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }> = [];
+        const revealItems: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }> = [];
 
         for (let i = 0; i < options.length; i++) {
             const item = options[i];
             const xOffset = startX + i * (cardWidth + this.padding);
             const cardHeight = this.rowHeight;
             const card = this.CreateOptionCard(i, item, xOffset, cardWidth, cardHeight);
-            if (card?.cardWidget && card?.buttonWidget) {
+            if (card?.cardWidget && card?.buttonWidget && card?.contentWidget) {
                 mod.SetUIWidgetVisible(card.cardWidget, false);
+                mod.SetUIWidgetVisible(card.contentWidget, false);
                 mod.SetUIWidgetVisible(card.buttonWidget, false);
-                revealItems.push({ widget: card.cardWidget, button: card.buttonWidget, item });
+                revealItems.push({ frame: card.cardWidget, content: card.contentWidget, button: card.buttonWidget, item });
             }
         }
 
@@ -3413,38 +3415,85 @@ class LoadoutSelectionMenu {
         this.RevealCardsSequentially(revealItems, this.revealToken);
     }
 
+    // Pre-roll window: the counter sfx plays once for the whole category, spanning the time
+    // the 3 empty card frames take to blink in.
+    private static readonly FRAME_COUNTER_WINDOW_SECONDS = 1.2;
+    private static readonly FRAME_BLINK_STAGGER_SECONDS = 0.25;
+    private static readonly FRAME_BLINK_ON_SECONDS = 0.08;
+    private static readonly FRAME_BLINK_OFF_SECONDS = 0.08;
+    private static readonly FRAME_BLINK_FLASHES = 2;
+
+    /** Staggered flash-in for one card's empty frame/border, settling visible once done. */
+    private async BlinkInFrame(frame: mod.UIWidget, startDelay: number): Promise<void> {
+        if (startDelay > 0) await mod.Wait(startDelay);
+        for (let i = 0; i < LoadoutSelectionMenu.FRAME_BLINK_FLASHES; i++) {
+            mod.SetUIWidgetVisible(frame, true);
+            await mod.Wait(LoadoutSelectionMenu.FRAME_BLINK_ON_SECONDS);
+            mod.SetUIWidgetVisible(frame, false);
+            await mod.Wait(LoadoutSelectionMenu.FRAME_BLINK_OFF_SECONDS);
+        }
+        mod.SetUIWidgetVisible(frame, true);
+    }
+
     private async RevealCardsSequentially(
-        cards: Array<{ widget: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }>,
+        cards: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }>,
         token: number
     ) {
+        // Looping "counting" sfx plays once for this whole category, for the duration of the
+        // frames blinking in. Tracked on the instance so InterruptReveal() can stop it the
+        // moment a selection is made, rather than letting a loop sound run indefinitely.
+        const counterSfx = mod.SpawnObject(SFX_LOADOUT_REVEAL_COUNTER, POSITION_HQ1, ZERO_VEC) as mod.SFX;
+        if (counterSfx) {
+            mod.PlaySound(counterSfx, 1, this._PlayerProfile.player);
+            this.activeCounterSfx = counterSfx;
+        }
+
+        // Empty card frames flash in one after another, spread across the counter window.
+        for (let i = 0; i < cards.length; i++) {
+            this.BlinkInFrame(cards[i].frame, i * LoadoutSelectionMenu.FRAME_BLINK_STAGGER_SECONDS);
+        }
+
+        await mod.Wait(LoadoutSelectionMenu.FRAME_COUNTER_WINDOW_SECONDS);
+
+        if (token !== this.revealToken) return;
+
+        // Guarantee every frame is settled visible the instant the window ends, regardless of
+        // how the staggered blink timing landed.
+        for (const card of cards) {
+            mod.SetUIWidgetVisible(card.frame, true);
+        }
+
+        if (this.activeCounterSfx === counterSfx) {
+            try { mod.StopSound(counterSfx, this._PlayerProfile.player); } catch { }
+            this.activeCounterSfx = undefined;
+        }
+
+        // Cards now reveal their contents one at a time at the existing cadence.
         for (const card of cards) {
             if (token !== this.revealToken) return;
-            const isLegendary = (card.item.rarity ?? 0) >= RARITY_LEGENDARY_THRESHOLD;
-            const revealDelay = isLegendary ? 1.1 : 0.9;
+            const rarity = card.item.rarity ?? 0;
+            const isLegendary = rarity >= RARITY_LEGENDARY_THRESHOLD;
+            const isRare = !isLegendary && rarity >= RARITY_RARE_THRESHOLD;
 
-            // Looping "counting" sfx plays for the duration of the delay leading up to this
-            // card's reveal. Tracked on the instance so InterruptReveal() can stop it the
-            // moment a selection is made, rather than letting a loop sound run indefinitely.
-            const counterSfx = mod.SpawnObject(SFX_LOADOUT_REVEAL_COUNTER, POSITION_HQ1, ZERO_VEC) as mod.SFX;
-            if (counterSfx) {
-                mod.PlaySound(counterSfx, 1, this._PlayerProfile.player);
-                this.activeCounterSfx = counterSfx;
-            }
-
-            await mod.Wait(revealDelay);
-
-            // Stop this card's counter loop regardless of whether we're still the active reveal
-            if (this.activeCounterSfx === counterSfx) {
-                try { mod.StopSound(counterSfx, this._PlayerProfile.player); } catch { }
-                this.activeCounterSfx = undefined;
-            }
+            // Roll simulation always runs 0.9s before the rarity reveal sfx plays.
+            await mod.Wait(0.9);
+            this.PlayRevealSfxForRarity(card.item.rarity);
 
             if (token !== this.revealToken) return;
 
-            this.PlayRevealSfxForRarity(card.item.rarity);
-            mod.SetUIWidgetVisible(card.widget, true);
             mod.SetUIWidgetVisible(card.button, true);
-            if (isLegendary) await mod.Wait(3);
+
+            // Rare/legendary cards hold on the reveal sfx a little longer before the card's
+            // contents become visible -- legendary holds longest.
+            const extraRevealHold = isLegendary ? 2 : isRare ? 1 : 0;
+            if (extraRevealHold > 0) {
+                await mod.Wait(extraRevealHold);
+            }
+
+            mod.SetUIWidgetVisible(card.content, true);
+
+            // Let the card sit before the next reveal starts.
+            await mod.Wait(0.25);
         }
     }
 
@@ -3535,6 +3584,9 @@ class LoadoutSelectionMenu {
         const iconPadding = 10;
 
         // individual item/card container, controls bgColor
+        // Starts hidden independently of the frame (cardWidget) -- the frame blinks in first
+        // as an empty border during the pre-roll counter window, and this content (icon/name/
+        // rarity) only becomes visible once this specific card is revealed.
         const itemContainer = ParseUI({
             type: "Container",
             name: itemName,
@@ -3545,6 +3597,7 @@ class LoadoutSelectionMenu {
             bgFill: mod.UIBgFill.Blur,
             bgColor: BLACK_COLOR,
             bgAlpha: 1,
+            visible: false,
 
         });
 
@@ -3704,7 +3757,7 @@ class LoadoutSelectionMenu {
 
         this.optionWidgets.push(cardWidget);
 
-        return { cardWidget, buttonWidget: cardButton };
+        return { cardWidget, buttonWidget: cardButton, contentWidget: itemContainer as mod.UIWidget };
     }
 }
 
@@ -6255,6 +6308,9 @@ class GameHandler {
         for (let i = 0; i < n; i++) {
             const p = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!PlayerIsAliveAndValid(p)) continue;
+            // Decoy bots are not real survivors -- exclude them from every count so they never
+            // affect the survivor total, round phase transitions (final five/LMS), or EOR checks.
+            if (DecoySpawner.IsActiveDecoyObjId(mod.GetObjId(p))) continue;
             total++;
             if (!SafeIsAISoldier(p)) humans++;
             const isAlive = mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive);
@@ -6796,6 +6852,7 @@ class GameHandler {
     static async EndRoundCleanup() {
         console.log(`"EoR" | Starting End Round Cleanup`);
         PropSpawner.CleanupAllObjects();
+        DecoySpawner.CleanupAllDecoys();
         // GameHandler.StopLastManStandingMusic();
         if (GameHandler.gameState === GameState.GameOver)
             return;
@@ -7665,6 +7722,11 @@ class AISpawnHandler {
         if (GameHandler.gameState === GameState.EndOfRound)
             return;
 
+        if (DecoySpawner.HasPendingSpawnOn(spawnerObjID)) {
+            DecoySpawner.HandleSpawned(eventPlayer, mod.GetObjId(eventPlayer), spawnerObjID);
+            return;
+        }
+
         const infectedSlot = InfectedBotSlot.pendingBySpawnerID.get(spawnerObjID);
         const survivorSlot = SurvivorBotSlot.pendingBySpawnerID.get(spawnerObjID);
 
@@ -7718,7 +7780,11 @@ function PlayerIsAliveAndValid(eventPlayer: mod.Player): boolean {
 function pickClosestAliveSurvivorFor(bot: mod.Player): mod.Player | undefined {
     const botPos = mod.GetSoldierState(bot, mod.SoldierStateVector.GetPosition);
     const closestSurvivor = mod.ClosestPlayerTo(botPos, SURVIVOR_TEAM);
-    return closestSurvivor;
+    if (!closestSurvivor) return closestSurvivor;
+    // Only redirect if this infected's natural target has an active decoy out -- the decoy
+    // takes the owner's place rather than hijacking every infected's targeting globally.
+    const decoy = DecoySpawner.GetActiveDecoyForOwner(closestSurvivor);
+    return decoy ?? closestSurvivor;
 }
 
 function IsVehicleRefValid(vehicle?: mod.Vehicle): boolean {
@@ -8514,9 +8580,11 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     const isInfected = playerProfile.isInfectedTeam || (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM));
     const isAI = playerProfile.isAI;
 
-    // Clear any stale PropSpawner tracking from a previous loadout -- this round's roll may
-    // no longer include the gadget, and re-equipping it below re-initializes fresh state anyway.
+    // Clear any stale PropSpawner/DecoySpawner tracking from a previous loadout -- this round's
+    // roll may no longer include the gadget, and re-equipping it below re-initializes fresh state
+    // anyway. DecoySpawner.CleanupPlayer also kills/unspawns any decoy this player already placed.
     PropSpawner.CleanupPlayer(eventPlayer);
+    DecoySpawner.CleanupPlayer(eventPlayer);
 
     // apply gear from loadout
     for (const item of loadout) {
@@ -8568,10 +8636,15 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
             if (item.gadget === mod.Gadgets.Misc_Assault_Ladder)
                 await mod.Wait(1); // delay to avoid ladder being selected over sledgehammer
             mod.AddEquipment(eventPlayer, item.gadget as mod.Gadgets);
-            // PropSpawner's fire/aim-driven placement flow is human-input only; pick this
-            // player's starting prop and ready their preview icon (see PropSpawner.InitPlayer).
+            // PropSpawner's and DecoySpawner's fire/aim-driven placement flows are human-input
+            // only; the portal gadget tool is shared between both rolls, so route init by
+            // nameKey (see PropSpawner.InitPlayer / DecoySpawner.InitPlayer).
             if (item.gadget === mod.Gadgets.Misc_PortalGadget && !isAI) {
-                PropSpawner.InitPlayer(eventPlayer);
+                if (item.nameKey === "decoy_gadget") {
+                    DecoySpawner.InitPlayer(eventPlayer);
+                } else {
+                    PropSpawner.InitPlayer(eventPlayer);
+                }
             }
         }
     }
@@ -11728,7 +11801,10 @@ export function OnPlayerUndeploy(playerObjId: number) {
     CleanupPlayerOngoingVisuals(playerObjId);
     CleanupLeapStateByObjId(playerObjId);
     const undeployedPlayer = PlayerProfile._allPlayers.get(playerObjId)?.player;
-    if (undeployedPlayer) PropSpawner.CleanupPlayer(undeployedPlayer);
+    if (undeployedPlayer) {
+        PropSpawner.CleanupPlayer(undeployedPlayer);
+        DecoySpawner.CleanupPlayer(undeployedPlayer);
+    }
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11752,6 +11828,7 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     }
     CleanupLeapSystem(eventPlayer);
     PropSpawner.CleanupPlayer(eventPlayer);
+    DecoySpawner.CleanupPlayer(eventPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -11792,6 +11869,10 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
                 } else {
                     survivorSlot.HandleDeath(false);
                 }
+                return;
+            }
+            if (DecoySpawner.HandleDeath(eventPlayer, playerObjID)) {
+                // Decoy bot's health reached 0 -- owner is now free to place another.
                 return;
             }
             console.log(`OnPlayerDied "CRITICAL ERROR" | AI Player(${playerObjID}) died but no slot found!`);
@@ -13591,8 +13672,353 @@ class PropSpawner {
     }
 }
 
+// ============================================================
+// DecoySpawner -- survivor decoy bot (Misc_PortalGadget tool, "decoy_gadget" roll)
+// ============================================================
+
+const DECOY_HEALTH = 800;
+const DECOY_LIFETIME_SECONDS = 45;
+const DECOY_STANCES: mod.Stance[] = [mod.Stance.Stand, mod.Stance.Crouch, mod.Stance.Prone];
+const DECOY_VFX_LAUNCH: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
+const DECOY_VFX_DESTRUCTION: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Generic_Destruction_Electronic;
+
+interface DecoyBotEntry {
+    ownerPlayer: mod.Player;
+    botPlayer?: mod.Player;
+    botObjId: number;
+    spawnerID: number;
+    spawnPos?: mod.Vector;
+    worldIcon?: mod.WorldIcon;
+    // Bumped whenever the decoy is removed by any path -- the life-timer loop below checks
+    // this each second and bails out the instant it no longer matches its own token.
+    lifeToken: number;
+}
+
+interface DecoyPendingSpawn {
+    ownerObjId: number;
+    ownerPlayer: mod.Player;
+    pos: mod.Vector;
+    rot: mod.Vector;
+}
+
+class DecoySpawner {
+    // Player ids currently holding the decoy roll of the portal gadget tool this round.
+    static readonly _equipped: Set<number> = new Set();
+    static readonly _raycastInFlight: Set<number> = new Set();
+    // Owner objId -> their decoy (pending or already spawned). Only one entry per owner --
+    // its presence is what blocks placing a second decoy.
+    static readonly _ownerToBot: Map<number, DecoyBotEntry> = new Map();
+    // Reverse lookup once the bot has actually spawned, for death/cleanup routing.
+    static readonly _botOwnerByObjId: Map<number, number> = new Map();
+    static readonly _activeBotObjIds: Set<number> = new Set();
+    // Spawner requests in flight, keyed by the AI spawner's objId (matches OnSpawnerSpawned).
+    static readonly _pendingBySpawnerID: Map<number, DecoyPendingSpawn> = new Map();
+    private static _lifeTokenSeq: number = 0;
+
+    static IsEquipped(player: mod.Player): boolean {
+        return DecoySpawner._equipped.has(mod.GetObjId(player));
+    }
+
+    /** Called from InitializePlayerEquipment when a survivor's loadout rolls this gadget. */
+    static InitPlayer(player: mod.Player): void {
+        DecoySpawner._equipped.add(mod.GetObjId(player));
+    }
+
+    static HasRaycastInFlight(id: number): boolean {
+        return DecoySpawner._raycastInFlight.has(id);
+    }
+
+    private static _GetRaycastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const start = mod.Add(eyePos, facing);
+        const end = mod.Add(start, mod.Multiply(facing, PROP_SPAWNER_MAX_DISTANCE));
+        return { start, end };
+    }
+
+    private static _GetFacingPlayerRotation(player: mod.Player): mod.Vector {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const yaw = Math.atan2(-mod.XComponentOf(facing), -mod.ZComponentOf(facing));
+        return mod.CreateVector(0, yaw, 0);
+    }
+
+    /** Finds a survivor AI spawner not currently locked by AISpawnHandler/InfectedBotSlot/SurvivorBotSlot. */
+    private static _PickFreeSpawnerID(): number | undefined {
+        for (const id of SURVIVOR_AI_SPAWNERS) {
+            if (!AISpawnHandler.spawnerLock.has(id)) return id;
+        }
+        return undefined;
+    }
+
+    static OnFireStart(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (!DecoySpawner._equipped.has(id)) return; // doesn't have this gadget equipped
+        if (DecoySpawner._ownerToBot.has(id)) return; // only one decoy active/pending at a time
+        if (DecoySpawner._raycastInFlight.has(id)) return;
+        const { start, end } = DecoySpawner._GetRaycastVectors(player);
+        DecoySpawner._raycastInFlight.add(id);
+        mod.RayCast(player, start, end);
+    }
+
+    static OnFireStop(_player: mod.Player): void {
+        // No-op: single fire-and-forget placement, nothing to release.
+    }
+
+    static OnAimStart(_player: mod.Player): void { }
+    static OnAimStop(_player: mod.Player): void { }
+    static OnLaserToggle(_player: mod.Player, _eventBoolean: boolean): void { }
+
+    static OnRayCastHit(player: mod.Player, point: mod.Vector, normal: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        DecoySpawner._raycastInFlight.delete(id);
+        // Same floor/surface validity check as PropSpawner: normal must be pointing mostly up.
+        const isFloor = mod.YComponentOf(normal) >= PROP_SPAWNER_MIN_FLOOR_NORMAL_Y;
+        if (!isFloor) {
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            return;
+        }
+        DecoySpawner._RequestSpawn(player, point);
+    }
+
+    static OnRayCastMissed(player: mod.Player): void {
+        DecoySpawner._raycastInFlight.delete(mod.GetObjId(player));
+    }
+
+    private static _SpawnAndEnableVfx(vfx: mod.RuntimeSpawn_Common, pos: mod.Vector): void {
+        const fx = mod.SpawnObject(vfx, pos, ZERO_VEC) as mod.VFX;
+        if (fx) mod.EnableVFX(fx, true);
+    }
+
+    private static _RequestSpawn(owner: mod.Player, pos: mod.Vector): void {
+        const ownerID = mod.GetObjId(owner);
+        if (DecoySpawner._ownerToBot.has(ownerID)) return; // race guard
+        const spawnerID = DecoySpawner._PickFreeSpawnerID();
+        if (spawnerID === undefined) {
+            console.log(`DecoySpawner | No free AI spawner available for Player(${ownerID})`);
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, owner);
+            return;
+        }
+        const spawnerObj = mod.GetSpawner(spawnerID);
+        const rot = DecoySpawner._GetFacingPlayerRotation(owner);
+        AISpawnHandler.spawnerLock.add(spawnerID);
+        DecoySpawner._pendingBySpawnerID.set(spawnerID, { ownerObjId: ownerID, ownerPlayer: owner, pos, rot });
+        // Reserve immediately so a second fire before the bot arrives can't queue another spawn.
+        DecoySpawner._ownerToBot.set(ownerID, { ownerPlayer: owner, botObjId: -1, spawnerID, lifeToken: 0 });
+        console.log(`DecoySpawner | Requesting decoy spawn for Player(${ownerID}) on spawner(${spawnerID})`);
+        // Fires the moment the player places the decoy, ahead of the AI actually arriving.
+        DecoySpawner._SpawnAndEnableVfx(DECOY_VFX_LAUNCH, pos);
+        mod.SpawnAIFromAISpawner(spawnerObj, mod.SoldierClass.Assault, MakeMessage(mod.stringkeys.decoy_bot_name), SURVIVOR_TEAM);
+    }
+
+    /** Called from OnSpawnerSpawned once a requested decoy bot actually arrives. */
+    static HandleSpawned(player: mod.Player, playerObjID: number, spawnerObjID: number): boolean {
+        const pending = DecoySpawner._pendingBySpawnerID.get(spawnerObjID);
+        if (!pending) return false;
+        DecoySpawner._pendingBySpawnerID.delete(spawnerObjID);
+        AISpawnHandler.spawnerLock.delete(spawnerObjID);
+
+        const ownerID = pending.ownerObjId;
+        const reservation = DecoySpawner._ownerToBot.get(ownerID);
+        if (!DecoySpawner._equipped.has(ownerID) || !reservation || reservation.spawnerID !== spawnerObjID) {
+            // Owner cancelled (died/undeployed/re-rolled) while the spawn was in flight.
+            DecoySpawner._ownerToBot.delete(ownerID);
+            try { mod.Kill(player); } catch { }
+            return true;
+        }
+
+        mod.Teleport(player, pending.pos, mod.YComponentOf(pending.rot));
+
+        mod.SetPlayerMaxHealth(player, DECOY_HEALTH);
+        mod.Heal(player, DECOY_HEALTH);
+
+        // Randomized pistol.
+        const pistolPool = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.sidearm);
+        const pistolDef = Weapons.getRandomWeaponFromRarity(pistolPool);
+        try { mod.RemoveEquipment(player, mod.InventorySlots.PrimaryWeapon); } catch { }
+        try { mod.RemoveEquipment(player, mod.InventorySlots.SecondaryWeapon); } catch { }
+        try { mod.RemoveEquipment(player, mod.InventorySlots.GadgetOne); } catch { }
+        try { mod.RemoveEquipment(player, mod.InventorySlots.GadgetTwo); } catch { }
+        try { mod.RemoveEquipment(player, mod.InventorySlots.Throwable); } catch { }
+        try { mod.RemoveEquipment(player, mod.InventorySlots.ClassGadget); } catch { }
+        if (pistolDef) {
+            mod.AddEquipment(player, pistolDef.item as mod.Weapons, pistolDef.packageImage as mod.WeaponPackage);
+        }
+
+        // No movement, no targeting, no firing -- it just stands/crouches/prones there as bait.
+        mod.AIIdleBehavior(player);
+        try { mod.AIEnableTargeting(player, false); } catch { }
+        try { mod.AIEnableShooting(player, false); } catch { }
+        try { mod.AISetTarget(player); } catch { }
+        mod.AISetStance(player, DECOY_STANCES[Math.floor(Math.random() * DECOY_STANCES.length)]);
+
+        const botObjId = mod.GetObjId(player);
+        const entry: DecoyBotEntry = {
+            ownerPlayer: pending.ownerPlayer,
+            botPlayer: player,
+            botObjId,
+            spawnerID: spawnerObjID,
+            spawnPos: pending.pos,
+            lifeToken: 0,
+        };
+        DecoySpawner._ownerToBot.set(ownerID, entry);
+        DecoySpawner._botOwnerByObjId.set(botObjId, ownerID);
+        DecoySpawner._activeBotObjIds.add(botObjId);
+        console.log(`DecoySpawner | Spawned decoy Player(${botObjId}) for owner Player(${ownerID})`);
+        DecoySpawner._RunLifeTimer(entry);
+        return true;
+    }
+
+    /** Ticks the world-icon countdown (owner-only) and kills the decoy once its lifetime runs out. */
+    private static async _RunLifeTimer(entry: DecoyBotEntry): Promise<void> {
+        const token = ++DecoySpawner._lifeTokenSeq;
+        entry.lifeToken = token;
+
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, entry.spawnPos ?? ZERO_VEC, ZERO_VEC) as mod.WorldIcon;
+        if (icon) {
+            mod.SetWorldIconOwner(icon, entry.ownerPlayer); // visible only to the player who placed it
+            entry.worldIcon = icon;
+        }
+
+        let remaining = DECOY_LIFETIME_SECONDS;
+        while (remaining > 0) {
+            if (entry.lifeToken !== token) return; // superseded -- decoy already removed elsewhere
+            if (icon) {
+                mod.SetWorldIconText(icon, MakeMessage(mod.stringkeys.decoy_timer_remaining, Math.ceil(remaining)));
+                mod.EnableWorldIconText(icon, true);
+            }
+            await mod.Wait(1);
+            remaining -= 1;
+        }
+
+        if (entry.lifeToken !== token) return;
+
+        console.log(`DecoySpawner | Decoy lifetime expired for owner Player(${mod.GetObjId(entry.ownerPlayer)})`);
+        if (entry.botPlayer && PlayerIsAliveAndValid(entry.botPlayer)) {
+            // Actual teardown (icon/timer cleanup, destruction VFX, freeing the owner's slot)
+            // happens in HandleDeath once this kill resolves through OnPlayerDied.
+            try { mod.Kill(entry.botPlayer); } catch { }
+        }
+    }
+
+    /** Stops a decoy's life-timer loop and removes its world icon. Safe to call more than once. */
+    private static _StopLifeTimerAndIcon(entry: DecoyBotEntry): void {
+        entry.lifeToken++;
+        if (entry.worldIcon) {
+            try {
+                mod.EnableWorldIconText(entry.worldIcon, false);
+                mod.UnspawnObject(entry.worldIcon as unknown as mod.Object);
+            } catch { }
+            entry.worldIcon = undefined;
+        }
+    }
+
+    /** Returns true if `spawnerObjID` was a decoy request (whether or not a bot resulted). */
+    static HasPendingSpawnOn(spawnerObjID: number): boolean {
+        return DecoySpawner._pendingBySpawnerID.has(spawnerObjID);
+    }
+
+    /**
+     * Called from OnPlayerDied when an AI soldier with no bot-slot dies -- covers both a
+     * natural health-zero death and the life-timer's expiry kill. Returns true if it was a
+     * decoy. Plays the destruction VFX at its last known position and frees the owner's slot.
+     */
+    static HandleDeath(bot: mod.Player, botObjId: number): boolean {
+        const ownerID = DecoySpawner._botOwnerByObjId.get(botObjId);
+        if (ownerID === undefined) return false;
+        DecoySpawner._botOwnerByObjId.delete(botObjId);
+        DecoySpawner._activeBotObjIds.delete(botObjId);
+
+        const entry = DecoySpawner._ownerToBot.get(ownerID);
+        let deathPos = entry?.spawnPos;
+        try {
+            deathPos = mod.GetSoldierState(bot, mod.SoldierStateVector.GetPosition) ?? deathPos;
+        } catch { }
+
+        if (entry) {
+            DecoySpawner._StopLifeTimerAndIcon(entry);
+            if (entry.botObjId === botObjId) {
+                // Frees the owner up to place another decoy.
+                DecoySpawner._ownerToBot.delete(ownerID);
+            }
+        }
+
+        if (deathPos) {
+            DecoySpawner._SpawnAndEnableVfx(DECOY_VFX_DESTRUCTION, deathPos);
+        }
+
+        console.log(`DecoySpawner | Decoy Player(${botObjId}) died -- owner Player(${ownerID}) can place another`);
+        return true;
+    }
+
+    /** Called on owner death/undeploy and on gadget re-roll: kills/unspawns their decoy (pending or alive). */
+    static CleanupPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        DecoySpawner._equipped.delete(id);
+        DecoySpawner._raycastInFlight.delete(id);
+
+        const entry = DecoySpawner._ownerToBot.get(id);
+        if (entry) {
+            DecoySpawner._ownerToBot.delete(id);
+            DecoySpawner._StopLifeTimerAndIcon(entry);
+            if (entry.botPlayer && PlayerIsAliveAndValid(entry.botPlayer)) {
+                try { mod.Kill(entry.botPlayer); } catch { }
+            }
+            if (entry.botObjId >= 0) {
+                DecoySpawner._botOwnerByObjId.delete(entry.botObjId);
+                DecoySpawner._activeBotObjIds.delete(entry.botObjId);
+            }
+        }
+        // Spawn still in flight (bot hasn't arrived yet) -- release the spawner so it isn't stuck locked.
+        for (const [spawnerID, pending] of DecoySpawner._pendingBySpawnerID) {
+            if (pending.ownerObjId === id) {
+                DecoySpawner._pendingBySpawnerID.delete(spawnerID);
+                AISpawnHandler.spawnerLock.delete(spawnerID);
+            }
+        }
+    }
+
+    /** Round-end sweep: decoys are never persistent between rounds. */
+    static CleanupAllDecoys(): void {
+        for (const entry of DecoySpawner._ownerToBot.values()) {
+            DecoySpawner._StopLifeTimerAndIcon(entry);
+            if (entry.botPlayer && PlayerIsAliveAndValid(entry.botPlayer)) {
+                try { mod.Kill(entry.botPlayer); } catch { }
+            }
+        }
+        for (const spawnerID of DecoySpawner._pendingBySpawnerID.keys()) {
+            AISpawnHandler.spawnerLock.delete(spawnerID);
+        }
+        DecoySpawner._ownerToBot.clear();
+        DecoySpawner._pendingBySpawnerID.clear();
+        DecoySpawner._botOwnerByObjId.clear();
+        DecoySpawner._activeBotObjIds.clear();
+        DecoySpawner._equipped.clear();
+        DecoySpawner._raycastInFlight.clear();
+    }
+
+    static IsActiveDecoyObjId(objId: number): boolean {
+        return DecoySpawner._activeBotObjIds.has(objId);
+    }
+
+    /**
+     * Returns `owner`'s active decoy, if any. Used to redirect infected AI targeting: only an
+     * infected whose natural target *is* this owner gets swapped onto the decoy -- it stands in
+     * for its owner rather than pulling aggro off unrelated survivors.
+     */
+    static GetActiveDecoyForOwner(owner: mod.Player): mod.Player | undefined {
+        const entry = DecoySpawner._ownerToBot.get(mod.GetObjId(owner));
+        if (entry?.botPlayer && PlayerIsAliveAndValid(entry.botPlayer)) {
+            return entry.botPlayer;
+        }
+        return undefined;
+    }
+}
+
 export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
-    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+    const id = mod.GetObjId(eventPlayer);
+    if (DecoySpawner.HasRaycastInFlight(id)) {
+        DecoySpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else if (PropSpawner.HasRaycastInFlight(id)) {
         PropSpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
     } else {
         HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
@@ -13600,7 +14026,10 @@ export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, ev
 }
 
 export function OnRayCastMissed(eventPlayer: mod.Player) {
-    if (PropSpawner.HasRaycastInFlight(mod.GetObjId(eventPlayer))) {
+    const id = mod.GetObjId(eventPlayer);
+    if (DecoySpawner.HasRaycastInFlight(id)) {
+        DecoySpawner.OnRayCastMissed(eventPlayer);
+    } else if (PropSpawner.HasRaycastInFlight(id)) {
         PropSpawner.OnRayCastMissed(eventPlayer);
     } else {
         HandleLeapRayCastMissed(eventPlayer);
@@ -13608,22 +14037,27 @@ export function OnRayCastMissed(eventPlayer: mod.Player) {
 }
 
 export function OnPortalGadgetAimStart(player: mod.Player): void {
+    if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnAimStart(player); return; }
     PropSpawner.OnAimStart(player);
 }
 
 export function OnPortalGadgetAimStop(player: mod.Player): void {
+    if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnAimStop(player); return; }
     PropSpawner.OnAimStop(player);
 }
 
 export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
+    if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnLaserToggle(player, eventBoolean); return; }
     PropSpawner.OnLaserToggle(player, eventBoolean);
 }
 
 export function OnPortalGadgetFireStart(player: mod.Player): void {
+    if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnFireStart(player); return; }
     PropSpawner.OnFireStart(player);
 }
 
 export function OnPortalGadgetFireStop(player: mod.Player): void {
+    if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnFireStop(player); return; }
     PropSpawner.OnFireStop(player);
 }
 
