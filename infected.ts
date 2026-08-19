@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.08.010";
+const VERSION = "1.08.015";
 
 /*
 //
@@ -81,6 +81,7 @@ const INFECTED_AI_SPAWNERS: number[] = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 
 const PARACHUTE_INFECTED_SPAWNERS: number[] = [33, 34, 35, 36, 37, 38];
 
 const AI_INFECTED_MELEE_DISTANCE = 3;
+const AI_INFECTED_BASE_SPEED_MULTIPLIER = 1;
 const AI_LEASH_RANGE = 5;
 const AI_MIN_DEF_RANGE = 3;
 
@@ -92,9 +93,11 @@ const AI_VEHICLE_REAR_CONE_DOT_MAX = -0.6;           // require a tight rear con
 const AI_VEHICLE_MOVE_REISSUE_SECONDS = 0.5;        // reissue every tick vehicle position changes fast
 const AI_VEHICLE_GLANCING_FORCE_FIRE_DAMAGE = 50;    // side/front-glancing vehicle chip damage
 const AI_VEHICLE_REAR_FORCE_FIRE_DAMAGE = 200;       // rear hemisphere vehicle chip damage
+const INFECTED_MELEE_VEHICLE_IMPULSE_LIGHT = 8000;  // dirt bikes, quads, golf carts -- and the default for any other vehicle
+const INFECTED_MELEE_VEHICLE_IMPULSE_HEAVY = 30000;  // Flyer, Vector -- heavier vehicles get a stronger shove
 const AI_VEHICLE_ATTACK_WINDOW_SECONDS = 0.35;       // minimum continuous time in valid vehicle melee window before forcefire
-const AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER = 4;     // minimum movement speed multiplier when target is in a vehicle
-const AI_VEHICLE_TARGET_MAX_MOVE_MULTIPLIER = 8;     // cap for velocity-scaled movement boost while chasing vehicles
+const AI_VEHICLE_TARGET_MIN_MOVE_MULTIPLIER = 3;     // minimum movement speed multiplier when target is in a vehicle
+const AI_VEHICLE_TARGET_MAX_MOVE_MULTIPLIER = 5;     // cap for velocity-scaled movement boost while chasing vehicles
 const AI_VEHICLE_TARGET_SPEED_PER_MULTIPLIER_STEP = 10; // linear velocity units needed for each +1 multiplier above minimum
 const AI_DEFAULT_MOVE_REISSUE_SECONDS = 1;          // balanced on-foot chase interval
 const AI_MELEE_CLOSE_REISSUE_SECONDS = 0.45;        // frequent close-range updates while trying to maintain melee contact
@@ -198,8 +201,6 @@ const INFECTED_HINT_STRING_KEYS_NO_LEAP = [
 const INFECTED_ALPHA_HINT_STRING_KEYS = [
     "infected_hint_vehicle_leap",
     "infected_hint_leap_mechanic",
-    "infected_hint_assault_ladder",
-    "infected_hint_brains",
 ] as const;
 
 const INFECTED_ALPHA_HINT_STRING_KEYS_NO_LEAP = [
@@ -222,13 +223,11 @@ const ALPHA_BUFF_STRING_KEYS = [
     "alpha_infected_area_notification",
     "alpha_buff_tankier",
     "alpha_buff_leap_attack",
-    "alpha_buff_damage_reduction",
 ] as const;
 
 const ALPHA_BUFF_STRING_KEYS_NO_LEAP = [
     "alpha_infected_area_notification",
     "alpha_buff_tankier",
-    "alpha_buff_damage_reduction",
 ] as const;
 
 const VL7_TRANSITION_DISTORTION_BY_PLAYER = new Map<number, mod.VFX>();
@@ -3475,8 +3474,8 @@ class LoadoutSelectionMenu {
             const isLegendary = rarity >= RARITY_LEGENDARY_THRESHOLD;
             const isRare = !isLegendary && rarity >= RARITY_RARE_THRESHOLD;
 
-            // Roll simulation always runs 0.9s before the rarity reveal sfx plays.
-            await mod.Wait(0.9);
+            // Roll simulation always runs 0.5s before the rarity reveal sfx plays.
+            await mod.Wait(0.5);
             this.PlayRevealSfxForRarity(card.item.rarity);
 
             if (token !== this.revealToken) return;
@@ -3485,7 +3484,7 @@ class LoadoutSelectionMenu {
 
             // Rare/legendary cards hold on the reveal sfx a little longer before the card's
             // contents become visible -- legendary holds longest.
-            const extraRevealHold = isLegendary ? 2 : isRare ? 1 : 0;
+            const extraRevealHold = isLegendary ? 2 : isRare ? 0.75 : 0;
             if (extraRevealHold > 0) {
                 await mod.Wait(extraRevealHold);
             }
@@ -5974,7 +5973,7 @@ class GameHandler {
         { id: 2510, attenuation: 50, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HeavyGusts_SimpleLoop3D },
         { id: 2511, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
         { id: 2512, attenuation: 20, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Outskirts_Spots_Wind_HowlingHollow_High_SimpleLoop3D },
-        { id: 2513, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
+        // { id: 2513, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D }, //removed
         { id: 2514, attenuation: 4, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Sewers_WaterDrippingLarge_SimpleLoop3D },
         { id: 2515, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_MP_Shared_Bigworld_Winds_SandMist_SimpleLoop3D },
         { id: 2516, attenuation: 40, object: mod.RuntimeSpawn_Common.SFX_Levels_Cairo_SP_NightRaid_Spots_Riot_CrowdRumble_SimpleLoop3D },
@@ -7810,13 +7809,12 @@ function GetVectorMagnitude(vector: mod.Vector): number {
 }
 
 function GetInfectedAIAreaMoveSpeedMultiplierForTarget(target: mod.Player | undefined): number {
-    const baseMultiplier = mod.GetMatchTimeElapsed() > 90 ? 2 : 1;
     const targetInVehicle = target
         ? SafeGetSoldierStateBool(target, mod.SoldierStateBool.IsInVehicle)
         : false;
 
     if (!targetInVehicle) {
-        return baseMultiplier;
+        return AI_INFECTED_BASE_SPEED_MULTIPLIER;
     }
 
     const targetVehicle = target ? mod.GetVehicleFromPlayer(target) : undefined;
@@ -7858,6 +7856,30 @@ interface VehicleMeleeAttackProfile {
     blockedByHeadOnCone: boolean;
     maxAttackDistance: number;
     damageOnForceFire: number;
+}
+
+/** Heavier vehicles (Flyer, Vector) get a stronger shove; everything else -- including dirt
+ *  bikes, quads, and the golf cart -- uses the light tier. */
+function GetInfectedMeleeVehicleImpulseMagnitude(vehicle: mod.Vehicle): number {
+    if (
+        mod.CompareVehicleName(vehicle, mod.VehicleList.Flyer60) ||
+        mod.CompareVehicleName(vehicle, mod.VehicleList.Vector)
+    ) {
+        return INFECTED_MELEE_VEHICLE_IMPULSE_HEAVY;
+    }
+    return INFECTED_MELEE_VEHICLE_IMPULSE_LIGHT;
+}
+
+/** Shoves `vehicle` away from `attacker` -- called on every infected melee hit that lands on a vehicle. */
+function ApplyInfectedMeleeVehicleImpulse(attacker: mod.Player, vehicle: mod.Vehicle): void {
+    if (!IsVehicleRefValid(vehicle)) return;
+    try {
+        const vehiclePos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+        const attackerPos = mod.GetSoldierState(attacker, mod.SoldierStateVector.GetPosition);
+        const pushDir = flattenDirection(mod.Subtract(vehiclePos, attackerPos));
+        const magnitude = GetInfectedMeleeVehicleImpulseMagnitude(vehicle);
+        mod.ApplyImpulse(vehicle, vehiclePos, pushDir, magnitude);
+    } catch { }
 }
 
 function GetVehicleMeleeAttackProfile(bot: mod.Player, vehicle: mod.Vehicle): VehicleMeleeAttackProfile {
@@ -8025,6 +8047,7 @@ function StartInfectedBotMeleeAttackAtPosition(
                     const damageToApply = Math.min(vehicleForceFireDamage, liveVehicleMeleeProfile.damageOnForceFire);
                     if (damageToApply > 0) {
                         try { mod.DealDamage(vehicleTarget, damageToApply); } catch { }
+                        ApplyInfectedMeleeVehicleImpulse(bot, vehicleTarget);
                     }
                 }
             }
@@ -8580,11 +8603,13 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     const isInfected = playerProfile.isInfectedTeam || (mod.GetObjId(mod.GetTeam(eventPlayer)) === mod.GetObjId(INFECTED_TEAM));
     const isAI = playerProfile.isAI;
 
-    // Clear any stale PropSpawner/DecoySpawner tracking from a previous loadout -- this round's
-    // roll may no longer include the gadget, and re-equipping it below re-initializes fresh state
-    // anyway. DecoySpawner.CleanupPlayer also kills/unspawns any decoy this player already placed.
+    // Clear any stale PropSpawner tracking from a previous loadout -- this round's roll may
+    // no longer include the gadget, and re-equipping it below re-initializes fresh state anyway.
     PropSpawner.CleanupPlayer(eventPlayer);
-    DecoySpawner.CleanupPlayer(eventPlayer);
+    // Only reset the decoy *gadget* bookkeeping here (equip/raycast state) -- this runs on every
+    // mid-round equipment refresh (LMS, Final Five, etc.), and an already-placed decoy must
+    // survive those phase changes. It's only torn down on owner death/undeploy or round end.
+    DecoySpawner.CleanupPlayerGadgetState(eventPlayer);
 
     // apply gear from loadout
     for (const item of loadout) {
@@ -11468,7 +11493,6 @@ function HandleLeapRayCastMissed(eventPlayer: mod.Player): void {
 ///////---------------- GAME FUNCTIONS -----------------//////////
 //////////////////////////////////////////////////////////////////
 
-// building out a fallback when bots' pathing fails. Which WILL happen. Fuck.
 export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
     if (!PlayerIsAliveAndValid(eventPlayer)) return;
     const teamObjId = mod.GetObjId(mod.GetTeam(eventPlayer));
@@ -11498,7 +11522,6 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
 
         if (moveFailCount === 1) {
             console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #1 - battlefield behavior for ${AI_MOVE_FAILURE_RECOVERY_SECONDS}s before normal tick resumes`);
-            // mod.AIBattlefieldBehavior(eventPlayer);
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS;
             return;
         }
@@ -11510,12 +11533,6 @@ export async function OnAIMoveToFailed(eventPlayer: mod.Player) {
             slot.tick.moveFailHoldUntil = Date.now() / 1000 + AI_MOVE_FAILURE_RECOVERY_SECONDS * slot.tick.moveFailCount;
             return;
         }
-        // engine will likely kill the bot on its own, this never triggers
-        // if (moveFailCount >= 15) {
-        //     console.log(`OnAIMoveToFailed | Infected Bot(${mod.GetObjId(eventPlayer)}) failure #${moveFailCount} - killing bot`);
-        //     slot.tick.moveFailHoldUntil = undefined;
-        //     mod.Kill(eventPlayer);
-        // }
     }
 }
 
@@ -11918,10 +11935,11 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
             const hitSFX = mod.SpawnObject(SFX_MELEE_HIT_FALL_DMG, POSITION_HQ2, ZERO_VEC);
             mod.PlaySound(hitSFX, 1, damageDealer);
 
-            // If the melee target is in a vehicle, deal 250 damage to it
+            // If the melee target is in a vehicle, deal 100 damage to it and shove it
             if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle)) {
                 const targetVehicle = mod.GetVehicleFromPlayer(eventPlayer);
-                mod.DealDamage(targetVehicle, 250);
+                mod.DealDamage(targetVehicle, 100);
+                ApplyInfectedMeleeVehicleImpulse(damageDealer, targetVehicle);
             }
         }
     } else {
@@ -12425,6 +12443,11 @@ export async function OngoingPlayer(eventPlayer: mod.Player) {
     // PropSpawner preview tick for human survivors who currently have the gadget equipped.
     if (!isAISoldier && PropSpawner._propIndex.has(playerObjId)) {
         PropSpawner.OngoingTick(eventPlayer);
+    }
+
+    // DecoySpawner banner-hint tick for human survivors who currently have the gadget equipped.
+    if (!isAISoldier && DecoySpawner.IsEquipped(eventPlayer)) {
+        DecoySpawner.OngoingTick(eventPlayer);
     }
 
     if (!isAISoldier) {
@@ -13678,9 +13701,23 @@ class PropSpawner {
 
 const DECOY_HEALTH = 800;
 const DECOY_LIFETIME_SECONDS = 45;
-const DECOY_STANCES: mod.Stance[] = [mod.Stance.Stand, mod.Stance.Crouch, mod.Stance.Prone];
+const DECOY_STANCES: mod.Stance[] = [mod.Stance.Stand, mod.Stance.Crouch];
 const DECOY_VFX_LAUNCH: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
 const DECOY_VFX_DESTRUCTION: mod.RuntimeSpawn_Common = mod.RuntimeSpawn_Common.FX_Gadget_Generic_Destruction_Electronic;
+// Vertical offset so the life-timer countdown icon floats near the decoy's torso instead of
+// sitting at its feet.
+const DECOY_TIMER_ICON_HEIGHT_OFFSET = 1.2;
+// Countdown icon color thresholds -- starts green, ambers up as time runs out.
+const DECOY_TIMER_COLOR_NORMAL = mod.CreateVector(0.2, 1, 0.2);
+const DECOY_TIMER_COLOR_WARN = mod.CreateVector(1, 0.85, 0.1);
+const DECOY_TIMER_COLOR_CRITICAL = mod.CreateVector(1, 0.45, 0.1);
+const DECOY_TIMER_WARN_SECONDS = 10;
+const DECOY_TIMER_CRITICAL_SECONDS = 5;
+
+// Fired at the player's point of aim when a placement attempt is blocked (already-placed decoy
+// or an invalid surface) -- spawned once, held briefly, then removed. No live repositioning.
+const DECOY_BLOCKED_ICON_DURATION_SECONDS = 2;
+const DECOY_BLOCKED_ICON_COLOR = mod.CreateVector(1, 0.2, 0.2);
 
 interface DecoyBotEntry {
     ownerPlayer: mod.Player;
@@ -13705,6 +13742,9 @@ class DecoySpawner {
     // Player ids currently holding the decoy roll of the portal gadget tool this round.
     static readonly _equipped: Set<number> = new Set();
     static readonly _raycastInFlight: Set<number> = new Set();
+    // Player ids for whom the decoy gadget is currently their actively-held item -- tracked
+    // purely to detect the rising edge that fires the ShowAlphaFeedback hint banner once.
+    static readonly _gadgetHeld: Set<number> = new Set();
     // Owner objId -> their decoy (pending or already spawned). Only one entry per owner --
     // its presence is what blocks placing a second decoy.
     static readonly _ownerToBot: Map<number, DecoyBotEntry> = new Map();
@@ -13753,7 +13793,14 @@ class DecoySpawner {
     static OnFireStart(player: mod.Player): void {
         const id = mod.GetObjId(player);
         if (!DecoySpawner._equipped.has(id)) return; // doesn't have this gadget equipped
-        if (DecoySpawner._ownerToBot.has(id)) return; // only one decoy active/pending at a time
+        if (DecoySpawner._ownerToBot.has(id)) {
+            // Only one decoy active/pending at a time -- block and give feedback at the
+            // player's point of aim instead of silently eating the fire input.
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            const { end } = DecoySpawner._GetRaycastVectors(player);
+            DecoySpawner._ShowBlockedIcon(player, end, MakeMessage(mod.stringkeys.decoy_hint_already_placed));
+            return;
+        }
         if (DecoySpawner._raycastInFlight.has(id)) return;
         const { start, end } = DecoySpawner._GetRaycastVectors(player);
         DecoySpawner._raycastInFlight.add(id);
@@ -13768,6 +13815,52 @@ class DecoySpawner {
     static OnAimStop(_player: mod.Player): void { }
     static OnLaserToggle(_player: mod.Player, _eventBoolean: boolean): void { }
 
+    /**
+     * Banner hint tick. Reuses the same one-shot feedback banner alpha infected see on
+     * LEAP_ATTACK_AREA_TRIGGER_ID enter (PlayerProfile.ShowAlphaFeedback) rather than a
+     * separate notification slot -- fires once on the rising edge of the decoy gadget
+     * becoming the player's actively held item, not continuously every tick.
+     */
+    static OngoingTick(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+        const id = mod.GetObjId(player);
+        if (!DecoySpawner._equipped.has(id)) return;
+
+        const isHeldNow = mod.IsInventorySlotActive(player, mod.InventorySlots.GadgetOne);
+        const wasHeld = DecoySpawner._gadgetHeld.has(id);
+        if (isHeldNow && !wasHeld) {
+            const playerProfile = PlayerProfile.Get(player);
+            const message = DecoySpawner._ownerToBot.has(id)
+                ? ResolveStringKeyMessage("decoy_hint_already_placed")
+                : ResolveStringKeyMessage("decoy_hint_fire_to_place");
+            playerProfile?.ShowAlphaFeedback(message);
+        }
+
+        if (isHeldNow) {
+            DecoySpawner._gadgetHeld.add(id);
+        } else {
+            DecoySpawner._gadgetHeld.delete(id);
+        }
+    }
+
+    /** One-shot warning icon at `pos` -- no live repositioning, just shown then removed. */
+    private static async _ShowBlockedIcon(player: mod.Player, pos: mod.Vector, message: mod.Message): Promise<void> {
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconOwner(icon, player);
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Cross);
+        mod.SetWorldIconColor(icon, DECOY_BLOCKED_ICON_COLOR);
+        mod.SetWorldIconText(icon, message);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+        await mod.Wait(DECOY_BLOCKED_ICON_DURATION_SECONDS);
+        try {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+            mod.UnspawnObject(icon as unknown as mod.Object);
+        } catch { }
+    }
+
     static OnRayCastHit(player: mod.Player, point: mod.Vector, normal: mod.Vector): void {
         const id = mod.GetObjId(player);
         DecoySpawner._raycastInFlight.delete(id);
@@ -13775,6 +13868,7 @@ class DecoySpawner {
         const isFloor = mod.YComponentOf(normal) >= PROP_SPAWNER_MIN_FLOOR_NORMAL_Y;
         if (!isFloor) {
             Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            DecoySpawner._ShowBlockedIcon(player, point, MakeMessage(mod.stringkeys.decoy_invalid_surface));
             return;
         }
         DecoySpawner._RequestSpawn(player, point);
@@ -13782,6 +13876,9 @@ class DecoySpawner {
 
     static OnRayCastMissed(player: mod.Player): void {
         DecoySpawner._raycastInFlight.delete(mod.GetObjId(player));
+        Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+        const { end } = DecoySpawner._GetRaycastVectors(player);
+        DecoySpawner._ShowBlockedIcon(player, end, MakeMessage(mod.stringkeys.decoy_out_of_range));
     }
 
     private static _SpawnAndEnableVfx(vfx: mod.RuntimeSpawn_Common, pos: mod.Vector): void {
@@ -13873,9 +13970,17 @@ class DecoySpawner {
         const token = ++DecoySpawner._lifeTokenSeq;
         entry.lifeToken = token;
 
-        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, entry.spawnPos ?? ZERO_VEC, ZERO_VEC) as mod.WorldIcon;
+        // Float the icon up near the decoy's torso instead of at its feet.
+        const basePos = entry.spawnPos ?? ZERO_VEC;
+        const iconPos = mod.CreateVector(
+            mod.XComponentOf(basePos),
+            mod.YComponentOf(basePos) + DECOY_TIMER_ICON_HEIGHT_OFFSET,
+            mod.ZComponentOf(basePos)
+        );
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, iconPos, ZERO_VEC) as mod.WorldIcon;
         if (icon) {
             mod.SetWorldIconOwner(icon, entry.ownerPlayer); // visible only to the player who placed it
+            mod.SetWorldIconColor(icon, DECOY_TIMER_COLOR_NORMAL);
             entry.worldIcon = icon;
         }
 
@@ -13885,6 +13990,12 @@ class DecoySpawner {
             if (icon) {
                 mod.SetWorldIconText(icon, MakeMessage(mod.stringkeys.decoy_timer_remaining, Math.ceil(remaining)));
                 mod.EnableWorldIconText(icon, true);
+                const color = remaining <= DECOY_TIMER_CRITICAL_SECONDS
+                    ? DECOY_TIMER_COLOR_CRITICAL
+                    : remaining <= DECOY_TIMER_WARN_SECONDS
+                        ? DECOY_TIMER_COLOR_WARN
+                        : DECOY_TIMER_COLOR_NORMAL;
+                mod.SetWorldIconColor(icon, color);
             }
             await mod.Wait(1);
             remaining -= 1;
@@ -13950,11 +14061,23 @@ class DecoySpawner {
         return true;
     }
 
-    /** Called on owner death/undeploy and on gadget re-roll: kills/unspawns their decoy (pending or alive). */
-    static CleanupPlayer(player: mod.Player): void {
+    /**
+     * Called from InitializePlayerEquipment on every mid-round equipment refresh (LMS, Final
+     * Five, etc.). Only resets the gadget-tool bookkeeping (equipped/raycast-in-flight/banner) --
+     * an already-placed decoy is left alone so it survives round-phase changes. Full teardown
+     * (killing the decoy itself) only happens via CleanupPlayer.
+     */
+    static CleanupPlayerGadgetState(player: mod.Player): void {
         const id = mod.GetObjId(player);
         DecoySpawner._equipped.delete(id);
         DecoySpawner._raycastInFlight.delete(id);
+        DecoySpawner._gadgetHeld.delete(id);
+    }
+
+    /** Called on owner death/undeploy and round end: kills/unspawns their decoy (pending or alive). */
+    static CleanupPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        DecoySpawner.CleanupPlayerGadgetState(player);
 
         const entry = DecoySpawner._ownerToBot.get(id);
         if (entry) {
@@ -13994,6 +14117,7 @@ class DecoySpawner {
         DecoySpawner._activeBotObjIds.clear();
         DecoySpawner._equipped.clear();
         DecoySpawner._raycastInFlight.clear();
+        DecoySpawner._gadgetHeld.clear();
     }
 
     static IsActiveDecoyObjId(objId: number): boolean {
