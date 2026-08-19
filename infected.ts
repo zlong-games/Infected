@@ -8123,7 +8123,6 @@ async function TriggerAIChargeLeap(slot: InfectedBotSlot, bot: mod.Player): Prom
         await mod.Wait(crouchLeadSeconds);
         if (!PlayerIsAliveAndValid(bot)) return;
 
-        mod.AIIdleBehavior(bot);
         await mod.Wait(0.05);
         if (!PlayerIsAliveAndValid(bot)) return;
         EnsureInfectedBotSledgehammerActive(bot);
