@@ -215,8 +215,6 @@ const LMS_HINT_STRING_KEYS = [
 const LMS_BUFF_STRING_KEYS = [
     "lms_buff_fast_reload",
     "lms_buff_bonus_health",
-    "lms_buff_damage_resist",
-    "lms_buff_ammo_on_kill",
 ] as const;
 
 const ALPHA_BUFF_STRING_KEYS = [
@@ -421,6 +419,9 @@ const RARITY_RARE_THRESHOLD = 80;
 const RARITY_LEGENDARY_THRESHOLD = 90;
 const ATTACHMENT_RARITY_RARE_THRESHOLD = 15;
 const ATTACHMENT_RARITY_LEGENDARY_THRESHOLD = 30;
+// Gadgets use their own (lower) legendary threshold than weapons -- Weapons.legendarySurvivorGadgets
+// is the seed list of gadgets at/above this rarity, rolled into the phase-1 sidearm pool.1
+const GADGET_RARITY_LEGENDARY_THRESHOLD = 70;
 
 
 const ALL_WEAPON_IDS: mod.Weapons[] = Object.keys(mod.Weapons)
@@ -832,14 +833,24 @@ interface EquippedItem {
     rarity?: number;
     appliedUpgradeKeys?: string[];
     nameKey?: string;
+    // Set on sidearm-slot EquippedItems only -- every sidearm card also rolls an independent
+    // gadget (see Weapons.buildSidearmBundleOptions). Picking the sidearm grants both.
+    bundledGadget?: EquippedItem;
 }
 
-// SlotLoadoutOptions: three options per weapon slot, plus auto gadget/throwable
+// Returns the "legendary" rarity threshold that applies to a given item -- gadgets use the
+// lower GADGET_RARITY_LEGENDARY_THRESHOLD, while weapons use the standard
+// RARITY_LEGENDARY_THRESHOLD.
+function GetLegendaryThresholdForItem(item: { gadget?: mod.Gadgets }): number {
+    return item.gadget !== undefined ? GADGET_RARITY_LEGENDARY_THRESHOLD : RARITY_LEGENDARY_THRESHOLD;
+}
+
+// SlotLoadoutOptions: three options per weapon slot (sidearm cards each bundle a gadget), plus
+// a fixed throwable
 interface SlotLoadoutOptions {
     sidearmOptions: Array<EquippedItem>;
     primaryOptions: Array<EquippedItem>;
     lmsOptions: Array<EquippedItem>;
-    gadget: EquippedItem;
     throwable: EquippedItem;
 }
 
@@ -848,6 +859,29 @@ interface WeaponAmmoProfile {
     reserveMags: number; // reserve ammo in multiples of mag size
     resupplyMags: number; // resupply amount in multiples of mag size
 }
+
+// GadgetAmmoProfile: two distinct ammo models for gadgets.
+//   'charge'  -- a flat charge count with no separate chamber/reserve split (mines, deployables).
+//               Read/written entirely through GetInventoryAmmo/SetInventoryAmmo.
+//   'chamber' -- behaves like a weapon: a chamber/tube/magazine (GetInventoryAmmo/SetInventoryAmmo)
+//               plus a separate spare-ammo reserve pool (GetInventoryMagazineAmmo/
+//               SetInventoryMagazineAmmo), same split used for primary/sidearm weapons. This is
+//               the launcher (single-round tube, 2 in reserve) and incendiary shotgun (5-round
+//               mag, 5 in reserve) case -- driving them through SetInventoryAmmo alone can only
+//               ever fill the tube/mag, never the reserve, which is why those gadgets looked like
+//               SetInventoryAmmo "didn't work" for anything past the first shot.
+interface GadgetChargeProfile {
+    kind: 'charge';
+    maxCharges: number;
+    resupplyAmount: number;
+}
+interface GadgetChamberProfile {
+    kind: 'chamber';
+    magSize: number; // tube/magazine capacity (e.g. 1 for the single-tube launchers, 5 for the incendiary shotgun)
+    reserveMags: number; // spare reserve in multiples of magSize
+    resupplyMags: number; // resupply amount in multiples of magSize
+}
+type GadgetAmmoProfile = GadgetChargeProfile | GadgetChamberProfile;
 
 class Weapons {
 
@@ -1248,22 +1282,32 @@ class Weapons {
     }
 
     static baseWeapons: PooledItemDef[] = [
-        { nameKey: "p18", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_P18, packageImage: Weapons.baseWeaponPackages["p18"] },
-        { nameKey: "g22", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_GGH_22, packageImage: Weapons.baseWeaponPackages["g22"] },
-        // { nameKey: "vz61", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Side, packageImage: Weapons.baseWeaponPackages["vz61"] },
-        { nameKey: "es57", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_ES_57, packageImage: Weapons.baseWeaponPackages["es57"] },
-        { nameKey: "m45a1", rarity: 50, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M45A1, packageImage: Weapons.baseWeaponPackages["m45a1"] },
-        { nameKey: "m357", rarity: 60, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
-        { nameKey: "m44", rarity: 80, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M44, packageImage: Weapons.baseWeaponPackages["m44"] },
+        // Sidearm rarities: the semi-autos (p18/g22/es57/m45a1) now sit just under the "rare" band
+        // (RARITY_RARE_THRESHOLD == 80), roughly equal to each other, in the high band that rolls
+        // 1-2 attachments (see getAttachmentCountForWeapon). buildWeaponOption's clamp only holds a
+        // card below RARITY_RARE_THRESHOLD while pkg.addedRarity stays under
+        // ATTACHMENT_RARITY_RARE_THRESHOLD (15) -- so landing even 1-2 higher-rarity attachments is
+        // enough for a roll to break through into the rare band on its own, same as any other
+        // weapon. The revolvers (m357/m44) are pushed up into the legendary band
+        // (>= RARITY_LEGENDARY_THRESHOLD == 90) instead, so they always read as legendary rolls
+        // regardless of attachments. Every sidearm card also bundles an independently-rolled
+        // gadget (see Weapons.buildSidearmBundleOptions) -- the two are never mutually exclusive.
+        { nameKey: "p18", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_P18, packageImage: Weapons.baseWeaponPackages["p18"] },
+        { nameKey: "g22", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_GGH_22, packageImage: Weapons.baseWeaponPackages["g22"] },
+        // { nameKey: "vz61", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Side, packageImage: Weapons.baseWeaponPackages["vz61"] },
+        { nameKey: "es57", rarity: 72, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_ES_57, packageImage: Weapons.baseWeaponPackages["es57"] },
+        { nameKey: "m45a1", rarity: 72, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M45A1, packageImage: Weapons.baseWeaponPackages["m45a1"] },
+        { nameKey: "m357", rarity: 90, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
+        { nameKey: "m44", rarity: 92, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M44, packageImage: Weapons.baseWeaponPackages["m44"] },
         { nameKey: "m87a1", rarity: 40, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_M87A1, packageImage: Weapons.baseWeaponPackages["m87a1"] },
         { nameKey: "m1014", rarity: 40, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_M1014, packageImage: Weapons.baseWeaponPackages["m1014"] },
         { nameKey: "db12", rarity: 60, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_DB_12, packageImage: Weapons.baseWeaponPackages["db12"] },
         { nameKey: "185ksk", rarity: 80, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun__185KS_K, packageImage: Weapons.baseWeaponPackages["185ksk"] },
         { nameKey: "m4a1", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M4A1, packageImage: Weapons.baseWeaponPackages["m4a1"] },
-        { nameKey: "sl9", rarity: 60, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_SL9, packageImage: Weapons.baseWeaponPackages["sl9"] },
+        { nameKey: "sl9", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_SL9, packageImage: Weapons.baseWeaponPackages["sl9"] },
         { nameKey: "usg90", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_USG_90, packageImage: Weapons.baseWeaponPackages["usg90"] },
-        { nameKey: "m277", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M277, packageImage: Weapons.baseWeaponPackages["m277"] },
-        { nameKey: "rpkm", rarity: 50, category: ItemPoolCategory.LMS, item: mod.Weapons.LMG_RPKM, packageImage: Weapons.baseWeaponPackages["rpkm"] },
+        { nameKey: "m277", rarity: 30, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M277, packageImage: Weapons.baseWeaponPackages["m277"] },
+        { nameKey: "rpkm", rarity: 70, category: ItemPoolCategory.LMS, item: mod.Weapons.LMG_RPKM, packageImage: Weapons.baseWeaponPackages["rpkm"] },
         { nameKey: "ak205", rarity: 70, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_AK_205, packageImage: Weapons.baseWeaponPackages["ak205"] },
         { nameKey: "kord6p67", rarity: 80, category: ItemPoolCategory.LMS, item: mod.Weapons.AssaultRifle_KORD_6P67, packageImage: Weapons.baseWeaponPackages["kord6p67"] },
         { nameKey: "m123k", rarity: 80, category: ItemPoolCategory.LMS, item: mod.Weapons.LMG_M123K, packageImage: Weapons.baseWeaponPackages["m123k"] },
@@ -1355,23 +1399,63 @@ class Weapons {
         return { magSize, reserveMax, resupplyAmount };
     }
 
+    static GetAmmoForGadget(item: EquippedItem): GadgetAmmoProfile | undefined {
+        if (!item.gadget) return undefined;
+        const nameKey = item.nameKey;
+        if (!nameKey) return undefined;
+        return Weapons.gadgetAmmoProfiles[nameKey];
+    }
+
     static baseSurvivorGadgets: PooledItemDef[] = [
-        { nameKey: "flash_grenade", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Flash_Grenade },
+        // incendiary_grenade removed from the roll pool -- it's now a fixed standard item every
+        // survivor gets (see GenerateLoadoutOptions' Throwable section).
         { nameKey: "prop_spawner_gadget", rarity: 5, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
         { nameKey: "decoy_gadget", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
-        { nameKey: "incendiary_grenade", rarity: 10, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Incendiary_Grenade },
-        { nameKey: "supply_pouch", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Supply_Pouch },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
-        { nameKey: "supply_bag", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
-        { nameKey: "thermobaric_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
-        { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
-        
-        // { nameKey: "frag_grenade_mini", rarity: 5, category: ItemPoolCategory.throwables, item: mod.Gadgets.Throwable_Mini_Frag_Grenade },
-        // { nameKey: "deployable_cover", rarity: 10, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Deployable_Cover },
+        { nameKey: "supply_bag", rarity: 40, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         // { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
-        // { nameKey: "he_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_High_Explosive },
-        // { nameKey: "incendiary_airburst", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Incendiary_Airburst },
     ]
+
+    // legendarySurvivorGadgets: the "legendary" gadget tier (rarity >= GADGET_RARITY_LEGENDARY_THRESHOLD).
+    // Kept as its own list for easy future maintenance of the legendary tier. Folded into the
+    // combined bundle pool alongside baseSurvivorGadgets' gadgets-category entries (see
+    // GenerateLoadoutOptions/RerollSlotOptions' use of Weapons.buildSidearmBundleOptions) --
+    // every sidearm card independently rolls one gadget from that combined pool.
+    static legendarySurvivorGadgets: PooledItemDef[] = [
+        { nameKey: "thermobaric_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Thermobaric_Grenade },
+        { nameKey: "he_launcher", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_High_Explosive },
+        { nameKey: "incendiary_airburst", rarity: 70, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Launcher_Incendiary_Airburst },
+        { nameKey: "incendiary_shotgun", rarity: 80, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Incendiary_Round_Shotgun },
+    ]
+
+    // gadgetAmmoProfiles: ammo catalog for gadgets with a finite charge count.
+    // 'charge' entries fully top up in a single resupply interaction (resupplyAmount ==
+    // maxCharges) -- true for every flat-charge gadget below, there's no partial-charge-reload
+    // concept for those. 'chamber' entries (single-tube launchers, incendiary shotgun) mirror
+    // weaponAmmoProfiles' mag+reserve split -- see GadgetChamberProfile above -- and also fully
+    // top up their reserve in one interaction (reserveMags == resupplyMags). Gadgets not listed
+    // here (prop spawner, decoy) are left on their existing engine-default initialization/resupply
+    // path.
+    //
+    // ap_mine is capped at 1, not the 2 a real supply bag grants in vanilla: logging confirmed
+    // SetInventoryAmmo hard-clamps Misc_Anti_Personnel_Mine's loaded ammo to 1 regardless of what
+    // value is requested (Charges Requested:2 Actual:1, then Requested:1 Actual:0 on a second
+    // attempt). Uncataloguing it to fall through to the native mod.Resupply(SupplyBag) path was
+    // tried as a workaround on the theory that path isn't bound by the same ceiling, but in
+    // practice it granted nothing at all -- so that fallback doesn't work for this gadget either
+    // (or never did). Back on the explicit 'charge' profile, pinned to the one value confirmed to
+    // actually land, so resupply correctly reports "already full" instead of silently failing.
+    static gadgetAmmoProfiles: Record<string, GadgetAmmoProfile> = {
+        // Single-round tube + 2 in reserve = 3 total, per launcher.
+        thermobaric_launcher: { kind: 'chamber', magSize: 1, reserveMags: 2, resupplyMags: 2 },
+        he_launcher: { kind: 'chamber', magSize: 1, reserveMags: 2, resupplyMags: 2 },
+        incendiary_airburst: { kind: 'chamber', magSize: 1, reserveMags: 2, resupplyMags: 2 },
+        // 5-round magazine + 5 in reserve = 10 total; player reloads (mag refill from reserve)
+        // after their 5th consecutive shot, same as any other magazine-fed weapon.
+        incendiary_shotgun: { kind: 'chamber', magSize: 5, reserveMags: 1, resupplyMags: 1 },
+        ap_mine: { kind: 'charge', maxCharges: 1, resupplyAmount: 1 },
+        // demo_charge: { kind: 'charge', maxCharges: 3, resupplyAmount: 3 },
+    };
 
     static GetLoadoutFromPlayerProfile(playerProfile: PlayerProfile): Array<EquippedItem> | undefined {
         return playerProfile.chosenLoadoutThisRound;
@@ -1484,10 +1568,17 @@ class Weapons {
             while (attempt < 5) {
                 const next = Weapons.getRandomWeaponFromRarity(weapons, excludeNames);
                 if (!next) break;
-                const candidate = Weapons.buildWeaponOption(next, slot);
+                // NOTE: this gadget-category special-case is now dead for every current call site
+                // (Primary/LMS pools never contain gadget-category defs, and the sidearm slot uses
+                // Weapons.buildSidearmBundleOptions instead). Left in place -- harmless, and it's a
+                // cheap safety net if a gadget-category def ever ends up in a weapon pool again.
+                const candidate = next.category === ItemPoolCategory.gadgets
+                    ? Weapons.buildGadgetOption(next, slot)
+                    : Weapons.buildWeaponOption(next, slot);
                 const candidateKey = normalizeUpgrades(candidate.appliedUpgradeKeys);
                 const isDuplicate = options.some(opt =>
-                    opt.weapon === candidate.weapon && normalizeUpgrades(opt.appliedUpgradeKeys) === candidateKey
+                    opt.weapon === candidate.weapon && opt.gadget === candidate.gadget &&
+                    normalizeUpgrades(opt.appliedUpgradeKeys) === candidateKey
                 );
                 if (!isDuplicate) {
                     chosen = candidate;
@@ -1498,7 +1589,9 @@ class Weapons {
             if (!chosen) {
                 const fallback = Weapons.getRandomWeaponFromRarity(weapons, excludeNames);
                 if (!fallback) break;
-                chosen = Weapons.buildWeaponOption(fallback, slot);
+                chosen = fallback.category === ItemPoolCategory.gadgets
+                    ? Weapons.buildGadgetOption(fallback, slot)
+                    : Weapons.buildWeaponOption(fallback, slot);
             }
             options.push(chosen);
         }
@@ -1516,10 +1609,68 @@ class Weapons {
         };
     }
 
+    // buildSidearmBundleOptions: builds `count` sidearm cards, each pairing an independently
+    // rolled sidearm (deduped by nameKey+upgrades across the returned cards, same approach as
+    // buildWeaponOptions) with an independently rolled gadget from gadgetPool (not deduped --
+    // it's fine for two cards to roll the same gadget). The combined card's own .rarity is set
+    // to the rounded average of the sidearm's rolled rarity and the bundled gadget's rarity, so
+    // picking a card always grants both items together.
+    static buildSidearmBundleOptions(sidearmDefs: PooledItemDef[], gadgetPool: PooledItemDef[], count: number): EquippedItem[] {
+        const options: EquippedItem[] = [];
+        const normalizeUpgrades = (keys?: string[]) => (keys || []).slice().sort().join("|");
+        for (let i = 0; i < count; i++) {
+            const excludeNames = options.map(opt => opt.nameKey).filter((k): k is string => !!k);
+            let attempt = 0;
+            let chosenSidearm: EquippedItem | undefined;
+            while (attempt < 5) {
+                const next = Weapons.getRandomWeaponFromRarity(sidearmDefs, excludeNames);
+                if (!next) break;
+                const candidate = Weapons.buildWeaponOption(next, InventorySlot.Sidearm);
+                const candidateKey = normalizeUpgrades(candidate.appliedUpgradeKeys);
+                const isDuplicate = options.some(opt =>
+                    opt.weapon === candidate.weapon &&
+                    normalizeUpgrades(opt.appliedUpgradeKeys) === candidateKey
+                );
+                if (!isDuplicate) {
+                    chosenSidearm = candidate;
+                    break;
+                }
+                attempt++;
+            }
+            if (!chosenSidearm) {
+                const fallback = Weapons.getRandomWeaponFromRarity(sidearmDefs, excludeNames);
+                if (!fallback) break;
+                chosenSidearm = Weapons.buildWeaponOption(fallback, InventorySlot.Sidearm);
+            }
+
+            // Independently roll the bundled gadget half of this card.
+            const gadgetDef = Weapons.getRandomWeaponFromRarity(gadgetPool);
+            const bundledGadget = gadgetDef ? Weapons.buildGadgetOption(gadgetDef, InventorySlot.Gadget) : undefined;
+
+            const sidearmRarity = chosenSidearm.rarity ?? 0;
+            const gadgetRarity = bundledGadget?.rarity ?? 0;
+            options.push({
+                ...chosenSidearm,
+                bundledGadget,
+                rarity: bundledGadget ? Math.round((sidearmRarity + gadgetRarity) / 2) : sidearmRarity,
+            });
+        }
+        return options;
+    }
+
     static BuildDefaultLoadoutFromOptions(options: SlotLoadoutOptions): Array<EquippedItem> {
         const items: Array<EquippedItem> = [];
-        if (options.sidearmOptions[0]) items.push(options.sidearmOptions[0]);
-        if (options.gadget) items.push(options.gadget);
+
+        // Every sidearm card bundles an independently-rolled gadget (see
+        // Weapons.buildSidearmBundleOptions) -- picking a sidearm always grants both.
+        const sidearmSelection = options.sidearmOptions[0];
+        if (sidearmSelection) {
+            items.push(sidearmSelection);
+            if (sidearmSelection.bundledGadget) {
+                items.push({ ...sidearmSelection.bundledGadget, inventorySlot: InventorySlot.Gadget });
+            }
+        }
+
         if (options.throwable) items.push(options.throwable);
         if (options.primaryOptions[0]) items.push(options.primaryOptions[0]);
         if (options.lmsOptions[0]) items.push(options.lmsOptions[0]);
@@ -1545,43 +1696,30 @@ class Weapons {
         }
         console.log(`GenerateLoadoutOptions | LMS options: ${lmsOptions.map(p => p.text).join(', ')}`);
 
-        // Sidearm Weapon
+        // Sidearm Weapon -- every card also bundles an independently-rolled gadget from the
+        // combined gadget pool (baseSurvivorGadgets' gadgets-category entries + all of
+        // legendarySurvivorGadgets). See Weapons.buildSidearmBundleOptions.
         const sidearmWeapons = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.sidearm);
-        console.log(`GenerateLoadoutOptions | Sidearm weapon pool size: ${sidearmWeapons.length}`);
-        const sidearmOptions = Weapons.buildWeaponOptions(sidearmWeapons, InventorySlot.Sidearm, 3);
+        const bundleGadgetPool: PooledItemDef[] = [
+            ...Weapons.baseSurvivorGadgets.filter(g => g.category === ItemPoolCategory.gadgets),
+            ...Weapons.legendarySurvivorGadgets,
+        ];
+        console.log(`GenerateLoadoutOptions | Sidearm weapon pool size: ${sidearmWeapons.length}, bundle gadget pool size: ${bundleGadgetPool.length}`);
+        const sidearmOptions = Weapons.buildSidearmBundleOptions(sidearmWeapons, bundleGadgetPool, 3);
         if (sidearmOptions.length === 0) {
             console.log(`GenerateLoadoutOptions ERROR | Failed to select sidearm weapon options`);
         }
         console.log(`GenerateLoadoutOptions | Sidearm options: ${sidearmOptions.map(p => p.text).join(', ')}`);
 
-        // Gadget (primary)
-        const gadgetChoices = Weapons.baseSurvivorGadgets.filter(g => g.category === ItemPoolCategory.gadgets);
-        console.log(`GenerateLoadoutOptions | Gadget pool size: ${gadgetChoices.length}`);
-        const gadgetDef = Weapons.getRandomWeaponFromRarity(gadgetChoices);
-        if (!gadgetDef) {
-            console.log(`GenerateLoadoutOptions ERROR | Failed to select gadget`);
-        }
-        const gadget = gadgetDef ? Weapons.buildGadgetOption(gadgetDef, InventorySlot.Gadget) : {
-            gadget: mod.Gadgets.Deployable_Cover,
-            inventorySlot: InventorySlot.Gadget,
-            text: mod.stringkeys.deployable_cover,
-            packageImage: mod.CreateNewWeaponPackage(),
-            rarity: 1,
-        };
-
-        // Throwable
-        const throwableChoices = Weapons.baseSurvivorGadgets.filter(g => g.category === ItemPoolCategory.throwables);
-        console.log(`GenerateLoadoutOptions | Throwable pool size: ${throwableChoices.length}`);
-        const throwableDef = Weapons.getRandomWeaponFromRarity(throwableChoices);
-        if (!throwableDef) {
-            console.log(`GenerateLoadoutOptions ERROR | Failed to select throwable`);
-        }
-        const throwable = throwableDef ? Weapons.buildGadgetOption(throwableDef, InventorySlot.Throwable) : {
+        // Throwable -- fixed standard equipment, no longer a roll (incendiary_grenade was
+        // removed from baseSurvivorGadgets' throwables pool entirely).
+        const throwable: EquippedItem = {
             gadget: mod.Gadgets.Throwable_Incendiary_Grenade,
             inventorySlot: InventorySlot.Throwable,
             text: mod.stringkeys.incendiary_grenade,
             packageImage: mod.CreateNewWeaponPackage(),
             rarity: 1,
+            nameKey: "incendiary_grenade",
         };
 
         console.log(`GenerateLoadoutOptions | Generated slot options for player ${playerProfile.playerID}`);
@@ -1589,7 +1727,6 @@ class Weapons {
             sidearmOptions,
             primaryOptions,
             lmsOptions,
-            gadget,
             throwable,
         };
     }
@@ -1610,9 +1747,16 @@ class Weapons {
                 return Weapons.buildWeaponOptions(lmsWeapons, InventorySlot.LMS, count);
             }
             case InventorySlot.Sidearm: {
+                // Rerolling the sidearm card inherently rerolls its bundled gadget too.
                 const sidearmWeapons = Weapons.baseWeapons.filter(w => w.category === ItemPoolCategory.sidearm);
-                return Weapons.buildWeaponOptions(sidearmWeapons, InventorySlot.Sidearm, count);
+                const bundleGadgetPool: PooledItemDef[] = [
+                    ...Weapons.baseSurvivorGadgets.filter(g => g.category === ItemPoolCategory.gadgets),
+                    ...Weapons.legendarySurvivorGadgets,
+                ];
+                return Weapons.buildSidearmBundleOptions(sidearmWeapons, bundleGadgetPool, count);
             }
+            // No standalone Gadget or Throwable slot exists to reroll -- gadgets always arrive
+            // bundled with the sidearm card, and the throwable is fixed standard equipment.
             default:
                 return [];
         }
@@ -2144,6 +2288,39 @@ class UI {
         }
     }
 
+    // A single stacked resupply-notification bar (see PlayerProfile.ShowStackedResupplyFeedback).
+    // Multiple lines are stacked below UI.ammoFeedbackY, one per item that gained ammo, using the
+    // same lineIndex-based vertical offset convention as CreateAlphaBuffWidget above.
+    static CreateResupplyFeedbackLine(
+        player: mod.Player,
+        playerID: number,
+        lineIndex: number,
+        message: mod.Message,
+    ): mod.UIWidget | undefined {
+        const containerWidth = 300;
+        const containerHeight = UI.ammoFeedbackHeight;
+        const yOffset = UI.ammoFeedbackY + (lineIndex * (containerHeight + UI.notificationVerticalGap));
+
+        const widget = ParseUI({
+            type: "Text",
+            name: `resupply_feedback_line_${playerID}_${lineIndex}`,
+            position: [0, yOffset, 0],
+            size: [containerWidth, containerHeight],
+            anchor: mod.UIAnchor.TopCenter,
+            textAnchor: mod.UIAnchor.Center,
+            textLabel: message,
+            textSize: 18,
+            textColor: UI.blackColor,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: UI.battlefieldWhite,
+            bgAlpha: 0.9,
+            depth: mod.UIDepth.AboveGameUI,
+            playerId: player,
+        }) as mod.UIWidget;
+
+        return widget;
+    }
+
 }
 
 
@@ -2402,56 +2579,62 @@ class ScoreboardUI {
         this.UpdateTeamCount(team);
     }
 
+    // Same underlying bug as GameStateNotificationWidget's dashes (see NotificationBorderDashes'
+    // history above it in this file): built with the raw mod.AddUIContainer(name, pos, size,
+    // anchor, receiver) overload -- no parent -- then reparented afterward via
+    // SetUIWidgetParent, which left the TopLeft/BottomLeft/TopRight/BottomRight corner anchors
+    // resolved against the real screen instead of the small team-count box. Unlike the
+    // notification dashes, this can't be inlined into a single parent ParseUI() call's `children`
+    // array -- it's invoked standalone, after the fact, against an already-existing
+    // red/blue_team_container (both on initial CreateUI() and again on every
+    // RedrawTeamIndicationWidgets() call) -- so instead each bar is built via its own ParseUI()
+    // call with `parent: teamParentContainer` passed at creation time.
     CreateTeamIndicationWidget(): mod.UIWidget[] | undefined {
         if (!this.rootWidget)
             return;
-        let widgetGroup: mod.UIWidget[] = [];
+        const widgetGroup: mod.UIWidget[] = [];
         const corners = ["top_left", "bottom_left", "top_right", "bottom_right"];
         const anchors = [mod.UIAnchor.TopLeft, mod.UIAnchor.BottomLeft, mod.UIAnchor.TopRight, mod.UIAnchor.BottomRight];
-        let teamRightSide: boolean = false;
-        if (this._PlayerProfile.isInfectedTeam) {
-            teamRightSide = true;
-        }
+        const teamRightSide = this._PlayerProfile.isInfectedTeam;
         const playerTeamUIName = "name" + this._PlayerProfile.playerID;
-        let yOffset = 3;
-        const horizontalPosition = mod.CreateVector(0, 0, 0);
-        const verticalPositionLeft = mod.CreateVector(0, yOffset, 0); //annoying bug with vertical bar overlap.
-        const verticalPositionRight = mod.CreateVector(0, yOffset, 0); //annoying bug with vertical bar overlap.
-        const horizontalSize = mod.CreateVector(15, 3, 0); // width, height, unused;
-        const verticalSize = mod.CreateVector(3, 20, 0);    // width, height, unused;
+        const yOffset = 3;
+        const horizontalSize: [number, number] = [15, 3];
+        const verticalSize: [number, number] = [3, 20];
+        const teamColor = teamRightSide ? UI.battlefieldRed : UI.battlefieldBlue;
+        const teamParentContainer = mod.FindUIWidgetWithName(teamRightSide ? `red_team_container_${this._PlayerProfile.playerID}` : `blue_team_container_${this._PlayerProfile.playerID}`) as mod.UIWidget;
+        if (!teamParentContainer) return;
+
         for (let cornerIndex = 0; cornerIndex < 4; cornerIndex++) {
-            let horizontalBorderName = playerTeamUIName + corners[cornerIndex];
-            mod.AddUIContainer(
-                horizontalBorderName,
-                horizontalPosition,
-                horizontalSize,
-                anchors[cornerIndex],
-                this._PlayerProfile.player
-            )
-            let horizontalBarWidget = mod.FindUIWidgetWithName(horizontalBorderName) as mod.UIWidget;
-            let teamParentContainer = mod.FindUIWidgetWithName(teamRightSide ? `red_team_container_${this._PlayerProfile.playerID}` : `blue_team_container_${this._PlayerProfile.playerID}`);
-            mod.SetUIWidgetVisible(horizontalBarWidget, true);
-            mod.SetUIWidgetParent(horizontalBarWidget, teamParentContainer);
-            mod.SetUIWidgetBgFill(horizontalBarWidget, mod.UIBgFill.Solid);
-            mod.SetUIWidgetBgColor(horizontalBarWidget, teamRightSide ? UI.battlefieldRed : UI.battlefieldBlue);
-            mod.SetUIWidgetBgAlpha(horizontalBarWidget, 1);
+            const horizontalBorderName = playerTeamUIName + corners[cornerIndex];
+            const horizontalBarWidget = ParseUI({
+                type: "Container",
+                name: horizontalBorderName,
+                parent: teamParentContainer,
+                position: [0, 0],
+                size: horizontalSize,
+                anchor: anchors[cornerIndex],
+                playerId: this._PlayerProfile.player,
+                bgFill: mod.UIBgFill.Solid,
+                bgColor: teamColor,
+                bgAlpha: 1,
+            }) as mod.UIWidget;
 
-            let verticalBorderName = horizontalBorderName + "_vertical";
-            mod.AddUIContainer(
-                verticalBorderName,
-                (cornerIndex < 2) ? verticalPositionLeft : verticalPositionRight,
-                verticalSize,
-                anchors[cornerIndex],
-                this._PlayerProfile.player
-            )
-            let verticalBarWidget = mod.FindUIWidgetWithName(verticalBorderName) as mod.UIWidget;
-            mod.SetUIWidgetVisible(verticalBarWidget, true);
-            mod.SetUIWidgetParent(verticalBarWidget, teamParentContainer);
-            mod.SetUIWidgetBgFill(verticalBarWidget, mod.UIBgFill.Solid);
-            mod.SetUIWidgetBgColor(verticalBarWidget, teamRightSide ? UI.battlefieldRed : UI.battlefieldBlue);
-            mod.SetUIWidgetBgAlpha(verticalBarWidget, 1);
+            const verticalBorderName = horizontalBorderName + "_vertical";
+            const verticalBarWidget = ParseUI({
+                type: "Container",
+                name: verticalBorderName,
+                parent: teamParentContainer,
+                position: [0, yOffset], // same offset both sides -- pre-existing "vertical bar overlap" quirk, unrelated to this fix
+                size: verticalSize,
+                anchor: anchors[cornerIndex],
+                playerId: this._PlayerProfile.player,
+                bgFill: mod.UIBgFill.Solid,
+                bgColor: teamColor,
+                bgAlpha: 1,
+            }) as mod.UIWidget;
 
-            widgetGroup.push(horizontalBarWidget, verticalBarWidget);
+            if (horizontalBarWidget) widgetGroup.push(horizontalBarWidget);
+            if (verticalBarWidget) widgetGroup.push(verticalBarWidget);
         }
         return widgetGroup;
     }
@@ -2460,10 +2643,8 @@ class ScoreboardUI {
 class GameStateNotificationWidget {
     uiID = "game_state_notification_ui"
     rootWidget: mod.UIWidget | undefined;
-    notificationBorderWidget: mod.UIWidget[] | undefined;
     containerWidth = 600;
     containerHeight = 60;
-    borderNo = 0;
     padding = 1;
     bgBorderColor = UI.battlefieldGrey;
     bgColor = BLACK_COLOR;
@@ -2503,6 +2684,45 @@ class GameStateNotificationWidget {
     }
 
     create(message: mod.Message) {
+        // Dash corners are declared inline in this ParseUI call's own `children` array (built up
+        // here, then spread into it) instead of being created afterward in a separate
+        // NotificationBorderDashes() pass. Passing `parent:` to a standalone, later ParseUI() call
+        // still didn't keep the dashes off the real screen edges -- they're nested exactly like
+        // every other successfully-corner-anchored element in this file now (e.g. the option
+        // cards' rarity badge), which rules out any timing/registration gap between the parent
+        // container being created and these children being attached to it. Also renamed away from
+        // "game_state_notification_border_*" to "gsn_dash_*" so a stale, still-unparented widget
+        // left over from a previous build under the old name can't get silently reused instead of
+        // a fresh one being created.
+        const corners = ["top_left", "bottom_left", "top_right", "bottom_right"];
+        const anchors = [mod.UIAnchor.TopLeft, mod.UIAnchor.BottomLeft, mod.UIAnchor.TopRight, mod.UIAnchor.BottomRight];
+        const dashYOffset = 3;
+        const horizontalSize: [number, number] = [17, 3];
+        const verticalSize: [number, number] = [3, 8];
+        const dashChildren: any[] = [];
+        for (let cornerIndex = 0; cornerIndex < 4; cornerIndex++) {
+            dashChildren.push({
+                type: "Container",
+                name: `gsn_dash_${corners[cornerIndex]}`,
+                position: [0, 0],
+                size: horizontalSize,
+                anchor: anchors[cornerIndex],
+                bgFill: mod.UIBgFill.Solid,
+                bgColor: UI.battlefieldWhite,
+                bgAlpha: 0.3,
+            });
+            dashChildren.push({
+                type: "Container",
+                name: `gsn_dash_${corners[cornerIndex]}_vertical`,
+                position: [0, dashYOffset],
+                size: verticalSize,
+                anchor: anchors[cornerIndex],
+                bgFill: mod.UIBgFill.Solid,
+                bgColor: UI.battlefieldWhite,
+                bgAlpha: 0.3,
+            });
+        }
+
         this.rootWidget = ParseUI({
             type: "Container",
             name: "game_state_notification_background",
@@ -2523,6 +2743,7 @@ class GameStateNotificationWidget {
                     bgColor: this.bgBorderColor,
                     bgAlpha: 1
                 },
+                ...dashChildren,
             ]
         });
 
@@ -2537,57 +2758,6 @@ class GameStateNotificationWidget {
             bgAlpha: 0,
             textLabel: message
         })
-        this.notificationBorderWidget = this.NotificationBorderDashes();
-    }
-
-    NotificationBorderDashes(): mod.UIWidget[] | undefined {
-        if (!this.rootWidget)
-            return;
-        let widgetGroup: mod.UIWidget[] = [];
-        const corners = ["top_left", "bottom_left", "top_right", "bottom_right"];
-        const anchors = [mod.UIAnchor.TopLeft, mod.UIAnchor.BottomLeft, mod.UIAnchor.TopRight, mod.UIAnchor.BottomRight];
-        const widgetBorderName = `game_state_notification_border_${this.borderNo++}_`;
-        let yOffset = 3;
-        const horizontalPosition = mod.CreateVector(0, 0, 0);
-        const verticalPositionLeft = mod.CreateVector(0, yOffset, 0);
-        const verticalPositionRight = mod.CreateVector(0, yOffset, 0);
-        const horizontalSize = mod.CreateVector(17, 3, 0);
-        const verticalSize = mod.CreateVector(3, 8, 0);
-        let notificationParent = mod.FindUIWidgetWithName("game_state_notification_background");
-        if (!notificationParent) return;
-
-        for (let cornerIndex = 0; cornerIndex < 4; cornerIndex++) {
-            let horizontalBorderName = widgetBorderName + corners[cornerIndex];
-            mod.AddUIContainer(
-                horizontalBorderName,
-                horizontalPosition,
-                horizontalSize,
-                anchors[cornerIndex],
-            )
-            let horizontalBarWidget = mod.FindUIWidgetWithName(horizontalBorderName) as mod.UIWidget;
-            mod.SetUIWidgetVisible(horizontalBarWidget, true);
-            mod.SetUIWidgetParent(horizontalBarWidget, notificationParent);
-            mod.SetUIWidgetBgFill(horizontalBarWidget, mod.UIBgFill.Solid);
-            mod.SetUIWidgetBgColor(horizontalBarWidget, UI.battlefieldWhite);
-            mod.SetUIWidgetBgAlpha(horizontalBarWidget, 0.3);
-
-            let verticalBorderName = horizontalBorderName + "_vertical";
-            mod.AddUIContainer(
-                verticalBorderName,
-                (cornerIndex < 2) ? verticalPositionLeft : verticalPositionRight,
-                verticalSize,
-                anchors[cornerIndex],
-            )
-            let verticalBarWidget = mod.FindUIWidgetWithName(verticalBorderName) as mod.UIWidget;
-            mod.SetUIWidgetVisible(verticalBarWidget, true);
-            mod.SetUIWidgetParent(verticalBarWidget, notificationParent);
-            mod.SetUIWidgetBgFill(verticalBarWidget, mod.UIBgFill.Solid);
-            mod.SetUIWidgetBgColor(verticalBarWidget, UI.battlefieldWhite);
-            mod.SetUIWidgetBgAlpha(verticalBarWidget, 0.3);
-
-            widgetGroup.push(horizontalBarWidget, verticalBarWidget);
-        }
-        return widgetGroup;
     }
 }
 
@@ -2929,13 +3099,19 @@ class LoadoutSelectionMenu {
     loadoutOptions: SlotLoadoutOptions | undefined;
 
     width = 1200;
-    height = 480;
+    height = 500; // +20 to make room for the bundled-gadget frame, now shown above the sidearm cards
     rowWidth = this.width * 0.9;
     rowHeight = 170;
     padding = 20;
     headerTextSize = 35;
     itemTextSize = 16;
     iconSize = 180;
+    // Option-card button colors. Much darker resting state than the old battlefieldGreyBg so the
+    // hover/focus highlight (applied by OnPlayerUIButtonEvent, not native button state colors --
+    // see CreateOptionCard) actually reads as a distinct highlight.
+    static cardButtonRestColor = mod.CreateVector(0.03, 0.04, 0.05);
+    static cardButtonHoverColor = UI.battlefieldWhite;
+    static cardButtonHoverAlpha = 0.25;
 
     constructor(PlayerProfile: PlayerProfile) {
         this._PlayerProfile = PlayerProfile;
@@ -3184,12 +3360,19 @@ class LoadoutSelectionMenu {
         if (!this.loadoutOptions) return [];
         const items: Array<EquippedItem> = [];
 
-        const sidearm = this.selectedSlots.get(InventorySlot.Sidearm) || (includeDefaults ? this.loadoutOptions.sidearmOptions[0] : undefined);
+        const sidearm = this.selectedSlots.get(InventorySlot.Sidearm) ?? (includeDefaults ? this.loadoutOptions.sidearmOptions[0] : undefined);
         const primary = this.selectedSlots.get(InventorySlot.Primary) || (includeDefaults ? this.loadoutOptions.primaryOptions[0] : undefined);
         const lms = this.selectedSlots.get(InventorySlot.LMS) || (includeDefaults ? this.loadoutOptions.lmsOptions[0] : undefined);
 
-        if (sidearm) items.push(sidearm);
-        if (this.loadoutOptions.gadget) items.push(this.loadoutOptions.gadget);
+        // Every sidearm card bundles an independently-rolled gadget (see
+        // Weapons.buildSidearmBundleOptions) -- picking a sidearm always grants both.
+        if (sidearm) {
+            items.push(sidearm);
+            if (sidearm.bundledGadget) {
+                items.push({ ...sidearm.bundledGadget, inventorySlot: InventorySlot.Gadget });
+            }
+        }
+
         if (this.loadoutOptions.throwable) items.push(this.loadoutOptions.throwable);
         if (primary) items.push(primary);
         if (lms) items.push(lms);
@@ -3284,9 +3467,13 @@ class LoadoutSelectionMenu {
                     bgAlpha: 0,
                 },
                 {
+                    // Shifted down from 350 -> 382 (+32): the sidearm cards moved down by the same
+                    // amount (see CreateOptionCard's cardYOffset, 15 -> 37) to make room for the
+                    // bundled-gadget frame now drawn above them, so this button keeps the exact
+                    // same 10px gap below the card row it always had.
                     type: "Button",
                     name: `loadout_reroll_btn_${this._PlayerProfile.playerID}`,
-                    position: [0, 350],
+                    position: [0, 382],
                     size: [220, 34],
                     anchor: mod.UIAnchor.TopCenter,
                     bgFill: mod.UIBgFill.GradientBottom,
@@ -3298,7 +3485,7 @@ class LoadoutSelectionMenu {
                 {
                     type: "Text",
                     name: `loadout_reroll_btn_text_${this._PlayerProfile.playerID}`,
-                    position: [0, 350],
+                    position: [0, 382],
                     size: [220, 34],
                     anchor: mod.UIAnchor.TopCenter,
                     textAnchor: mod.UIAnchor.Center,
@@ -3308,9 +3495,11 @@ class LoadoutSelectionMenu {
                     bgAlpha: 0,
                 },
                 {
+                    // Shifted down by the same +32 as the reroll button above, preserving the
+                    // original 4px gap between them.
                     type: "Text",
                     name: `loadout_reroll_status_${this._PlayerProfile.playerID}`,
-                    position: [0, 388],
+                    position: [0, 420],
                     size: [this.width, 20],
                     anchor: mod.UIAnchor.TopCenter,
                     textAnchor: mod.UIAnchor.Center,
@@ -3395,7 +3584,7 @@ class LoadoutSelectionMenu {
         const cardWidth = Math.floor((this.rowWidth - (this.padding * 2)) / 3);
         const startX = -this.rowWidth / 2 + (cardWidth / 2);
 
-        const revealItems: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }> = [];
+        const revealItems: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem; extraContent?: mod.UIWidget[] }> = [];
 
         for (let i = 0; i < options.length; i++) {
             const item = options[i];
@@ -3406,7 +3595,11 @@ class LoadoutSelectionMenu {
                 mod.SetUIWidgetVisible(card.cardWidget, false);
                 mod.SetUIWidgetVisible(card.contentWidget, false);
                 mod.SetUIWidgetVisible(card.buttonWidget, false);
-                revealItems.push({ frame: card.cardWidget, content: card.contentWidget, button: card.buttonWidget, item });
+                for (const extra of card.extraContent ?? []) {
+                    mod.SetUIWidgetVisible(extra, false);
+                    this.optionWidgets.push(extra);
+                }
+                revealItems.push({ frame: card.cardWidget, content: card.contentWidget, button: card.buttonWidget, item, extraContent: card.extraContent });
             }
         }
 
@@ -3435,7 +3628,7 @@ class LoadoutSelectionMenu {
     }
 
     private async RevealCardsSequentially(
-        cards: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem }>,
+        cards: Array<{ frame: mod.UIWidget; content: mod.UIWidget; button: mod.UIWidget; item: EquippedItem; extraContent?: mod.UIWidget[] }>,
         token: number
     ) {
         // Looping "counting" sfx plays once for this whole category, for the duration of the
@@ -3471,12 +3664,12 @@ class LoadoutSelectionMenu {
         for (const card of cards) {
             if (token !== this.revealToken) return;
             const rarity = card.item.rarity ?? 0;
-            const isLegendary = rarity >= RARITY_LEGENDARY_THRESHOLD;
+            const isLegendary = rarity >= GetLegendaryThresholdForItem(card.item);
             const isRare = !isLegendary && rarity >= RARITY_RARE_THRESHOLD;
 
             // Roll simulation always runs 0.5s before the rarity reveal sfx plays.
             await mod.Wait(0.5);
-            this.PlayRevealSfxForRarity(card.item.rarity);
+            this.PlayRevealSfxForRarity(card.item);
 
             if (token !== this.revealToken) return;
 
@@ -3490,15 +3683,20 @@ class LoadoutSelectionMenu {
             }
 
             mod.SetUIWidgetVisible(card.content, true);
+            // Bundled-gadget frame (sidearm cards only) reveals in lockstep with its parent card.
+            for (const extra of card.extraContent ?? []) {
+                mod.SetUIWidgetVisible(extra, true);
+            }
 
             // Let the card sit before the next reveal starts.
             await mod.Wait(0.25);
         }
     }
 
-    private PlayRevealSfxForRarity(rarity?: number) {
+    private PlayRevealSfxForRarity(item: EquippedItem) {
+        const rarity = item.rarity;
         if (rarity === undefined) return;
-        const sfx = rarity >= RARITY_LEGENDARY_THRESHOLD ? SFX_LOADOUT_REVEAL_LEGENDARY : rarity >=
+        const sfx = rarity >= GetLegendaryThresholdForItem(item) ? SFX_LOADOUT_REVEAL_LEGENDARY : rarity >=
             RARITY_RARE_THRESHOLD
             ? SFX_LOADOUT_REVEAL_RARE
             : SFX_LOADOUT_REVEAL_COMMON;
@@ -3514,11 +3712,25 @@ class LoadoutSelectionMenu {
     ) {
         if (!this.rootWidget) return;
 
-        const cardYOffset = 15; // vertical offset applied to card and button widgets
+        // Vertical offset (relative to the container's own center) applied to card and button
+        // widgets. Shifted down from 15 -> 37 to leave room above the card row for the bundled-
+        // gadget frame (see below), between it and the slot label text. Combined with height
+        // growing 480 -> 500 (container center moving from 240 to 250 from the top), the cards'
+        // absolute position moves down by 32px total -- the reroll button/status text in
+        // CreateBaseUI are shifted down by that same +32 so their gap to the card row is
+        // unchanged.
+        const cardYOffset = 37;
         const cardName = `loadout_card_option_${index}_${this._PlayerProfile.playerID}`;
         const buttonPos = mod.CreateVector(xOffset, cardYOffset, 0);
         const buttonSize = mod.CreateVector(cardWidth, cardHeight, 0);
 
+        // IMPORTANT: the extended AddUIButton overload (parent + base/hover/focused/pressed state
+        // colors passed at creation, wired up via ParseUI's Button type) crashes the game on click
+        // in this engine -- confirmed by testing. Nobody else in this file uses it either, which
+        // in hindsight was the tell. Stick to the short overload (proven safe/click-stable) and
+        // drive the resting color manually. Hover/focus visual feedback is instead handled by
+        // OnPlayerUIButtonEvent swapping the bg color on HoverIn/HoverOut/FocusIn/FocusOut, which
+        // doesn't touch the risky constructor path at all.
         mod.AddUIButton(
             `loadout_option_btn_${index}_${this._PlayerProfile.playerID}`,
             buttonPos,
@@ -3531,7 +3743,7 @@ class LoadoutSelectionMenu {
             this.optionButtons.push(cardButton);
             mod.SetUIWidgetVisible(cardButton, true);
             mod.SetUIWidgetBgFill(cardButton, mod.UIBgFill.GradientBottom);
-            mod.SetUIWidgetBgColor(cardButton, UI.battlefieldGreyBg);
+            mod.SetUIWidgetBgColor(cardButton, LoadoutSelectionMenu.cardButtonRestColor);
             mod.SetUIWidgetBgAlpha(cardButton, 0.9);
             mod.SetUIWidgetDepth(cardButton, mod.UIDepth.AboveGameUI);
             mod.SetUIWidgetParent(cardButton, this.rootWidget);
@@ -3581,6 +3793,9 @@ class LoadoutSelectionMenu {
         const iconOffsetY = -5;
         const iconOffsetX = -15;
         const iconPadding = 10;
+        // Extra widgets (bundled-gadget frame, sidearm cards only) that must reveal in lockstep
+        // with itemContainer but aren't nested inside it -- see the bundle block below.
+        const extraContent: mod.UIWidget[] = [];
 
         // individual item/card container, controls bgColor
         // Starts hidden independently of the frame (cardWidget) -- the frame blinks in first
@@ -3605,13 +3820,14 @@ class LoadoutSelectionMenu {
             const iconSizeWep = item.inventorySlot === InventorySlot.Sidearm ? iconSize : iconSize * 1.4;
             const cellWidth = cardWidth;
             const cellHeight = cardHeight;
+            const legendaryThreshold = GetLegendaryThresholdForItem(item);
             const rarityKey = item.rarity !== undefined
-                ? (item.rarity >= RARITY_LEGENDARY_THRESHOLD ? mod.stringkeys.rarity_legendary : item.rarity >= RARITY_RARE_THRESHOLD ? mod.stringkeys.rarity_rare : undefined)
+                ? (item.rarity >= legendaryThreshold ? mod.stringkeys.rarity_legendary : item.rarity >= RARITY_RARE_THRESHOLD ? mod.stringkeys.rarity_rare : undefined)
                 : undefined;
-            const rarityColor = item.rarity !== undefined && item.rarity >= RARITY_LEGENDARY_THRESHOLD
+            const rarityColor = item.rarity !== undefined && item.rarity >= legendaryThreshold
                 ? UI.battlefieldYellow
                 : UI.allyBlue;
-            const rarityBg = item.rarity !== undefined && item.rarity >= RARITY_LEGENDARY_THRESHOLD
+            const rarityBg = item.rarity !== undefined && item.rarity >= legendaryThreshold
                 ? UI.battlefieldYellowBg
                 : UI.battlefieldBlueBg;
             if (item.gadget) {
@@ -3752,11 +3968,156 @@ class LoadoutSelectionMenu {
                     ]
                 });
             }
+
+            // Bundled-gadget frame -- sidearm cards now always bundle an independently-rolled
+            // gadget (see Weapons.buildSidearmBundleOptions). Drawn as a second, shorter frame
+            // directly ABOVE the sidearm card (between it and the slot label text -- see the
+            // cardYOffset/height adjustments made to make room for this). Every other nested-
+            // child example in this menu (cardName_background, itemContainer, rarity_container)
+            // stays fully inside its parent's own size -- none extend past it -- so rather than
+            // assume this UI system doesn't clip children to their container's bounds, this frame
+            // is parented as a sibling directly under this.rootWidget at an absolute position
+            // mirroring cardWidget's own [xOffset, cardYOffset] coordinate space (the same
+            // approach the stacked ammo/resupply notification lines elsewhere in this file use to
+            // lay out widgets that must extend beyond a fixed-size box). Its reveal timing is
+            // wired through CreateOptionCard's returned `extraContent` array, toggled by
+            // RevealCardsSequentially alongside card.content instead of inheriting a shared
+            // parent's visibility automatically.
+            if (item.inventorySlot === InventorySlot.Sidearm && item.bundledGadget) {
+                const bundledGadget = item.bundledGadget;
+                const bundleGap = 8; // small vertical gap, consistent with this menu's spacing (half of this.padding)
+                const bundleHeight = Math.round(cardHeight * 0.42); // 42% of cardHeight -> 71 at the current rowHeight of 170
+                const bundleIconSize = Math.max(bundleHeight - 20, 30);
+                const bundleNameTextHeight = 18;
+                const bundleNameTextSize = 14;
+                // Mirrored upward (subtracted instead of added) to sit above the card instead of below it.
+                const bundlePlusY = cardYOffset - (cardHeight / 2) - (bundleGap / 2);
+                const bundleFrameY = cardYOffset - (cardHeight / 2) - bundleGap - (bundleHeight / 2);
+
+                // "+" glyph in the gap, reading the two frames as one bundle rather than two
+                // unrelated cards.
+                const bundlePlus = ParseUI({
+                    type: "Text",
+                    name: `${itemName}_bundle_plus`,
+                    parent: this.rootWidget,
+                    position: [xOffset, bundlePlusY],
+                    size: [cardWidth, bundleGap + 10],
+                    anchor: mod.UIAnchor.Center,
+                    textAnchor: mod.UIAnchor.Center,
+                    textLabel: MakeMessage(mod.stringkeys.loadout_bundle_plus),
+                    textSize: 30,
+                    textColor: UI.battlefieldWhiteAlt,
+                    bgAlpha: 0,
+                    depth: mod.UIDepth.AboveGameUI,
+                    visible: false,
+                }) as mod.UIWidget;
+
+                const bundleFrame = ParseUI({
+                    type: "Container",
+                    name: `${itemName}_bundle_frame`,
+                    parent: this.rootWidget,
+                    position: [xOffset, bundleFrameY],
+                    size: [cardWidth, bundleHeight],
+                    anchor: mod.UIAnchor.Center,
+                    bgFill: mod.UIBgFill.OutlineThin,
+                    bgColor: UI.battlefieldWhiteAlt,
+                    bgAlpha: 0.1,
+                    depth: mod.UIDepth.AboveGameUI,
+                    visible: false,
+                    children: [
+                        {
+                            type: "Container",
+                            name: `${itemName}_bundle_frame_background`,
+                            size: [cardWidth - 1, bundleHeight - 1],
+                            position: [0, 0],
+                            anchor: mod.UIAnchor.Center,
+                            bgFill: mod.UIBgFill.Blur,
+                            bgColor: BLACK_COLOR,
+                            bgAlpha: 1,
+                            depth: mod.UIDepth.AboveGameUI,
+                            playerId: this._PlayerProfile.player
+                        }
+                    ]
+                }) as mod.UIWidget;
+
+                if (bundlePlus) extraContent.push(bundlePlus);
+                if (bundleFrame) extraContent.push(bundleFrame);
+
+                if (bundleFrame && bundledGadget.gadget) {
+                    mod.AddUIGadgetImage(
+                        `${itemName}_bundle_icon`,
+                        mod.CreateVector(iconOffsetX, 0, 0),
+                        mod.CreateVector(bundleIconSize, bundleIconSize, 0),
+                        mod.UIAnchor.Center,
+                        bundledGadget.gadget as mod.Gadgets,
+                        bundleFrame
+                    );
+
+                    ParseUI({
+                        type: "Text",
+                        name: `${itemName}_bundle_name`,
+                        parent: bundleFrame,
+                        position: [0, 0],
+                        size: [cellWidth - textWidthPadding, bundleNameTextHeight],
+                        anchor: mod.UIAnchor.BottomLeft,
+                        textAnchor: mod.UIAnchor.BottomLeft,
+                        textLabel: typeof bundledGadget.text === 'string' ? MakeMessage(bundledGadget.text) : bundledGadget.text,
+                        textSize: bundleNameTextSize,
+                        textColor: UI.battlefieldWhiteAlt,
+                        bgAlpha: 0,
+                    });
+
+                    // Rarity banner for the bundled gadget -- same rare/legendary look as the main
+                    // card's rarity_container below, scaled down to the shorter bundle frame. No
+                    // separate reveal sfx here: PlayRevealSfxForRarity in RevealCardsSequentially
+                    // is only ever called once per card, keyed off the sidearm's own item, and this
+                    // banner just reveals in lockstep with it via extraContent.
+                    const bundleLegendaryThreshold = GetLegendaryThresholdForItem(bundledGadget);
+                    const bundleRarityKey = bundledGadget.rarity !== undefined
+                        ? (bundledGadget.rarity >= bundleLegendaryThreshold ? mod.stringkeys.rarity_legendary : bundledGadget.rarity >= RARITY_RARE_THRESHOLD ? mod.stringkeys.rarity_rare : undefined)
+                        : undefined;
+                    if (bundleRarityKey) {
+                        const bundleRarityColor = bundledGadget.rarity !== undefined && bundledGadget.rarity >= bundleLegendaryThreshold
+                            ? UI.battlefieldYellow
+                            : UI.allyBlue;
+                        const bundleRarityBg = bundledGadget.rarity !== undefined && bundledGadget.rarity >= bundleLegendaryThreshold
+                            ? UI.battlefieldYellowBg
+                            : UI.battlefieldBlueBg;
+                        const bundleRarityHeight = Math.round(bundleHeight * 0.4);
+                        ParseUI({
+                            type: "Container",
+                            name: `${itemName}_bundle_rarity_container`,
+                            parent: bundleFrame,
+                            position: [1, 1],
+                            size: [cardWidth * rarityWidthRatio, bundleRarityHeight],
+                            anchor: mod.UIAnchor.TopRight,
+                            bgFill: mod.UIBgFill.GradientRight,
+                            bgColor: bundleRarityBg,
+                            bgAlpha: 1,
+                            depth: mod.UIDepth.AboveGameUI,
+                            children: [
+                                {
+                                    type: "Text",
+                                    name: `${itemName}_bundle_rarity`,
+                                    position: [0, 0],
+                                    size: [cardWidth * rarityTextWidthRatio, bundleRarityHeight],
+                                    anchor: mod.UIAnchor.CenterRight,
+                                    textAnchor: mod.UIAnchor.CenterRight,
+                                    textLabel: MakeMessage(bundleRarityKey),
+                                    textSize: 16,
+                                    textColor: bundleRarityColor,
+                                    bgAlpha: 0
+                                }
+                            ]
+                        });
+                    }
+                }
+            }
         }
 
         this.optionWidgets.push(cardWidget);
 
-        return { cardWidget, buttonWidget: cardButton, contentWidget: itemContainer as mod.UIWidget };
+        return { cardWidget, buttonWidget: cardButton, contentWidget: itemContainer as mod.UIWidget, extraContent };
     }
 }
 
@@ -4153,6 +4514,9 @@ class PlayerProfile {
     alphaBuffWidgets: mod.UIWidget[] = [];
     chosenAsAlphaInfectedWidget: mod.UIWidget[] = [];
     playerAmmoFeedbackWidget: mod.UIWidget[] = [];
+    // Transient stacked resupply-notification lines (see ShowStackedResupplyFeedback) -- created
+    // on demand per multi-item resupply and torn down again once the notification's shown.
+    resupplyFeedbackWidgets: mod.UIWidget[] = [];
     teamIndicationWidget: mod.UIWidget[] = [];
     playerStateWidget: mod.UIWidget | undefined;
     _botProfile?: BotProfile;
@@ -4942,6 +5306,12 @@ class PlayerProfile {
                 });
                 this.playerAmmoFeedbackWidget = [];
 
+                // Delete stacked resupply feedback widgets
+                this.resupplyFeedbackWidgets.forEach(widget => {
+                    try { mod.DeleteUIWidget(widget); } catch (e) { }
+                });
+                this.resupplyFeedbackWidgets = [];
+
                 // Delete team indication widgets
                 this.teamIndicationWidget.forEach(widget => {
                     try { mod.DeleteUIWidget(widget); } catch (e) { }
@@ -5176,6 +5546,28 @@ class PlayerProfile {
         }
 
         this.ammoFeedbackBeingShown = false;
+    }
+
+    // Shows one stacked notification bar per item that actually gained ammo from a single
+    // resupply interaction (gadgets/sidearm/primary can all resupply at once now -- see
+    // OnPlayerInteract). Only used when more than one item was resupplied at once; the single-item
+    // case keeps using ShowAmmoFeedback's existing format instead.
+    async ShowStackedResupplyFeedback(messages: Array<mod.Message>) {
+        this.DeleteResupplyFeedbackWidgets();
+        for (let i = 0; i < messages.length; i++) {
+            const widget = UI.CreateResupplyFeedbackLine(this.player, this.playerID, i, messages[i]);
+            if (widget) this.resupplyFeedbackWidgets.push(widget);
+        }
+        await mod.Wait(2);
+        this.DeleteResupplyFeedbackWidgets();
+    }
+
+    DeleteResupplyFeedbackWidgets() {
+        if (this.resupplyFeedbackWidgets.length === 0) return;
+        this.resupplyFeedbackWidgets.forEach(widget => {
+            try { mod.DeleteUIWidget(widget); } catch { }
+        });
+        this.resupplyFeedbackWidgets = [];
     }
 
     CreateAmmoFeedbackUI(): mod.UIWidget {
@@ -5896,6 +6288,7 @@ class GameHandler {
         { id: 1511, object: mod.RuntimeSpawn_Common.FX_Snow_BlowingSnow_S_01_inShadow },
         { id: 1512, object: mod.RuntimeSpawn_Common.FX_Car_Fire_M_GS },
         { id: 1513, object: mod.RuntimeSpawn_Common.FX_BASE_DeployClouds_Var_A },
+        { id: 1514, object: mod.RuntimeSpawn_Common.FX_BASE_Fire_Oil_Medium },
         { id: 1540, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1541, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
         { id: 1542, object: mod.RuntimeSpawn_Common.FX_BASE_Smoke_Pillar_White_L },
@@ -6385,7 +6778,11 @@ class GameHandler {
             PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Alpha, SURVIVOR_TEAM);
             PlayVOForTeam(mod.VoiceOverEvents2D.RoundStartGeneric, mod.VoiceOverFlags.Bravo, INFECTED_TEAM);
             // mod.PlayMusic(mod.MusicEvents.Core_PhaseBegin, SURVIVOR_TEAM);
-            LoadoutSelectionMenu.GlobalClose(true);
+            // Don't force-close a still-open loadout menu when the countdown runs out -- let
+            // survivors who haven't confirmed yet keep picking (Weapons.GetRoundLoadout already
+            // lazily falls back to a generated default loadout if they're equipped/spawned before
+            // confirming). Only players who already confirmed get their menu closed here.
+            LoadoutSelectionMenu.GlobalClose(false);
             this.RestrictAllInputsAllPlayers(false);
         }
     }
@@ -8660,6 +9057,23 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
             if (item.gadget === mod.Gadgets.Misc_Assault_Ladder)
                 await mod.Wait(1); // delay to avoid ladder being selected over sledgehammer
             mod.AddEquipment(eventPlayer, item.gadget as mod.Gadgets);
+            // Explicitly set starting charges for gadgets with a catalog entry (thermobaric/HE/
+            // incendiary airburst/incendiary shotgun/AP mine/demo charge) instead of relying on
+            // engine defaults from AddEquipment. Gadgets not in the catalog (prop spawner, decoy)
+            // are left untouched on their existing initialization path.
+            const gadgetAmmo = Weapons.GetAmmoForGadget(item);
+            if (gadgetAmmo) {
+                const gadgetSlotId = item.inventorySlot === InventorySlot.Gadget
+                    ? mod.InventorySlots.GadgetOne
+                    : mod.InventorySlots.GadgetTwo;
+                if (gadgetAmmo.kind === 'chamber') {
+                    // Fill the tube/mag and the spare reserve separately -- see GadgetChamberProfile.
+                    mod.SetInventoryAmmo(eventPlayer, gadgetSlotId, gadgetAmmo.magSize);
+                    mod.SetInventoryMagazineAmmo(eventPlayer, gadgetSlotId, gadgetAmmo.magSize * gadgetAmmo.reserveMags);
+                } else {
+                    mod.SetInventoryAmmo(eventPlayer, gadgetSlotId, gadgetAmmo.maxCharges);
+                }
+            }
             // PropSpawner's and DecoySpawner's fire/aim-driven placement flows are human-input
             // only; the portal gadget tool is shared between both rolls, so route init by
             // nameKey (see PropSpawner.InitPlayer / DecoySpawner.InitPlayer).
@@ -11564,49 +11978,166 @@ export function OnPlayerInteract(eventPlayer: mod.Player, eventObject: mod.Objec
 
     const playerProfile = PlayerProfile.Get(eventPlayer);
     if (RESUPPLY_INTERACT_POINTS.includes(mod.GetObjId(eventObject)) && GameHandler.gameState == GameState.GameRoundIsRunning) {
-
-        let roundsToSupply: number = 0;
         try {
-            if (mod.IsInventorySlotActive(eventPlayer, mod.InventorySlots.PrimaryWeapon)) {
-                const loadout = playerProfile ? Weapons.GetRoundLoadout(playerProfile) : [];
-                const primaryItem = loadout.find(item => item?.inventorySlot === InventorySlot.Primary);
-                const ammoInfo = primaryItem ? Weapons.GetAmmoForItem(primaryItem) : undefined;
-                if (ammoInfo) {
-                    const currentPrimaryAmmo = mod.GetSoldierState(eventPlayer, mod.SoldierStateNumber.CurrentWeaponMagazineAmmo);
-                    if (currentPrimaryAmmo < ammoInfo.reserveMax) {
-                        // clamp the resupply number to avoid oversupplying
-                        roundsToSupply = Math.min(ammoInfo.resupplyAmount, Math.max(0, ammoInfo.reserveMax - currentPrimaryAmmo));
+            // Resupply points no longer care which weapon is actively held -- every primary,
+            // sidearm and gadget the player currently has in their round loadout is topped up in
+            // one interaction. One notification is queued per item that actually gained ammo;
+            // items that were already full are silently skipped.
+            type ResupplyGrant = { kind: 'primary' | 'sidearm' | 'gadget'; rounds: number; message: mod.Message };
+            const grants: Array<ResupplyGrant> = [];
+            const loadout = playerProfile ? Weapons.GetRoundLoadout(playerProfile) : [];
+
+            const primaryItem = loadout.find(item => item?.inventorySlot === InventorySlot.Primary);
+            const primaryAmmoInfo = primaryItem ? Weapons.GetAmmoForItem(primaryItem) : undefined;
+            if (primaryAmmoInfo) {
+                const currentPrimaryAmmo = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.PrimaryWeapon);
+                if (currentPrimaryAmmo < primaryAmmoInfo.reserveMax) {
+                    // clamp the resupply number to avoid oversupplying
+                    const roundsToSupply = Math.min(primaryAmmoInfo.resupplyAmount, Math.max(0, primaryAmmoInfo.reserveMax - currentPrimaryAmmo));
+                    if (roundsToSupply > 0) {
                         mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.PrimaryWeapon, roundsToSupply + currentPrimaryAmmo);
-                    } else {
-                        Helpers.PlaySoundFX(SFX_AMMO_FULL, 1, eventPlayer);
+                        grants.push({ kind: 'primary', rounds: roundsToSupply, message: MakeMessage(mod.stringkeys.primary_ammo_up, roundsToSupply) });
+                        console.log(`Resupply interacted: Primary ammo | Rounds Supplied:${roundsToSupply}`);
                     }
-                    if (playerProfile) {
-                        playerProfile.ShowAmmoFeedback(true, roundsToSupply);
-                    }
-                    console.log(`Resupply interacted: Primary ammo | Rounds Supplied:${roundsToSupply}`);
                 }
-            } else if (mod.IsInventorySlotActive(eventPlayer, mod.InventorySlots.SecondaryWeapon)) {
-                const currentSecondaryAmmo: number =
-                    mod.GetSoldierState(eventPlayer, mod.SoldierStateNumber.CurrentWeaponMagazineAmmo);
-                const loadout = playerProfile ? Weapons.GetRoundLoadout(playerProfile) : [];
-                const sidearmItem = loadout.find(item => item?.inventorySlot === InventorySlot.Sidearm);
-                const ammoInfo = sidearmItem ? Weapons.GetAmmoForItem(sidearmItem) : undefined;
-                if (ammoInfo) {
-                    if (currentSecondaryAmmo < ammoInfo.reserveMax) {
-                        // clamp the resupply number to avoid oversupplying
-                        roundsToSupply = Math.min(ammoInfo.resupplyAmount, Math.max(0, ammoInfo.reserveMax - currentSecondaryAmmo));
-                        mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.SecondaryWeapon, roundsToSupply + currentSecondaryAmmo);
-                    } else {
-                        Helpers.PlaySoundFX(SFX_AMMO_FULL, 1, eventPlayer);
+            }
+
+            const sidearmItem = loadout.find(item => item?.inventorySlot === InventorySlot.Sidearm);
+            const sidearmAmmoInfo = sidearmItem ? Weapons.GetAmmoForItem(sidearmItem) : undefined;
+            if (sidearmAmmoInfo) {
+                const currentSidearmAmmo = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.SecondaryWeapon);
+                if (currentSidearmAmmo < sidearmAmmoInfo.reserveMax) {
+                    // clamp the resupply number to avoid oversupplying
+                    const roundsToSupply = Math.min(sidearmAmmoInfo.resupplyAmount, Math.max(0, sidearmAmmoInfo.reserveMax - currentSidearmAmmo));
+                    if (roundsToSupply > 0) {
+                        mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.SecondaryWeapon, roundsToSupply + currentSidearmAmmo);
+                        grants.push({ kind: 'sidearm', rounds: roundsToSupply, message: MakeMessage(mod.stringkeys.sidearm_ammo_up, roundsToSupply) });
+                        console.log(`Resupply interacted: Secondary ammo | Rounds Supplied:${roundsToSupply}`);
                     }
-                    if (playerProfile) {
-                        playerProfile.ShowAmmoFeedback(false, roundsToSupply);
+                }
+            }
+
+            // Gadget slots are evaluated independently so a notification only appears for
+            // whichever slot(s) actually needed and received a top-up. Gadgets with a catalog
+            // entry (Weapons.gadgetAmmoProfiles) resupply explicitly using the same clamp-to-max
+            // pattern as the primary/sidearm blocks above. Gadgets with no catalog entry (prop
+            // spawner, decoy) fall back to the native resupply call + before/after diff, same as
+            // before.
+            const gadgetItem = loadout.find(item => item?.inventorySlot === InventorySlot.Gadget);
+            const gadgetSecondaryItem = loadout.find(item => item?.inventorySlot === InventorySlot.GadgetSecondary);
+
+            if (gadgetItem) {
+                const gadgetProfile = Weapons.GetAmmoForGadget(gadgetItem);
+                if (gadgetProfile?.kind === 'chamber') {
+                    // Chamber/tube gadgets only top up the reserve here, same as primary/sidearm
+                    // resupply above -- the tube/mag itself is left alone (matches how weapon
+                    // resupply never touches what's currently chambered/loaded).
+                    const reserveMax = gadgetProfile.magSize * gadgetProfile.reserveMags;
+                    const resupplyAmount = gadgetProfile.magSize * gadgetProfile.resupplyMags;
+                    const currentReserve = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetOne);
+                    if (currentReserve < reserveMax) {
+                        const roundsToSupply = Math.min(resupplyAmount, Math.max(0, reserveMax - currentReserve));
+                        if (roundsToSupply > 0) {
+                            mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetOne, roundsToSupply + currentReserve);
+                            // Verify what actually landed instead of trusting the requested delta --
+                            // if the engine clamps the set call (as it does for gadgets whose real
+                            // cap is lower than our catalog assumes), the notification must reflect
+                            // that, not the number we asked for.
+                            const actualReserve = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetOne);
+                            const actualGained = actualReserve - currentReserve;
+                            if (actualGained > 0) {
+                                grants.push({ kind: 'gadget', rounds: actualGained, message: MakeMessage(mod.stringkeys.gadget_ammo_up, actualGained) });
+                            }
+                            console.log(`Resupply interacted: Gadget reserve ammo | Rounds Requested:${roundsToSupply} Actual:${actualGained}`);
+                        }
                     }
-                    console.log(`Resupply interacted: Secondary ammo | Rounds Supplied:${roundsToSupply}`);
+                } else if (gadgetProfile) {
+                    const currentGadgetOne = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetOne);
+                    const roundsToSupply = Math.min(gadgetProfile.resupplyAmount, Math.max(0, gadgetProfile.maxCharges - currentGadgetOne));
+                    if (roundsToSupply > 0) {
+                        mod.SetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetOne, currentGadgetOne + roundsToSupply);
+                        // Same verification as above -- don't trust the requested delta.
+                        const actualGadgetOne = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetOne);
+                        const actualGained = actualGadgetOne - currentGadgetOne;
+                        if (actualGained > 0) {
+                            grants.push({ kind: 'gadget', rounds: actualGained, message: MakeMessage(mod.stringkeys.gadget_ammo_up, actualGained) });
+                        }
+                        console.log(`Resupply interacted: Gadget ammo | Charges Requested:${roundsToSupply} Actual:${actualGained}`);
+                    }
+                } else {
+                    const beforeGadgetOne = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetOne);
+                    mod.Resupply(eventPlayer, mod.ResupplyTypes.SupplyBag);
+                    const gainedGadgetOne = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetOne) - beforeGadgetOne;
+                    if (gainedGadgetOne > 0) {
+                        grants.push({ kind: 'gadget', rounds: gainedGadgetOne, message: MakeMessage(mod.stringkeys.gadget_ammo_up, gainedGadgetOne) });
+                        console.log(`Resupply interacted: Gadget ammo | Charges Supplied:${gainedGadgetOne}`);
+                    }
+                }
+            }
+
+            if (gadgetSecondaryItem) {
+                const gadgetSecondaryProfile = Weapons.GetAmmoForGadget(gadgetSecondaryItem);
+                if (gadgetSecondaryProfile?.kind === 'chamber') {
+                    const reserveMax = gadgetSecondaryProfile.magSize * gadgetSecondaryProfile.reserveMags;
+                    const resupplyAmount = gadgetSecondaryProfile.magSize * gadgetSecondaryProfile.resupplyMags;
+                    const currentReserve = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetTwo);
+                    if (currentReserve < reserveMax) {
+                        const roundsToSupply = Math.min(resupplyAmount, Math.max(0, reserveMax - currentReserve));
+                        if (roundsToSupply > 0) {
+                            mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetTwo, roundsToSupply + currentReserve);
+                            const actualReserve = mod.GetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.GadgetTwo);
+                            const actualGained = actualReserve - currentReserve;
+                            if (actualGained > 0) {
+                                grants.push({ kind: 'gadget', rounds: actualGained, message: MakeMessage(mod.stringkeys.gadget_ammo_up, actualGained) });
+                            }
+                            console.log(`Resupply interacted: Gadget reserve ammo | Rounds Requested:${roundsToSupply} Actual:${actualGained}`);
+                        }
+                    }
+                } else if (gadgetSecondaryProfile) {
+                    const currentGadgetTwo = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetTwo);
+                    const roundsToSupply = Math.min(gadgetSecondaryProfile.resupplyAmount, Math.max(0, gadgetSecondaryProfile.maxCharges - currentGadgetTwo));
+                    if (roundsToSupply > 0) {
+                        mod.SetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetTwo, currentGadgetTwo + roundsToSupply);
+                        const actualGadgetTwo = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetTwo);
+                        const actualGained = actualGadgetTwo - currentGadgetTwo;
+                        if (actualGained > 0) {
+                            grants.push({ kind: 'gadget', rounds: actualGained, message: MakeMessage(mod.stringkeys.gadget_ammo_up, actualGained) });
+                        }
+                        console.log(`Resupply interacted: Gadget ammo | Charges Requested:${roundsToSupply} Actual:${actualGained}`);
+                    }
+                } else {
+                    const beforeGadgetTwo = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetTwo);
+                    mod.Resupply(eventPlayer, mod.ResupplyTypes.SupplyBag);
+                    const gainedGadgetTwo = mod.GetInventoryAmmo(eventPlayer, mod.InventorySlots.GadgetTwo) - beforeGadgetTwo;
+                    if (gainedGadgetTwo > 0) {
+                        grants.push({ kind: 'gadget', rounds: gainedGadgetTwo, message: MakeMessage(mod.stringkeys.gadget_ammo_up, gainedGadgetTwo) });
+                        console.log(`Resupply interacted: Gadget ammo | Charges Supplied:${gainedGadgetTwo}`);
+                    }
+                }
+            }
+
+            if (grants.length === 0) {
+                if (mod.IsInventorySlotActive(eventPlayer, mod.InventorySlots.MeleeWeapon)) {
+                    // Melee-only loadouts (e.g. infected) have nothing a resupply point can grant.
+                    Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, eventPlayer);
+                    playerProfile?.ShowAmmoFeedback(false, 0, MakeMessage(mod.stringkeys.infected_resupply_attempt));
+                } else {
+                    // Everything the player has is already full.
+                    Helpers.PlaySoundFX(SFX_AMMO_FULL, 1, eventPlayer);
+                    playerProfile?.ShowAmmoFeedback(false, 0);
+                }
+            } else if (grants.length === 1) {
+                // Single-item case keeps the existing single-notification behavior/format.
+                const grant = grants[0];
+                if (grant.kind === 'primary') {
+                    playerProfile?.ShowAmmoFeedback(true, grant.rounds);
+                } else if (grant.kind === 'sidearm') {
+                    playerProfile?.ShowAmmoFeedback(false, grant.rounds);
+                } else {
+                    playerProfile?.ShowAmmoFeedback(false, 0, grant.message);
                 }
             } else {
-                Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, eventPlayer);
-                playerProfile?.ShowAmmoFeedback(false, 0, mod.IsInventorySlotActive(eventPlayer, mod.InventorySlots.MeleeWeapon) ? MakeMessage(mod.stringkeys.infected_resupply_attempt) : MakeMessage(mod.stringkeys.resupply_invalid));
+                playerProfile?.ShowStackedResupplyFeedback(grants.map(g => g.message));
             }
         } catch { }
     }
@@ -11963,6 +12494,21 @@ export function OnPlayerUIButtonEvent(
     if (eventUIButtonEvent === mod.UIButtonEvent.HoverIn || eventUIButtonEvent === mod.UIButtonEvent.FocusIn) {
         Helpers.PlaySoundFX(SFX_LOADOUT_HOVER, 1, eventPlayer);
     }
+
+    // Option-card hover/focus highlight, driven by these events directly rather than the native
+    // per-state button colors (mod.AddUIButton's extended overload) -- that overload crashes on
+    // click in this engine, confirmed by testing, so CreateOptionCard sticks to the plain
+    // short-form button and this handler swaps its bg color/alpha manually instead.
+    if (widgetName.includes('loadout_option_btn_')) {
+        if (eventUIButtonEvent === mod.UIButtonEvent.HoverIn || eventUIButtonEvent === mod.UIButtonEvent.FocusIn) {
+            mod.SetUIWidgetBgColor(eventUIWidget, LoadoutSelectionMenu.cardButtonHoverColor);
+            mod.SetUIWidgetBgAlpha(eventUIWidget, LoadoutSelectionMenu.cardButtonHoverAlpha);
+        } else if (eventUIButtonEvent === mod.UIButtonEvent.HoverOut || eventUIButtonEvent === mod.UIButtonEvent.FocusOut) {
+            mod.SetUIWidgetBgColor(eventUIWidget, LoadoutSelectionMenu.cardButtonRestColor);
+            mod.SetUIWidgetBgAlpha(eventUIWidget, 0.9);
+        }
+    }
+
     if (widgetName.includes('loadout_option_btn_')) {
         const match = widgetName.match(/loadout_option_btn_(\d+)_/);
         if (match && match[1]) {
