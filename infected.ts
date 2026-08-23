@@ -1,6 +1,6 @@
 ﻿import { ParseUI, ConvertArray } from "modlib";
 
-const VERSION = "1.08.015";
+const VERSION = "1.09.01";
 
 /*
 //
@@ -56,6 +56,8 @@ const DEBUG_ALPHA_STATE = false;
 const DEBUG_SHOW_ALL_UI_ELEMENTS = false; // force-show all currently-instantiated UI widgets for layout debugging
 const DEBUG_LEAP_RUNTIME = false; // temporary diagnostics for leap init/tick gating
 const DEBUG_BOT_LIFECYCLE = false; // targeted checklist logs for bot spawn->death timing investigations
+const DEBUG_GUARANTEE_TURRET_GADGET = false; // force every rolled sidearm bundle's gadget to be the turret, for testing
+const DEBUG_FORCE_RORSCH = false; // force every survivor's Primary weapon to the Rorsch Mk.2, bypassing LMS/Final Five gating, for testing RorschRailgun's fire-detection/splash-damage/impulse
 const LEAP_TEST_MODE = false; // set true to bypass all game logic and run the leap attack sandbox
 const BOT_SURVIVAL_TEST_MODE = false; // set true to disable rounds/timers and soak-test infected bot lifecycle
 const BOT_SURVIVAL_TEST_ICONS = false; // show the world icons for bot spawners to visualize spawn locations and test icon performance with many bots
@@ -416,9 +418,21 @@ const VEHICLE_TYPES: mod.VehicleList[] = [
 const RARITY_MEDIUM_THRESHOLD = 30;
 const RARITY_HIGH_THRESHOLD = 60;
 const RARITY_RARE_THRESHOLD = 80;
-const RARITY_LEGENDARY_THRESHOLD = 90;
+// Raised from 90 -- legendary is meant to read as a genuinely rare event, not a coinflip on a
+// decent attachment roll. Paired with Weapons.buildWeaponOption's tier-bypass clamp: a weapon
+// whose own base `rarity` already meets a threshold is never suppressed below it (that's how
+// the M357/M44 revolvers and the BattlePickup weapons stay "legendary by itself" with no
+// attachments needed), but anything below the threshold still needs pkg.addedRarity >=
+// ATTACHMENT_RARITY_LEGENDARY_THRESHOLD to break through on attachments alone. E.g. the DB-12
+// (base rarity 85, see Weapons.baseWeapons) tops out at 2 rolled attachments worth at most 45
+// combined -- never enough to clear the 48 bar below, so it's hard-capped at
+// RARITY_LEGENDARY_THRESHOLD - 1 (94) on every roll. The 185ksk "Saiga" (base rarity 80) tops
+// out at 50 (its two best-in-slot attachments landing together), so it clears the bar -- and
+// the legendary band -- only on that specific roll.
+const RARITY_LEGENDARY_THRESHOLD = 95;
 const ATTACHMENT_RARITY_RARE_THRESHOLD = 15;
-const ATTACHMENT_RARITY_LEGENDARY_THRESHOLD = 30;
+// Raised from 30 alongside RARITY_LEGENDARY_THRESHOLD -- see comment above.
+const ATTACHMENT_RARITY_LEGENDARY_THRESHOLD = 48;
 // Gadgets use their own (lower) legendary threshold than weapons -- Weapons.legendarySurvivorGadgets
 // is the seed list of gadgets at/above this rarity, rolled into the phase-1 sidearm pool.1
 const GADGET_RARITY_LEGENDARY_THRESHOLD = 70;
@@ -1289,19 +1303,35 @@ class Weapons {
         // ATTACHMENT_RARITY_RARE_THRESHOLD (15) -- so landing even 1-2 higher-rarity attachments is
         // enough for a roll to break through into the rare band on its own, same as any other
         // weapon. The revolvers (m357/m44) are pushed up into the legendary band
-        // (>= RARITY_LEGENDARY_THRESHOLD == 90) instead, so they always read as legendary rolls
-        // regardless of attachments. Every sidearm card also bundles an independently-rolled
-        // gadget (see Weapons.buildSidearmBundleOptions) -- the two are never mutually exclusive.
+        // (>= RARITY_LEGENDARY_THRESHOLD == 95) instead, so they always read as legendary rolls
+        // regardless of attachments (buildWeaponOption's tier-bypass clamp never suppresses a
+        // weapon whose own base rarity already meets the threshold). Every sidearm card also
+        // bundles an independently-rolled gadget (see Weapons.buildSidearmBundleOptions) -- the
+        // two are never mutually exclusive.
         { nameKey: "p18", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_P18, packageImage: Weapons.baseWeaponPackages["p18"] },
         { nameKey: "g22", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_GGH_22, packageImage: Weapons.baseWeaponPackages["g22"] },
         // { nameKey: "vz61", rarity: 70, category: ItemPoolCategory.sidearm, item: mod.Weapons.Side, packageImage: Weapons.baseWeaponPackages["vz61"] },
         { nameKey: "es57", rarity: 72, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_ES_57, packageImage: Weapons.baseWeaponPackages["es57"] },
         { nameKey: "m45a1", rarity: 72, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M45A1, packageImage: Weapons.baseWeaponPackages["m45a1"] },
-        { nameKey: "m357", rarity: 90, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
-        { nameKey: "m44", rarity: 92, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M44, packageImage: Weapons.baseWeaponPackages["m44"] },
+        { nameKey: "m357", rarity: 96, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M357_Trait, packageImage: Weapons.baseWeaponPackages["m357"] },
+        { nameKey: "m44", rarity: 98, category: ItemPoolCategory.sidearm, item: mod.Weapons.Sidearm_M44, packageImage: Weapons.baseWeaponPackages["m44"] },
         { nameKey: "m87a1", rarity: 40, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_M87A1, packageImage: Weapons.baseWeaponPackages["m87a1"] },
         { nameKey: "m1014", rarity: 40, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_M1014, packageImage: Weapons.baseWeaponPackages["m1014"] },
-        { nameKey: "db12", rarity: 60, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_DB_12, packageImage: Weapons.baseWeaponPackages["db12"] },
+        // db12: pushed up into the rare band (RARITY_RARE_THRESHOLD == 80) by itself -- it's
+        // meant to read as a rare shotgun on its own, not just on a lucky attachment roll (see
+        // buildWeaponOption's tier-bypass clamp). Its only compatible attachments are Muzzle (max
+        // 15), Ammo (max 25, Ammo_Slugs), and Rail (max 20, Top_120_mW_Blue) -- and it never rolls
+        // more than 2 of them (rarity 85 sits in the "high" attachment-count bucket, see
+        // getAttachmentCountForWeapon), so the best 2 it can ever land is 25+20 = 45. That stays
+        // under ATTACHMENT_RARITY_LEGENDARY_THRESHOLD (48), so the legendary clamp always fires:
+        // 85 + 45 clamps down to RARITY_LEGENDARY_THRESHOLD - 1 (94) on every roll, never crossing
+        // into legendary.
+        { nameKey: "db12", rarity: 85, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun_DB_12, packageImage: Weapons.baseWeaponPackages["db12"] },
+        // 185ksk ("Saiga-12 KS-K"): same rare-band base as db12's old spot, but its attachment
+        // pool is deeper -- Scope/Ammo/Magazine each cap at 25, and any 2 of those 3 land exactly
+        // 50, which clears ATTACHMENT_RARITY_LEGENDARY_THRESHOLD (48). So its best-in-slot roll
+        // (80 + 50 = 130) breaks through the legendary clamp entirely; anything less stays capped
+        // at 94, same as db12.
         { nameKey: "185ksk", rarity: 80, category: ItemPoolCategory.primary, item: mod.Weapons.Shotgun__185KS_K, packageImage: Weapons.baseWeaponPackages["185ksk"] },
         { nameKey: "m4a1", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.Carbine_M4A1, packageImage: Weapons.baseWeaponPackages["m4a1"] },
         { nameKey: "sl9", rarity: 40, category: ItemPoolCategory.LMS, item: mod.Weapons.SMG_SL9, packageImage: Weapons.baseWeaponPackages["sl9"] },
@@ -1312,6 +1342,13 @@ class Weapons {
         { nameKey: "kord6p67", rarity: 80, category: ItemPoolCategory.LMS, item: mod.Weapons.AssaultRifle_KORD_6P67, packageImage: Weapons.baseWeaponPackages["kord6p67"] },
         { nameKey: "m123k", rarity: 80, category: ItemPoolCategory.LMS, item: mod.Weapons.LMG_M123K, packageImage: Weapons.baseWeaponPackages["m123k"] },
         // {nameKey: "m121a2", rarity: 90, category: ItemPoolCategory.LMS, item: mod.Weapons., packageImage: Weapons.baseWeaponPackages["m121a2"] },
+        // BattlePickup weapons -- true endgame LMS rolls. Base rarity sits at/above
+        // RARITY_LEGENDARY_THRESHOLD (95), so buildWeaponOption's tier-bypass clamp never
+        // suppresses them: they read as legendary on every roll, same as the M357/M44 revolvers.
+        // They have no entries in baseWeaponAttachments/attachmentPool -- battle pickups arrive
+        // pre-built with no configurable attachments, same as how they'd be found on the map.
+        { nameKey: "mprmg", rarity: 95, category: ItemPoolCategory.LMS, item: mod.Weapons.BattlePickup_MP_RMG },
+        { nameKey: "rorschmk2", rarity: 97, category: ItemPoolCategory.LMS, item: mod.Weapons.BattlePickup_Rorsch_Mk_2_SMRW },
     ]
 
     static weaponAmmoProfiles: Record<string, WeaponAmmoProfile> = {
@@ -1411,6 +1448,7 @@ class Weapons {
         // survivor gets (see GenerateLoadoutOptions' Throwable section).
         { nameKey: "prop_spawner_gadget", rarity: 5, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
         { nameKey: "decoy_gadget", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
+        { nameKey: "turret_gadget", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_PortalGadget },
         { nameKey: "ap_mine", rarity: 20, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Anti_Personnel_Mine },
         { nameKey: "supply_bag", rarity: 40, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Class_Supply_Bag },
         // { nameKey: "demo_charge", rarity: 60, category: ItemPoolCategory.gadgets, item: mod.Gadgets.Misc_Demolition_Charge },
@@ -1541,10 +1579,15 @@ class Weapons {
     static buildWeaponOption(weaponDef: PooledItemDef, slot: InventorySlot): EquippedItem {
         const pkg = Weapons.buildWeaponPackageWithAttachments(weaponDef);
         let totalRarity = weaponDef.rarity + pkg.addedRarity;
-        if (pkg.addedRarity < ATTACHMENT_RARITY_RARE_THRESHOLD) {
+        // These clamps only ever hold a weapon BACK from a tier it hasn't earned yet -- they
+        // never suppress a weapon whose own base `rarity` already qualifies on its own. That's
+        // what lets the M357/M44 revolvers and the BattlePickup weapons read as legendary
+        // "by itself" with no attachments needed, and the DB-12/185ksk read as rare "by itself"
+        // even on a weak attachment roll.
+        if (weaponDef.rarity < RARITY_RARE_THRESHOLD && pkg.addedRarity < ATTACHMENT_RARITY_RARE_THRESHOLD) {
             totalRarity = Math.min(totalRarity, RARITY_RARE_THRESHOLD - 1);
         }
-        if (pkg.addedRarity < ATTACHMENT_RARITY_LEGENDARY_THRESHOLD) {
+        if (weaponDef.rarity < RARITY_LEGENDARY_THRESHOLD && pkg.addedRarity < ATTACHMENT_RARITY_LEGENDARY_THRESHOLD) {
             totalRarity = Math.min(totalRarity, RARITY_LEGENDARY_THRESHOLD - 1);
         }
         return {
@@ -1644,7 +1687,9 @@ class Weapons {
             }
 
             // Independently roll the bundled gadget half of this card.
-            const gadgetDef = Weapons.getRandomWeaponFromRarity(gadgetPool);
+            const gadgetDef = DEBUG_GUARANTEE_TURRET_GADGET
+                ? gadgetPool.find(g => g.nameKey === "turret_gadget") ?? Weapons.getRandomWeaponFromRarity(gadgetPool)
+                : Weapons.getRandomWeaponFromRarity(gadgetPool);
             const bundledGadget = gadgetDef ? Weapons.buildGadgetOption(gadgetDef, InventorySlot.Gadget) : undefined;
 
             const sidearmRarity = chosenSidearm.rarity ?? 0;
@@ -1850,7 +1895,15 @@ class Weapons {
 
         // Stage-based primary weapon assignment
         const isRoundRunning = GameHandler.gameState === GameState.GameRoundIsRunning;
-        if (isRoundRunning) {
+        if (DEBUG_FORCE_RORSCH) {
+            // Bypasses LMS/Final Five gating entirely -- every survivor gets the Rorsch as their
+            // Primary the instant they spawn, so RorschRailgun's fire-detection/splash-damage/
+            // impulse can be tested without having to actually reach Last Man Standing.
+            const rorschDef = Weapons.baseWeapons.find(w => w.nameKey === "rorschmk2");
+            if (rorschDef) {
+                items.push(Weapons.buildWeaponOption(rorschDef, InventorySlot.Primary));
+            }
+        } else if (isRoundRunning) {
             if (playerProfile.isLastManStanding) {
                 const lmsWeapon = savedLoadout.find(item => item.inventorySlot === InventorySlot.LMS);
                 if (lmsWeapon) {
@@ -6700,9 +6753,11 @@ class GameHandler {
         for (let i = 0; i < n; i++) {
             const p = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!PlayerIsAliveAndValid(p)) continue;
-            // Decoy bots are not real survivors -- exclude them from every count so they never
-            // affect the survivor total, round phase transitions (final five/LMS), or EOR checks.
-            if (DecoySpawner.IsActiveDecoyObjId(mod.GetObjId(p))) continue;
+            // Decoy/turret bots are not real survivors -- exclude them from every count so they
+            // never affect the survivor total, round phase transitions (final five/LMS), or EOR
+            // checks.
+            const pObjId = mod.GetObjId(p);
+            if (DecoySpawner.IsActiveDecoyObjId(pObjId) || TurretSpawner.IsActiveTurretObjId(pObjId)) continue;
             total++;
             if (!SafeIsAISoldier(p)) humans++;
             const isAlive = mod.GetSoldierState(p, mod.SoldierStateBool.IsAlive);
@@ -7249,6 +7304,8 @@ class GameHandler {
         console.log(`"EoR" | Starting End Round Cleanup`);
         PropSpawner.CleanupAllObjects();
         DecoySpawner.CleanupAllDecoys();
+        TurretSpawner.CleanupAllTurrets();
+        BattlePickupCleanup.CleanupRound();
         // GameHandler.StopLastManStandingMusic();
         if (GameHandler.gameState === GameState.GameOver)
             return;
@@ -8018,6 +8075,7 @@ class AISpawnHandler {
             await mod.Wait(AI_BOT_TICK_SECONDS * 2);
             AISpawnHandler.CheckStuckInfectedSlots();
             AISpawnHandler.EnsureInfectedPoolIntegrity();
+            TurretSpawner.CheckStuckPlacements();
         }
     }
 
@@ -8120,6 +8178,11 @@ class AISpawnHandler {
 
         if (DecoySpawner.HasPendingSpawnOn(spawnerObjID)) {
             DecoySpawner.HandleSpawned(eventPlayer, mod.GetObjId(eventPlayer), spawnerObjID);
+            return;
+        }
+
+        if (TurretSpawner.HasPendingSpawnOn(spawnerObjID)) {
+            TurretSpawner.HandleSpawned(eventPlayer, mod.GetObjId(eventPlayer), spawnerObjID);
             return;
         }
 
@@ -9006,6 +9069,13 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
     // mid-round equipment refresh (LMS, Final Five, etc.), and an already-placed decoy must
     // survive those phase changes. It's only torn down on owner death/undeploy or round end.
     DecoySpawner.CleanupPlayerGadgetState(eventPlayer);
+    TurretSpawner.CleanupPlayerGadgetState(eventPlayer);
+    // Same idea for the Rorsch's fire-detection polling -- reset here, re-armed below only if
+    // this round's Primary slot still holds it.
+    RorschRailgun.RemovePlayer(eventPlayer);
+    // Same idea for battle-pickup-abandonment tracking -- reset here, re-armed below only if
+    // this round's Primary slot still holds one.
+    BattlePickupCleanup.RemovePlayer(eventPlayer);
 
     // apply gear from loadout
     for (const item of loadout) {
@@ -9048,6 +9118,10 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
                     mod.SetInventoryAmmo(eventPlayer, mod.InventorySlots.PrimaryWeapon, ammoInfo.magSize + 1);
                     mod.SetInventoryMagazineAmmo(eventPlayer, mod.InventorySlots.PrimaryWeapon, ammoInfo.reserveMax);
                 }
+                if (item.weapon === mod.Weapons.BattlePickup_Rorsch_Mk_2_SMRW) {
+                    RorschRailgun.InitPlayer(eventPlayer);
+                }
+                BattlePickupCleanup.InitPlayer(eventPlayer, item.weapon as mod.Weapons);
             }
         } else if (item.inventorySlot === InventorySlot.Gadget || item.inventorySlot === InventorySlot.GadgetSecondary) {
             // skip ladder for infected bots to avoid them getting stuck trying to use it
@@ -9074,12 +9148,14 @@ async function InitializePlayerEquipment(eventPlayer: mod.Player, playerProfile:
                     mod.SetInventoryAmmo(eventPlayer, gadgetSlotId, gadgetAmmo.maxCharges);
                 }
             }
-            // PropSpawner's and DecoySpawner's fire/aim-driven placement flows are human-input
-            // only; the portal gadget tool is shared between both rolls, so route init by
-            // nameKey (see PropSpawner.InitPlayer / DecoySpawner.InitPlayer).
+            // PropSpawner's, DecoySpawner's and TurretSpawner's fire/aim-driven placement flows
+            // are human-input only; the portal gadget tool is shared between all three rolls,
+            // so route init by nameKey.
             if (item.gadget === mod.Gadgets.Misc_PortalGadget && !isAI) {
                 if (item.nameKey === "decoy_gadget") {
                     DecoySpawner.InitPlayer(eventPlayer);
+                } else if (item.nameKey === "turret_gadget") {
+                    TurretSpawner.InitPlayer(eventPlayer);
                 } else {
                     PropSpawner.InitPlayer(eventPlayer);
                 }
@@ -12351,6 +12427,7 @@ export function OnPlayerUndeploy(playerObjId: number) {
     if (undeployedPlayer) {
         PropSpawner.CleanupPlayer(undeployedPlayer);
         DecoySpawner.CleanupPlayer(undeployedPlayer);
+        TurretSpawner.CleanupPlayer(undeployedPlayer);
     }
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
@@ -12376,6 +12453,8 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     CleanupLeapSystem(eventPlayer);
     PropSpawner.CleanupPlayer(eventPlayer);
     DecoySpawner.CleanupPlayer(eventPlayer);
+    TurretSpawner.CleanupPlayer(eventPlayer);
+    BattlePickupCleanup.HandleDeath(eventPlayer);
     if (PlayerProfile._deployedPlayers.has(playerObjId)) {
         PlayerProfile.RemoveFromDeployedPlayers(playerObjId);
     }
@@ -12422,6 +12501,10 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
                 // Decoy bot's health reached 0 -- owner is now free to place another.
                 return;
             }
+            if (TurretSpawner.HandleDeath(eventPlayer, playerObjID)) {
+                // Turret bot's health reached 0 -- owner is now on cooldown to place another.
+                return;
+            }
             console.log(`OnPlayerDied "CRITICAL ERROR" | AI Player(${playerObjID}) died but no slot found!`);
             return;
         }
@@ -12455,6 +12538,8 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
 }
 
 export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, eventDamageType: mod.DamageType,) {
+    TurretSpawner.HandleDamaged(eventPlayer); // no-op unless eventPlayer is a tracked turret bot
+
     const damageDealer = eventOtherPlayer;
     const damageDealerObjId = mod.GetObjId(damageDealer);
     if (SafeIsAISoldier(damageDealer)) return;
@@ -14683,12 +14768,1301 @@ class DecoySpawner {
     }
 }
 
+// ============================================================
+// TurretSpawner -- survivor sentry turret (Misc_PortalGadget tool, "turret_gadget" roll)
+// A real AI Player (spawned via an AI spawner, same approach as DecoySpawner) rather than a
+// plain prop -- that's what gives it genuine hit detection via OnPlayerDamaged/OnPlayerDied.
+// Unarmed, always crouched, immobile; its own targeting/shooting are disabled and every attack
+// is scripted (see _FireAtTarget). The AI body is spun to face its target via AISetFocusPoint
+// (a Player can't be turned with MoveObject the way a prop can).
+//
+// Four states (TurretState):
+//  - standby:  idle, yaw-sweeping its 60 deg cone (visualized with a claymore tripwire VFX),
+//              quiet idle loop.
+//  - warning:  a target entered range/FOV (or is behind it, within rear-engage range) with
+//              confirmed LOS -- see _BeginLosCheck. A couple of alarm blips play once, then
+//              TURRET_TARGET_LOCK_GRACE_SECONDS of silence before it opens fire. A rear target
+//              gets an extra turn-to-face first (the "rotating" sub-phase).
+//  - engaging: continuous scripted fire (_FireAtTarget) until the target dies, fails the
+//              range/FOV check, or an occasional LOS upkeep raycast catches it behind cover.
+//  - returning: target lost -- one-shot stand-down cue, standby visuals resume immediately,
+//              turret yaws back to rest. A fresh target can interrupt this before it finishes.
+// ============================================================
+
+const TURRET_HEALTH = 800;
+// How far ahead of the eye the placement raycast's origin is pushed -- see _GetRaycastVectors.
+const TURRET_PLACEMENT_RAYCAST_ORIGIN_OFFSET_METERS = 0.5;
+// If a requested AI spawn hasn't resolved (HandleSpawned never ran) within this long, the
+// reservation is treated as stale/failed -- see _IsReservationStillValid/_ReclaimStaleReservation.
+// A silently-rejected spawn (e.g. the placement point turned out to be invalid once the AI
+// spawner actually tried to use it) would otherwise leave _ownerToTurret permanently reserved,
+// blocking the owner from ever placing again.
+const TURRET_PENDING_SPAWN_TIMEOUT_SECONDS = 3;
+const TURRET_RANGE_METERS = 25;
+const TURRET_FOV_DEGREES = 60;
+const TURRET_HALF_FOV_DEGREES = TURRET_FOV_DEGREES / 2;
+const TURRET_FIRE_RPM = 200;
+const TURRET_FIRE_INTERVAL_SECONDS = 60 / TURRET_FIRE_RPM;
+const TURRET_DAMAGE_MIN = 5;
+const TURRET_DAMAGE_MAX = 10;
+const TURRET_TARGET_LOCK_GRACE_SECONDS = 0.75; // Warning-state reaction window before firing
+const TURRET_COOLDOWN_AFTER_DESTROYED_SECONDS = 5;
+const TURRET_TICK_SECONDS = 0.1; // 10Hz state-machine tick -- see TurretSpawner._RunLoop
+const TURRET_DAMAGE_VFX_LIGHT_THRESHOLD = 0.5;
+const TURRET_DAMAGE_VFX_HEAVY_THRESHOLD = 0.2;
+
+// Warning-state alarm: TURRET_ALARM_BLIP_COUNT short blips, spaced apart, played once on
+// entering Warning -- the rest of the grace period is deliberately silent.
+const TURRET_ALARM_BLIP_SECONDS = 0.05;
+const TURRET_ALARM_BLIP_COUNT = 2;
+const TURRET_ALARM_BLIP_GAP_SECONDS = 0.1;
+
+const TURRET_IDLE_SWEEP_LEG_SECONDS = 3.0; // time to sweep from one edge of the cone to the other
+const TURRET_FOCUS_POINT_DISTANCE = 10; // how far ahead the AISetFocusPoint target sits
+
+// A target behind the turret's normal cone can still be engaged if it's this close and the
+// turret has line-of-sight to it. Same duration reused for the Returning turn-back animation.
+const TURRET_REAR_ENGAGE_RANGE_METERS = 15;
+const TURRET_REAR_ROTATE_SECONDS = 1.0;
+// Target-acquisition scan cadence (standby/returning only) -- gates both the front- and
+// rear-candidate LOS raycast in _RunLoop.
+const TURRET_LOS_CHECK_INTERVAL_SECONDS = 0.3;
+// Slower cadence for the upkeep LOS recheck run while Engaging (catches a target ducking
+// behind cover mid-fight).
+const TURRET_ENGAGE_LOS_CHECK_INTERVAL_SECONDS = 0.5;
+// The raycast's endpoint is the candidate's own EyePosition, so a "hit" landing at/near that
+// point just means it reached what it was aimed at, not a real obstruction -- only a hit
+// landing more than this many meters short of it counts as genuinely blocked.
+const TURRET_LOS_HIT_TOLERANCE_METERS = 1.5;
+
+const TURRET_VFX_LAUNCH = mod.RuntimeSpawn_Common.FX_Gadget_PTKM_Mine_Launch;
+// Same blinking-lights family used by TickLeap's crouch-charge indicator (see the 'charging'
+// chargeVfxState branch) -- swapped in for the previous EIDOS standby/active pair so the
+// turret reads with the same "something's spooling up" language as the leap attack.
+const TURRET_VFX_STANDBY = mod.RuntimeSpawn_Common.FX_Gadget_MPAPS_Lights_Standby;
+const TURRET_VFX_ACTIVE = mod.RuntimeSpawn_Common.FX_Gadget_MPAPS_Lights_Active;
+const TURRET_VFX_FIRE = mod.RuntimeSpawn_Common.FX_Gadget_EIDOS_Projectile_Launch;
+const TURRET_VFX_DESTRUCTION = mod.RuntimeSpawn_Common.FX_Gadget_EIDOS_Destruction;
+// Simple targeting-laser read for the Engaging state, spawned alongside TURRET_VFX_ACTIVE at
+// entry.pos (ground level) -- directly below the raised claymore FOV cone VFX, see
+// TURRET_VFX_FOV_CONE_HEIGHT_OFFSET_METERS.
+const TURRET_VFX_ENGAGE_TRACER = mod.RuntimeSpawn_Common.FX_TracerDart_Projectile_Glow;
+const TURRET_SFX_FIRE = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Fire_OneShot3D;
+const TURRET_SFX_STANDBY_LOOP = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Idle_SimpleLoop3D;
+const TURRET_SFX_ALARM_BLIP = mod.RuntimeSpawn_Common.SFX_GameModes_Rush_Alarm_SimpleLoop3D;
+const TURRET_SFX_RETURNING = mod.RuntimeSpawn_Common.SFX_GameModes_Rush_Defused_OneShot3D;
+// Turret's own destruction cue -- distinct from TURRET_SFX_RETURNING ("lost this target" vs
+// "the turret itself just died").
+const TURRET_SFX_DESTROYED_POWERDOWN = mod.RuntimeSpawn_Common.SFX_Gadgets_EIDOS_Disabled_OneShot3D;
+const TURRET_SPOT_DURATION_SECONDS = 10;
+const TURRET_VFX_DAMAGE_LIGHT = mod.RuntimeSpawn_Common.FX_Gadget_RemoteTurret_Damage_Light;
+const TURRET_VFX_DAMAGE_HEAVY = mod.RuntimeSpawn_Common.FX_Gadget_RemoteTurret_Box_Damage;
+// Claymore's laser tripwire, repurposed as a rough visual for the turret's detection cone.
+const TURRET_VFX_FOV_CONE = mod.RuntimeSpawn_Common.FX_Mine_M18_Claymore_Laser_Tripwire;
+// entry.pos is the raycast-hit floor point the turret was placed on (see OnRayCastHit), so the
+// claymore VFX spawns at ground level by default. Offset it up toward eye height for the bot's
+// crouched stance (see HandleSpawned's AISetStance(Crouch)) so the tripwire actually reads as
+// coming from the turret's "eyes" instead of lying flat on the floor. Standing eye height would
+// be ~1.2, but that floats visibly above a crouched bot's head -- halved to sit at crouched eye
+// height instead.
+const TURRET_VFX_FOV_CONE_HEIGHT_OFFSET_METERS = 0.6;
+// Our yaw convention (atan2(-x,-z), matching PropSpawner/DecoySpawner's placement rotation
+// math) doesn't line up with SpawnObject's rotation-vector convention -- every VFX spawned
+// facing a turret yaw needs this correction; see TurretSpawner._YawToRotationVector.
+const TURRET_VFX_YAW_OFFSET_RAD = Math.PI;
+
+// World icon shown above the turret's head, visible only to whichever player it's currently
+// locked onto.
+const TARGET_ALERT_ICON_HEIGHT_OFFSET = 1.5;
+const TARGET_ALERT_ICON_COLOR = mod.CreateVector(1, 0.4, 0);
+const TURRET_BLOCKED_ICON_COLOR = mod.CreateVector(1, 0.2, 0.2);
+const TURRET_BLOCKED_ICON_DURATION_SECONDS = 2;
+
+// "rotating" is an internal sub-phase of Warning (the rear pre-turn), not a fifth player-facing
+// state.
+type TurretState = "standby" | "rotating" | "warning" | "engaging" | "returning";
+type EngagementKind = "front" | "rear";
+
+interface TurretEntry {
+    ownerPlayer: mod.Player;
+    ownerObjId: number;
+    pos: mod.Vector;
+    // Fixed at placement -- center of the turret's normal cone and its rest/return facing.
+    restYawRad: number;
+    restFacingDir: mod.Vector;
+
+    // The turret's actual hitbox -- an unarmed, immobile, crouched AI soldier. botObjId is -1
+    // until the AI spawner request resolves (see HandleSpawned).
+    botPlayer?: mod.Player;
+    botObjId: number;
+    fovConeVfx?: mod.VFX;
+    // Set once, at reservation time -- lets _IsReservationStillValid tell a spawn that's still
+    // legitimately in flight apart from one that silently failed and never arrived.
+    pendingSince: number;
+
+    // Bumped on every teardown path; _RunLoop bails the instant it no longer matches its own
+    // captured token.
+    runToken: number;
+    state: TurretState;
+    targetObjId?: number;
+    engagementKind?: EngagementKind;
+    targetAlertIcon?: mod.WorldIcon;
+
+    // Current yaw the turret is facing (radians) -- drives the FOV cone VFX and, via
+    // AISetFocusPoint, the AI body. Owned fully by this entry, never read back from the engine.
+    currentYawRad: number;
+    anim?: { fromYawRad: number; toYawRad: number; startedAt: number; duration: number };
+    sweepDir: 1 | -1;
+    rotateReadyAt: number;
+
+    lockElapsed: number;
+    sinceLastShot: number;
+
+    alarmBlipToken: number;
+    alarmBlipSfx?: mod.SFX;
+
+    // Line-of-sight raycasting (one in flight per turret, keyed off the BOT's own player
+    // context in _losOwners -- so the engine's self-exclusion actually excludes the turret's
+    // own body). Used both for the rear-candidate acquisition gate and, while Engaging, a
+    // periodic upkeep check against the live target -- losIsUpkeep tells _HandleLosResult which.
+    losInFlight: boolean;
+    losIsUpkeep: boolean;
+    losCandidateObjId?: number;
+    losCandidateKind?: EngagementKind;
+    losCheckStart?: mod.Vector;
+    losCheckEnd?: mod.Vector;
+    nextLosScanAt: number;
+    engageLosNextCheckAt: number;
+
+    standbyVfx?: mod.VFX;
+    activeVfx?: mod.VFX;
+    // Simple tracer-dart read for the Engaging state -- see TURRET_VFX_ENGAGE_TRACER.
+    engageTracerVfx?: mod.VFX;
+    standbyLoopSfx?: mod.SFX;
+    damageLightVfx?: mod.VFX;
+    damageHeavyVfx?: mod.VFX;
+}
+
+interface TurretPendingSpawn {
+    ownerObjId: number;
+    ownerPlayer: mod.Player;
+    pos: mod.Vector;
+    restYawRad: number;
+}
+
+class TurretSpawner {
+    // Player ids currently holding the turret roll of the portal gadget tool.
+    static readonly _equipped: Set<number> = new Set();
+    static readonly _raycastInFlight: Set<number> = new Set();
+    // Owner objId -> their turret (pending or spawned). Only one entry per owner -- its
+    // presence blocks placing a second.
+    static readonly _ownerToTurret: Map<number, TurretEntry> = new Map();
+    static readonly _cooldownUntil: Map<number, number> = new Map();
+    // Turret BOT objIds (not owner objIds) with a LOS raycast in flight -- see
+    // TurretEntry.losInFlight for why this is keyed off the bot.
+    static readonly _losOwners: Set<number> = new Set();
+    static readonly _pendingBySpawnerID: Map<number, TurretPendingSpawn> = new Map();
+    static readonly _botOwnerByObjId: Map<number, number> = new Map();
+    // Live turret bot objIds -- excluded from RecalculateCounts' survivor tally (see
+    // IsActiveTurretObjId) so a standing turret never blocks round-end/final-five/LMS checks.
+    static readonly _activeBotObjIds: Set<number> = new Set();
+    private static _runTokenSeq: number = 0;
+
+    private static _Now(): number {
+        return Date.now() / 1000;
+    }
+
+    static IsEquipped(player: mod.Player): boolean {
+        return TurretSpawner._equipped.has(mod.GetObjId(player));
+    }
+
+    /** Called from InitializePlayerEquipment when a survivor's loadout rolls this gadget. */
+    static InitPlayer(player: mod.Player): void {
+        TurretSpawner._equipped.add(mod.GetObjId(player));
+    }
+
+    static HasRaycastInFlight(id: number): boolean {
+        return TurretSpawner._raycastInFlight.has(id);
+    }
+
+    static HasLosRaycastInFlight(id: number): boolean {
+        return TurretSpawner._losOwners.has(id);
+    }
+
+    static GetCooldownRemaining(id: number): number {
+        const until = TurretSpawner._cooldownUntil.get(id);
+        if (!until) return 0;
+        return Math.max(0, until - TurretSpawner._Now());
+    }
+
+    private static _GetRaycastVectors(player: mod.Player): { start: mod.Vector; end: mod.Vector } {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        // Push the origin ahead of the eye along the full (pitch-inclusive) facing vector so the
+        // ray doesn't immediately self-intersect the player's own collision -- same trick as
+        // PropSpawner/DecoySpawner. This used to push a full meter both horizontally and
+        // vertically, which was aggressive enough to occasionally land the origin right past a
+        // valid floor's edge (a wall lip, a ledge) and report an invalid-surface hit even though
+        // the player was clearly aiming at solid ground -- see turret_invalid_surface. Halved.
+        const start = mod.Add(eyePos, mod.Multiply(facing, TURRET_PLACEMENT_RAYCAST_ORIGIN_OFFSET_METERS));
+        const end = mod.Add(start, mod.Multiply(facing, PROP_SPAWNER_MAX_DISTANCE));
+        return { start, end };
+    }
+
+    private static _PickFreeSpawnerID(): number | undefined {
+        for (const id of SURVIVOR_AI_SPAWNERS) {
+            if (!AISpawnHandler.spawnerLock.has(id)) return id;
+        }
+        return undefined;
+    }
+
+    /** True if `entry` still represents a real placement -- either a bot that's actually alive,
+     *  or a spawn request still within its normal resolution window (see
+     *  TURRET_PENDING_SPAWN_TIMEOUT_SECONDS). False means the AI spawner silently rejected the
+     *  placement (e.g. a hair-slim shift landed it on geometry it couldn't actually spawn into)
+     *  and HandleSpawned is never coming -- see _ReclaimStaleReservation. */
+    private static _IsReservationStillValid(entry: TurretEntry): boolean {
+        if (entry.botObjId !== -1) {
+            return !!entry.botPlayer && PlayerIsAliveAndValid(entry.botPlayer);
+        }
+        return TurretSpawner._Now() - entry.pendingSince < TURRET_PENDING_SPAWN_TIMEOUT_SECONDS;
+    }
+
+    /** Clears a reservation that _IsReservationStillValid has determined is stale -- releases
+     *  every bit of bookkeeping HandleSpawned/_DestroyTurret would otherwise own, but skips the
+     *  destruction VFX/SFX and cooldown since nothing was ever genuinely placed. */
+    private static _ReclaimStaleReservation(entry: TurretEntry): void {
+        console.log(`TurretSpawner | Reclaiming stale placement reservation for Player(${entry.ownerObjId}) -- turret bot never became valid`);
+        TurretSpawner._TeardownTurret(entry, false);
+        TurretSpawner._ownerToTurret.delete(entry.ownerObjId);
+        for (const [spawnerID, pending] of TurretSpawner._pendingBySpawnerID) {
+            if (pending.ownerObjId === entry.ownerObjId) {
+                TurretSpawner._pendingBySpawnerID.delete(spawnerID);
+                AISpawnHandler.spawnerLock.delete(spawnerID);
+                break;
+            }
+        }
+    }
+
+    /** Periodic background sweep (see AISpawnHandler.OnGoingSpawnerCheck, mirroring its
+     *  CheckStuckInfectedSlots) so a stale reservation self-heals even if its owner never fires
+     *  again to trigger the OnFireStart check. */
+    static CheckStuckPlacements(): void {
+        for (const entry of TurretSpawner._ownerToTurret.values()) {
+            if (TurretSpawner._IsReservationStillValid(entry)) continue;
+            TurretSpawner._ReclaimStaleReservation(entry);
+        }
+    }
+
+    static OnFireStart(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (!TurretSpawner._equipped.has(id)) return;
+        const existing = TurretSpawner._ownerToTurret.get(id);
+        if (existing) {
+            if (TurretSpawner._IsReservationStillValid(existing)) {
+                Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+                const { end } = TurretSpawner._GetRaycastVectors(player);
+                TurretSpawner._ShowBlockedIcon(player, end, MakeMessage(mod.stringkeys.turret_hint_already_placed));
+                return;
+            }
+            // Bot never arrived, or died without the normal OnPlayerDied teardown reaching us --
+            // don't let a desynced reservation permanently block the player from placing another.
+            TurretSpawner._ReclaimStaleReservation(existing);
+        }
+        const cooldownRemaining = TurretSpawner.GetCooldownRemaining(id);
+        if (cooldownRemaining > 0) {
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            const { end } = TurretSpawner._GetRaycastVectors(player);
+            TurretSpawner._ShowBlockedIcon(player, end, MakeMessage(mod.stringkeys.turret_on_cooldown, Math.ceil(cooldownRemaining)));
+            return;
+        }
+        if (TurretSpawner._raycastInFlight.has(id)) return;
+        const { start, end } = TurretSpawner._GetRaycastVectors(player);
+        TurretSpawner._raycastInFlight.add(id);
+        mod.RayCast(player, start, end);
+    }
+
+    static OnFireStop(_player: mod.Player): void { /* single fire-and-forget placement */ }
+    static OnAimStart(_player: mod.Player): void { }
+    static OnAimStop(_player: mod.Player): void { }
+    static OnLaserToggle(_player: mod.Player, _eventBoolean: boolean): void { }
+
+    static OnRayCastHit(player: mod.Player, point: mod.Vector, normal: mod.Vector): void {
+        const id = mod.GetObjId(player);
+        TurretSpawner._raycastInFlight.delete(id);
+        const isFloor = mod.YComponentOf(normal) >= PROP_SPAWNER_MIN_FLOOR_NORMAL_Y;
+        if (!isFloor) {
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+            TurretSpawner._ShowBlockedIcon(player, point, MakeMessage(mod.stringkeys.turret_invalid_surface));
+            return;
+        }
+        TurretSpawner._RequestPlacement(player, point);
+    }
+
+    static OnRayCastMissed(player: mod.Player): void {
+        TurretSpawner._raycastInFlight.delete(mod.GetObjId(player));
+        Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, player);
+        const { end } = TurretSpawner._GetRaycastVectors(player);
+        TurretSpawner._ShowBlockedIcon(player, end, MakeMessage(mod.stringkeys.turret_out_of_range));
+    }
+
+    /** LOS raycast for `player` (the turret's own bot) hit something before its stop point.
+     *  For an acquisition check (rear-candidate) that just means the candidate isn't engageable
+     *  right now. For an upkeep check (Engaging) it means the live target ducked behind cover --
+     *  drop it via _LoseTarget. A hit landing at/near the candidate's own EyePosition (the
+     *  endpoint) isn't a real obstruction -- see TURRET_LOS_HIT_TOLERANCE_METERS. */
+    static OnLosRayCastHit(player: mod.Player, point: mod.Vector, _normal: mod.Vector): void {
+        const botID = mod.GetObjId(player);
+        TurretSpawner._losOwners.delete(botID);
+        const ownerID = TurretSpawner._botOwnerByObjId.get(botID);
+        const entry = ownerID !== undefined ? TurretSpawner._ownerToTurret.get(ownerID) : undefined;
+        if (!entry || entry.botObjId !== botID) return;
+
+        let clear = false;
+        if (entry.losCheckStart && entry.losCheckEnd) {
+            const hitDist = mod.DistanceBetween(entry.losCheckStart, point);
+            const fullDist = mod.DistanceBetween(entry.losCheckStart, entry.losCheckEnd);
+            clear = hitDist >= fullDist - TURRET_LOS_HIT_TOLERANCE_METERS;
+        }
+        TurretSpawner._HandleLosResult(entry, clear);
+    }
+
+    static OnLosRayCastMissed(player: mod.Player): void {
+        const botID = mod.GetObjId(player);
+        TurretSpawner._losOwners.delete(botID);
+        const ownerID = TurretSpawner._botOwnerByObjId.get(botID);
+        const entry = ownerID !== undefined ? TurretSpawner._ownerToTurret.get(ownerID) : undefined;
+        if (!entry || entry.botObjId !== botID) return;
+        TurretSpawner._HandleLosResult(entry, true);
+    }
+
+    /** Called from InitializePlayerEquipment on every mid-round refresh -- only resets the
+     *  gadget-tool bookkeeping. An already-placed turret survives round-phase changes; full
+     *  teardown only happens via CleanupPlayer/CleanupAllTurrets. */
+    static CleanupPlayerGadgetState(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        TurretSpawner._equipped.delete(id);
+        TurretSpawner._raycastInFlight.delete(id);
+    }
+
+    /** Owner death/undeploy: the turret is an independent emplacement, intentionally left
+     *  running -- only gadget-tool bookkeeping is torn down here. */
+    static CleanupPlayer(player: mod.Player): void {
+        TurretSpawner.CleanupPlayerGadgetState(player);
+    }
+
+    /** Round-end sweep: turrets don't persist between rounds. */
+    static CleanupAllTurrets(): void {
+        for (const entry of TurretSpawner._ownerToTurret.values()) {
+            TurretSpawner._TeardownTurret(entry, false);
+        }
+        TurretSpawner._ownerToTurret.clear();
+        TurretSpawner._cooldownUntil.clear();
+        TurretSpawner._equipped.clear();
+        TurretSpawner._raycastInFlight.clear();
+        TurretSpawner._losOwners.clear();
+        for (const spawnerID of TurretSpawner._pendingBySpawnerID.keys()) {
+            AISpawnHandler.spawnerLock.delete(spawnerID);
+        }
+        TurretSpawner._pendingBySpawnerID.clear();
+        TurretSpawner._botOwnerByObjId.clear();
+        TurretSpawner._activeBotObjIds.clear();
+    }
+
+    static IsActiveTurretObjId(objId: number): boolean {
+        return TurretSpawner._activeBotObjIds.has(objId);
+    }
+
+    private static async _ShowBlockedIcon(player: mod.Player, pos: mod.Vector, message: mod.Message): Promise<void> {
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, pos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconOwner(icon, player);
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Cross);
+        mod.SetWorldIconColor(icon, TURRET_BLOCKED_ICON_COLOR);
+        mod.SetWorldIconText(icon, message);
+        mod.EnableWorldIconImage(icon, true);
+        mod.EnableWorldIconText(icon, true);
+        await mod.Wait(TURRET_BLOCKED_ICON_DURATION_SECONDS);
+        try {
+            mod.EnableWorldIconImage(icon, false);
+            mod.EnableWorldIconText(icon, false);
+            mod.UnspawnObject(icon as unknown as mod.Object);
+        } catch { }
+    }
+
+    /** Alert icon above the turret's head, visible only to whichever player it's locked onto. */
+    private static _ShowTargetAlertIcon(entry: TurretEntry, target: mod.Player): void {
+        TurretSpawner._HideTargetAlertIcon(entry);
+        const headPos = mod.CreateVector(
+            mod.XComponentOf(entry.pos),
+            mod.YComponentOf(entry.pos) + TARGET_ALERT_ICON_HEIGHT_OFFSET,
+            mod.ZComponentOf(entry.pos)
+        );
+        const icon = mod.SpawnObject(mod.RuntimeSpawn_Common.WorldIcon, headPos, ZERO_VEC) as mod.WorldIcon;
+        if (!icon) return;
+        mod.SetWorldIconOwner(icon, target);
+        mod.SetWorldIconImage(icon, mod.WorldIconImages.Alert);
+        mod.SetWorldIconColor(icon, TARGET_ALERT_ICON_COLOR);
+        mod.EnableWorldIconImage(icon, true);
+        entry.targetAlertIcon = icon;
+    }
+
+    private static _HideTargetAlertIcon(entry: TurretEntry): void {
+        if (!entry.targetAlertIcon) return;
+        try {
+            mod.EnableWorldIconImage(entry.targetAlertIcon, false);
+            mod.UnspawnObject(entry.targetAlertIcon as unknown as mod.Object);
+        } catch { }
+        entry.targetAlertIcon = undefined;
+    }
+
+    private static _SpawnAndEnableVfx(vfx: mod.RuntimeSpawn_Common, pos: mod.Vector, rot: mod.Vector = ZERO_VEC): mod.VFX | undefined {
+        const fx = mod.SpawnObject(vfx, pos, rot) as mod.VFX;
+        if (fx) mod.EnableVFX(fx, true);
+        return fx;
+    }
+
+    private static _UnspawnVfx(vfx?: mod.VFX): void {
+        if (!vfx) return;
+        try {
+            mod.EnableVFX(vfx, false);
+            mod.UnspawnObject(vfx as unknown as mod.Object);
+        } catch { }
+    }
+
+    private static _PlaySFX3DAtPos(sfx: mod.RuntimeSpawn_Common, pos: mod.Vector, attenuation: number = 25, amplitude: number = 1): void {
+        try {
+            const sfxObj = mod.SpawnObject(sfx, pos, ZERO_VEC) as mod.SFX;
+            mod.PlaySound(sfxObj, amplitude, pos, attenuation);
+        } catch { }
+    }
+
+    private static _StartLoopSFX3D(sfx: mod.RuntimeSpawn_Common, pos: mod.Vector, attenuation: number = 15, amplitude: number = 1): mod.SFX | undefined {
+        try {
+            const sfxObj = mod.SpawnObject(sfx, pos, ZERO_VEC) as mod.SFX;
+            mod.PlaySound(sfxObj, amplitude, pos, attenuation);
+            return sfxObj;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private static _StopLoopSFX3D(sfx?: mod.SFX): void {
+        if (!sfx) return;
+        try {
+            mod.StopSound(sfx);
+            mod.UnspawnObject(sfx as unknown as mod.Object);
+        } catch { }
+    }
+
+    /** Every currently-alive infected (human + AI). Polled, never raycast against. */
+    private static _GetAliveInfected(): mod.Player[] {
+        const result: mod.Player[] = [];
+        const all = mod.AllPlayers();
+        const n = mod.CountOf(all);
+        const infectedTeamId = mod.GetObjId(INFECTED_TEAM);
+        for (let i = 0; i < n; i++) {
+            const p = mod.ValueInArray(all, i) as mod.Player;
+            if (!PlayerIsAliveAndValid(p)) continue;
+            try {
+                if (mod.GetObjId(mod.GetTeam(p)) !== infectedTeamId) continue;
+            } catch { continue; }
+            result.push(p);
+        }
+        return result;
+    }
+
+    private static _DirToYawRad(dir: mod.Vector): number {
+        return Math.atan2(-mod.XComponentOf(dir), -mod.ZComponentOf(dir));
+    }
+
+    private static _YawRadToDir(yawRad: number): mod.Vector {
+        return mod.CreateVector(-Math.sin(yawRad), 0, -Math.cos(yawRad));
+    }
+
+    /** Rotation vector for any VFX that needs to face `yawRad` -- applies the shared
+     *  TURRET_VFX_YAW_OFFSET_RAD correction. Always go through this rather than building a
+     *  rotation vector by hand, or the correction silently doesn't apply. */
+    private static _YawToRotationVector(yawRad: number): mod.Vector {
+        return mod.CreateVector(0, yawRad + TURRET_VFX_YAW_OFFSET_RAD, 0);
+    }
+
+    /** entry.pos raised to roughly the crouched bot's eye height -- see
+     *  TURRET_VFX_FOV_CONE_HEIGHT_OFFSET_METERS. Used only for the claymore FOV cone VFX; every
+     *  other VFX/SFX in this class still spawns at entry.pos (ground level) unchanged. */
+    private static _FovConeVfxPos(pos: mod.Vector): mod.Vector {
+        return mod.CreateVector(
+            mod.XComponentOf(pos),
+            mod.YComponentOf(pos) + TURRET_VFX_FOV_CONE_HEIGHT_OFFSET_METERS,
+            mod.ZComponentOf(pos)
+        );
+    }
+
+    private static _GetFacingYaw(player: mod.Player): number {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        return TurretSpawner._DirToYawRad(facing);
+    }
+
+    private static _StartRotationAnim(entry: TurretEntry, toYawRad: number, duration: number): void {
+        entry.anim = { fromYawRad: entry.currentYawRad, toYawRad, startedAt: TurretSpawner._Now(), duration: Math.max(0.0001, duration) };
+    }
+
+    private static _TickRotationAnim(entry: TurretEntry): void {
+        if (!entry.anim) return;
+        const { fromYawRad, toYawRad, startedAt, duration } = entry.anim;
+        const t = Math.min(1, (TurretSpawner._Now() - startedAt) / duration);
+        const fromDeg = mod.RadiansToDegrees(fromYawRad);
+        const toDeg = mod.RadiansToDegrees(toYawRad);
+        const stepDeg = fromDeg + mod.AngleDifference(fromDeg, toDeg) * t;
+        TurretSpawner._ApplyYaw(entry, mod.DegreesToRadians(stepDeg));
+        if (t >= 1) entry.anim = undefined;
+    }
+
+    /** Turns the turret to face `newYawRad`: the AI body via AISetFocusPoint, and the FOV cone
+     *  VFX by re-spawning it at the new rotation (MoveVFX's rotation arg doesn't visually
+     *  re-orient this particular effect). */
+    private static _ApplyYaw(entry: TurretEntry, newYawRad: number): void {
+        if (entry.botPlayer) {
+            const focusPoint = mod.Add(entry.pos, mod.Multiply(TurretSpawner._YawRadToDir(newYawRad), TURRET_FOCUS_POINT_DISTANCE));
+            try { mod.AISetFocusPoint(entry.botPlayer, focusPoint, false); } catch { }
+        }
+        if (entry.fovConeVfx) {
+            TurretSpawner._UnspawnVfx(entry.fovConeVfx);
+            entry.fovConeVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_FOV_CONE, TurretSpawner._FovConeVfxPos(entry.pos), TurretSpawner._YawToRotationVector(newYawRad));
+        }
+        entry.currentYawRad = newYawRad;
+    }
+
+    private static _RequestPlacement(owner: mod.Player, pos: mod.Vector): void {
+        const ownerID = mod.GetObjId(owner);
+        if (TurretSpawner._ownerToTurret.has(ownerID)) return; // race guard
+
+        const spawnerID = TurretSpawner._PickFreeSpawnerID();
+        if (spawnerID === undefined) {
+            console.log(`TurretSpawner | No free AI spawner available for Player(${ownerID})`);
+            Helpers.PlaySoundFX(SFX_ACTION_BLOCKED, 1, owner);
+            return;
+        }
+        const spawnerObj = mod.GetSpawner(spawnerID);
+
+        const restYawRad = TurretSpawner._GetFacingYaw(owner);
+        const restFacingDir = TurretSpawner._YawRadToDir(restYawRad);
+
+        // Fires the moment the player places the turret, ahead of the AI actually arriving --
+        // same convention as the decoy gadget.
+        TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_LAUNCH, pos);
+
+        const entry: TurretEntry = {
+            ownerPlayer: owner,
+            ownerObjId: ownerID,
+            pos,
+            restYawRad,
+            restFacingDir,
+            botObjId: -1,
+            pendingSince: TurretSpawner._Now(),
+            runToken: ++TurretSpawner._runTokenSeq,
+            state: "standby",
+            currentYawRad: restYawRad,
+            sweepDir: 1,
+            rotateReadyAt: 0,
+            lockElapsed: 0,
+            sinceLastShot: 0,
+            alarmBlipToken: 0,
+            losInFlight: false,
+            losIsUpkeep: false,
+            nextLosScanAt: 0,
+            engageLosNextCheckAt: 0,
+        };
+        // Reserve immediately so a second fire before the bot arrives can't queue another spawn.
+        TurretSpawner._ownerToTurret.set(ownerID, entry);
+
+        AISpawnHandler.spawnerLock.add(spawnerID);
+        TurretSpawner._pendingBySpawnerID.set(spawnerID, { ownerObjId: ownerID, ownerPlayer: owner, pos, restYawRad });
+        mod.SpawnAIFromAISpawner(spawnerObj, mod.SoldierClass.Assault, MakeMessage(mod.stringkeys.turret_bot_name), SURVIVOR_TEAM);
+        console.log(`TurretSpawner | Requested turret AI spawn for Player(${ownerID}) on spawner(${spawnerID})`);
+    }
+
+    static HasPendingSpawnOn(spawnerObjID: number): boolean {
+        return TurretSpawner._pendingBySpawnerID.has(spawnerObjID);
+    }
+
+    /** Called from AISpawnHandler.OnBotSpawnFromSpawner once a requested turret AI arrives.
+     *  Runs synchronously back-to-back (Teleport -> health -> equipment strip ->
+     *  AIIdleBehavior -> disable targeting/shooting -> stance), mirroring
+     *  DecoySpawner.HandleSpawned -- an await between Teleport and locking the AI's behavior
+     *  down leaves it free to wander off in the meantime. */
+    static HandleSpawned(botPlayer: mod.Player, botObjId: number, spawnerObjID: number): boolean {
+        const pending = TurretSpawner._pendingBySpawnerID.get(spawnerObjID);
+        if (!pending) return false;
+        TurretSpawner._pendingBySpawnerID.delete(spawnerObjID);
+        AISpawnHandler.spawnerLock.delete(spawnerObjID);
+
+        const entry = TurretSpawner._ownerToTurret.get(pending.ownerObjId);
+        if (!entry || entry.botObjId !== -1) {
+            // Reservation vanished (owner cancelled/disconnected) or already resolved.
+            try { mod.Kill(botPlayer); } catch { }
+            return true;
+        }
+
+        mod.Teleport(botPlayer, pending.pos, pending.restYawRad);
+        mod.SetPlayerMaxHealth(botPlayer, TURRET_HEALTH);
+        mod.Heal(botPlayer, TURRET_HEALTH);
+
+        // Completely unarmed -- every point of damage comes from scripted _FireAtTarget calls.
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.PrimaryWeapon); } catch { }
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.SecondaryWeapon); } catch { }
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.GadgetOne); } catch { }
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.GadgetTwo); } catch { }
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.Throwable); } catch { }
+        try { mod.RemoveEquipment(botPlayer, mod.InventorySlots.ClassGadget); } catch { }
+
+        mod.AIIdleBehavior(botPlayer);
+        try { mod.AIEnableTargeting(botPlayer, false); } catch { }
+        try { mod.AIEnableShooting(botPlayer, false); } catch { }
+        try { mod.AISetTarget(botPlayer); } catch { }
+        // Always crouched -- reads as mounted hardware, visually distinct from the decoy.
+        mod.AISetStance(botPlayer, mod.Stance.Crouch);
+
+        const rot = mod.CreateVector(0, entry.restYawRad, 0);
+        entry.standbyVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_STANDBY, entry.pos, rot);
+        entry.fovConeVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_FOV_CONE, TurretSpawner._FovConeVfxPos(entry.pos), TurretSpawner._YawToRotationVector(entry.restYawRad));
+        entry.standbyLoopSfx = TurretSpawner._StartLoopSFX3D(TURRET_SFX_STANDBY_LOOP, entry.pos);
+
+        entry.botPlayer = botPlayer;
+        entry.botObjId = botObjId;
+        TurretSpawner._botOwnerByObjId.set(botObjId, entry.ownerObjId);
+        TurretSpawner._activeBotObjIds.add(botObjId);
+
+        console.log(`TurretSpawner | Turret AI Player(${botObjId}) spawned for owner Player(${entry.ownerObjId})`);
+        TurretSpawner._RunLoop(entry);
+        return true;
+    }
+
+    // ---- Run loop: 10Hz tick driving idle-scan animation, target acquisition (incl. rear
+    // engagement), and firing. Raycasts fire only for the rear-candidate acquisition gate and
+    // the Engaging-state upkeep recheck (both via _BeginLosCheck) -- everything else (range/
+    // FOV, alive) is polled math. Incoming damage/death are handled natively via
+    // OnPlayerDamaged/OnPlayerDied, not polled here. ----
+    private static async _RunLoop(entry: TurretEntry): Promise<void> {
+        const token = entry.runToken;
+
+        while (true) {
+            await mod.Wait(TURRET_TICK_SECONDS);
+            if (entry.runToken !== token) return; // torn down elsewhere
+
+            const infected = TurretSpawner._GetAliveInfected();
+
+            // Idle scan / rotate-to-rear / return-to-rest -- skipped during warning/engaging,
+            // where continuous target tracking below owns the yaw exclusively.
+            if (entry.state !== "warning" && entry.state !== "engaging") {
+                TurretSpawner._TickRotationAnim(entry);
+            }
+            if (entry.state === "standby" && !entry.anim) {
+                entry.sweepDir = (entry.sweepDir === 1 ? -1 : 1);
+                const legYawRad = entry.restYawRad + entry.sweepDir * mod.DegreesToRadians(TURRET_HALF_FOV_DEGREES);
+                TurretSpawner._StartRotationAnim(entry, legYawRad, TURRET_IDLE_SWEEP_LEG_SECONDS);
+            }
+
+            // Target validity: alive/range/FOV (or rear-range), independent of LOS.
+            let target: mod.Player | undefined;
+            if (entry.targetObjId !== undefined) {
+                target = infected.find(p => mod.GetObjId(p) === entry.targetObjId);
+                if (!target || !TurretSpawner._IsGeometricallyValid(entry, target)) {
+                    target = undefined;
+                    TurretSpawner._LoseTarget(entry, false);
+                }
+            }
+
+            // Acquire a new target while idle or returning (a fresh target interrupts the
+            // return and gets engaged immediately once LOS is confirmed). Front and rear
+            // candidates are both gated on a confirmed raycast before engaging -- range/FOV
+            // alone doesn't account for geometry (a wall inside the cone), and engaging on that
+            // alone would open fire on an occluded target for one full TURRET_TARGET_LOCK_GRACE_
+            // SECONDS window before the Engaging-state upkeep check ever got a chance to catch it.
+            if ((entry.state === "standby" || entry.state === "returning") && !target &&
+                TurretSpawner._Now() >= entry.nextLosScanAt && !entry.losInFlight) {
+                const frontCandidate = TurretSpawner._PickFrontTarget(entry, infected);
+                if (frontCandidate) {
+                    TurretSpawner._BeginLosCheck(entry, frontCandidate, "front");
+                } else {
+                    const rearCandidate = TurretSpawner._PickRearTarget(entry, infected);
+                    if (rearCandidate) {
+                        TurretSpawner._BeginLosCheck(entry, rearCandidate, "rear");
+                    } else {
+                        entry.nextLosScanAt = TurretSpawner._Now() + TURRET_LOS_CHECK_INTERVAL_SECONDS;
+                    }
+                }
+            }
+
+            if (entry.runToken !== token) return;
+
+            // Rotating -> Warning handoff (rear engagement's pre-turn finished).
+            if (entry.state === "rotating" && TurretSpawner._Now() >= entry.rotateReadyAt) {
+                entry.state = "warning";
+                entry.lockElapsed = 0;
+            }
+
+            // Continuous target tracking while locked on.
+            if (target && (entry.state === "warning" || entry.state === "engaging")) {
+                const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+                TurretSpawner._ApplyYaw(entry, TurretSpawner._DirToYawRad(TurretSpawner._HorizontalDirectionTowards(entry.pos, targetPos)));
+            }
+
+            // Warning -> Engaging handoff.
+            if (target && entry.state === "warning") {
+                entry.lockElapsed += TURRET_TICK_SECONDS;
+                if (entry.lockElapsed >= TURRET_TARGET_LOCK_GRACE_SECONDS) {
+                    entry.state = "engaging";
+                    entry.sinceLastShot = TURRET_FIRE_INTERVAL_SECONDS; // fire immediately next tick
+                    entry.engageLosNextCheckAt = TurretSpawner._Now() + TURRET_ENGAGE_LOS_CHECK_INTERVAL_SECONDS;
+                    console.log(`TurretSpawner | Player(${entry.ownerObjId}) turret opening fire on Player(${entry.targetObjId})`);
+                }
+            }
+
+            // Engaging LOS upkeep -- fire-and-forget; a blocked result drops the target via
+            // OnLosRayCastHit, a clean result is a no-op and firing continues below.
+            if (target && entry.state === "engaging" && !entry.losInFlight && TurretSpawner._Now() >= entry.engageLosNextCheckAt) {
+                entry.engageLosNextCheckAt = TurretSpawner._Now() + TURRET_ENGAGE_LOS_CHECK_INTERVAL_SECONDS;
+                TurretSpawner._BeginLosCheck(entry, target, entry.engagementKind ?? "front", true);
+            }
+
+            // Firing -- continuous, no pauses, until the target fails the range/FOV check
+            // above, dies, or an upkeep LOS check catches it out of sight.
+            if (target && entry.state === "engaging") {
+                entry.sinceLastShot += TURRET_TICK_SECONDS;
+                if (entry.sinceLastShot >= TURRET_FIRE_INTERVAL_SECONDS) {
+                    entry.sinceLastShot = 0;
+                    TurretSpawner._FireAtTarget(entry, target);
+                }
+            }
+
+            // Returning -> Standby handoff.
+            if (entry.state === "returning" && TurretSpawner._Now() >= entry.rotateReadyAt) {
+                entry.state = "standby";
+            }
+        }
+    }
+
+    private static _HorizontalDirectionTowards(from: mod.Vector, to: mod.Vector): mod.Vector {
+        const flatFrom = mod.CreateVector(mod.XComponentOf(from), 0, mod.ZComponentOf(from));
+        const flatTo = mod.CreateVector(mod.XComponentOf(to), 0, mod.ZComponentOf(to));
+        return mod.DirectionTowards(flatFrom, flatTo);
+    }
+
+    /** Alive + range + (FOV if front, rear-range if rear) -- everything except line-of-sight. */
+    private static _IsGeometricallyValid(entry: TurretEntry, target: mod.Player): boolean {
+        if (!PlayerIsAliveAndValid(target)) return false;
+        const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+        const dist = mod.DistanceBetween(entry.pos, targetPos);
+        if (entry.engagementKind === "rear") {
+            return dist <= TURRET_REAR_ENGAGE_RANGE_METERS;
+        }
+        if (dist > TURRET_RANGE_METERS) return false;
+        const toTarget = TurretSpawner._HorizontalDirectionTowards(entry.pos, targetPos);
+        const angleDeg = mod.AngleBetweenVectors(entry.restFacingDir, toTarget);
+        return angleDeg <= TURRET_HALF_FOV_DEGREES;
+    }
+
+    private static _IsInFrontCone(entry: TurretEntry, target: mod.Player): boolean {
+        if (!PlayerIsAliveAndValid(target)) return false;
+        const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+        if (mod.DistanceBetween(entry.pos, targetPos) > TURRET_RANGE_METERS) return false;
+        const toTarget = TurretSpawner._HorizontalDirectionTowards(entry.pos, targetPos);
+        return mod.AngleBetweenVectors(entry.restFacingDir, toTarget) <= TURRET_HALF_FOV_DEGREES;
+    }
+
+    /** Closest infected inside the turret's normal cone. */
+    private static _PickFrontTarget(entry: TurretEntry, infected: mod.Player[]): mod.Player | undefined {
+        let best: mod.Player | undefined;
+        let bestDist = Infinity;
+        for (const inf of infected) {
+            if (!TurretSpawner._IsInFrontCone(entry, inf)) continue;
+            const dist = mod.DistanceBetween(entry.pos, mod.GetSoldierState(inf, mod.SoldierStateVector.GetPosition));
+            if (dist < bestDist) { bestDist = dist; best = inf; }
+        }
+        return best;
+    }
+
+    /** Closest infected within rear-engagement range that isn't already in the front cone.
+     *  LOS is verified separately before engaging. */
+    private static _PickRearTarget(entry: TurretEntry, infected: mod.Player[]): mod.Player | undefined {
+        let best: mod.Player | undefined;
+        let bestDist = Infinity;
+        for (const inf of infected) {
+            if (!PlayerIsAliveAndValid(inf)) continue;
+            if (TurretSpawner._IsInFrontCone(entry, inf)) continue;
+            const dist = mod.DistanceBetween(entry.pos, mod.GetSoldierState(inf, mod.SoldierStateVector.GetPosition));
+            if (dist > TURRET_REAR_ENGAGE_RANGE_METERS) continue;
+            if (dist < bestDist) { bestDist = dist; best = inf; }
+        }
+        return best;
+    }
+
+    /** Fires a single LOS raycast using the turret's own bot as context (so the engine's
+     *  self-exclusion actually excludes its own body), from its EyePosition to the candidate's.
+     *  `isUpkeep` distinguishes an Engaging-state recheck of the live target from a new-
+     *  candidate acquisition gate -- see _HandleLosResult. */
+    private static _BeginLosCheck(entry: TurretEntry, candidate: mod.Player, kind: EngagementKind, isUpkeep: boolean = false): void {
+        if (!entry.botPlayer) return;
+        entry.losInFlight = true;
+        entry.losIsUpkeep = isUpkeep;
+        entry.losCandidateObjId = mod.GetObjId(candidate);
+        entry.losCandidateKind = kind;
+        entry.nextLosScanAt = TurretSpawner._Now() + TURRET_LOS_CHECK_INTERVAL_SECONDS;
+        TurretSpawner._losOwners.add(entry.botObjId);
+
+        const eyePos = mod.GetSoldierState(entry.botPlayer, mod.SoldierStateVector.EyePosition);
+        const start = mod.Add(eyePos, TurretSpawner._YawRadToDir(entry.currentYawRad));
+        const end = mod.GetSoldierState(candidate, mod.SoldierStateVector.EyePosition);
+        entry.losCheckStart = start;
+        entry.losCheckEnd = end;
+        try {
+            mod.RayCast(entry.botPlayer, start, end);
+        } catch {
+            entry.losInFlight = false;
+            entry.losIsUpkeep = false;
+            entry.losCheckStart = undefined;
+            entry.losCheckEnd = undefined;
+            TurretSpawner._losOwners.delete(entry.botObjId);
+        }
+    }
+
+    /** Common resolution for acquisition and upkeep LOS raycasts. Acquisition: clear engages
+     *  the candidate; blocked just drops it for a later scan. Upkeep: blocked drops the live
+     *  target (cover break); clear is a no-op, firing continues uninterrupted. */
+    private static _HandleLosResult(entry: TurretEntry, clear: boolean): void {
+        entry.losInFlight = false;
+        const wasUpkeep = entry.losIsUpkeep;
+        const candidateObjId = entry.losCandidateObjId;
+        const kind = entry.losCandidateKind;
+        entry.losIsUpkeep = false;
+        entry.losCandidateObjId = undefined;
+        entry.losCandidateKind = undefined;
+        entry.losCheckStart = undefined;
+        entry.losCheckEnd = undefined;
+
+        if (wasUpkeep) {
+            if (!clear && entry.state === "engaging" && entry.targetObjId === candidateObjId) {
+                TurretSpawner._LoseTarget(entry, false);
+            }
+            return;
+        }
+        if (clear) TurretSpawner._HandleLosConfirmed(entry, candidateObjId, kind);
+    }
+
+    private static _HandleLosConfirmed(entry: TurretEntry, candidateObjId: number | undefined, kind: EngagementKind | undefined): void {
+        if (candidateObjId === undefined || !kind) return;
+        if (entry.state !== "standby" && entry.state !== "returning") {
+            // Something else got engaged while this scan was in flight.
+            return;
+        }
+        const infected = TurretSpawner._GetAliveInfected();
+        const candidate = infected.find(p => mod.GetObjId(p) === candidateObjId);
+        if (!candidate || !PlayerIsAliveAndValid(candidate)) return;
+        TurretSpawner._EnterEngagement(entry, candidate, kind);
+    }
+
+    /** Spots the target for just the turret's owner. */
+    private static _SpotEngagedTarget(entry: TurretEntry, target: mod.Player): void {
+        try {
+            mod.SpotTarget(target, entry.ownerPlayer, TURRET_SPOT_DURATION_SECONDS, mod.SpotStatus.SpotInBoth);
+        } catch {
+            try { mod.SpotTarget(target, TURRET_SPOT_DURATION_SECONDS, mod.SpotStatus.SpotInBoth); } catch { }
+        }
+    }
+
+    private static async _RunAlarmBlips(entry: TurretEntry, token: number): Promise<void> {
+        for (let i = 0; i < TURRET_ALARM_BLIP_COUNT; i++) {
+            if (entry.alarmBlipToken !== token) return;
+            entry.alarmBlipSfx = TurretSpawner._StartLoopSFX3D(TURRET_SFX_ALARM_BLIP, entry.pos, 15);
+            await mod.Wait(TURRET_ALARM_BLIP_SECONDS);
+            if (entry.alarmBlipToken !== token) return;
+            TurretSpawner._StopLoopSFX3D(entry.alarmBlipSfx);
+            entry.alarmBlipSfx = undefined;
+            if (i < TURRET_ALARM_BLIP_COUNT - 1) {
+                await mod.Wait(TURRET_ALARM_BLIP_GAP_SECONDS);
+                if (entry.alarmBlipToken !== token) return;
+            }
+        }
+    }
+
+    private static _BeginAlarmBlips(entry: TurretEntry): void {
+        entry.alarmBlipToken++;
+        TurretSpawner._RunAlarmBlips(entry, entry.alarmBlipToken);
+    }
+
+    private static _StopAlarmBlips(entry: TurretEntry): void {
+        entry.alarmBlipToken++; // invalidates _RunAlarmBlips's next check
+        TurretSpawner._StopLoopSFX3D(entry.alarmBlipSfx);
+        entry.alarmBlipSfx = undefined;
+    }
+
+    private static _EnterEngagement(entry: TurretEntry, target: mod.Player, kind: EngagementKind): void {
+        console.log(`TurretSpawner | Player(${entry.ownerObjId}) turret engaging ${kind} target Player(${mod.GetObjId(target)})`);
+        entry.targetObjId = mod.GetObjId(target);
+        entry.engagementKind = kind;
+        entry.lockElapsed = 0;
+        entry.anim = undefined; // drop any leftover idle-sweep/return tween
+        TurretSpawner._UnspawnVfx(entry.standbyVfx);
+        entry.standbyVfx = undefined;
+        TurretSpawner._StopLoopSFX3D(entry.standbyLoopSfx);
+        entry.standbyLoopSfx = undefined;
+        entry.activeVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_ACTIVE, entry.pos);
+        entry.engageTracerVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_ENGAGE_TRACER, entry.pos);
+        TurretSpawner._SpotEngagedTarget(entry, target);
+        TurretSpawner._ShowTargetAlertIcon(entry, target);
+        TurretSpawner._BeginAlarmBlips(entry);
+
+        if (kind === "front") {
+            entry.state = "warning";
+            return;
+        }
+
+        // Rear engagement: physically turn to face the target before the lock-on grace starts.
+        const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+        const targetYawRad = TurretSpawner._DirToYawRad(mod.DirectionTowards(entry.pos, targetPos));
+        TurretSpawner._StartRotationAnim(entry, targetYawRad, TURRET_REAR_ROTATE_SECONDS);
+        entry.state = "rotating";
+        entry.rotateReadyAt = TurretSpawner._Now() + TURRET_REAR_ROTATE_SECONDS;
+    }
+
+    /** Drops the current target and enters Returning. A fresh target can interrupt this and get
+     *  engaged before the turn-back finishes. */
+    private static _LoseTarget(entry: TurretEntry, silent: boolean): void {
+        const wasEngaged = entry.state === "rotating" || entry.state === "warning" || entry.state === "engaging";
+        if (wasEngaged) {
+            console.log(`TurretSpawner | Player(${entry.ownerObjId}) turret lost its target (was ${entry.state}/${entry.engagementKind})`);
+        }
+        entry.targetObjId = undefined;
+        entry.losCandidateObjId = undefined;
+        entry.losCandidateKind = undefined;
+        entry.lockElapsed = 0;
+        entry.sinceLastShot = 0;
+        entry.engagementKind = undefined;
+        TurretSpawner._HideTargetAlertIcon(entry);
+        TurretSpawner._StopAlarmBlips(entry);
+
+        if (wasEngaged) {
+            TurretSpawner._UnspawnVfx(entry.activeVfx);
+            entry.activeVfx = undefined;
+            TurretSpawner._UnspawnVfx(entry.engageTracerVfx);
+            entry.engageTracerVfx = undefined;
+            if (!silent) TurretSpawner._PlaySFX3DAtPos(TURRET_SFX_RETURNING, entry.pos, 15);
+        }
+
+        TurretSpawner._StartRotationAnim(entry, entry.restYawRad, TURRET_REAR_ROTATE_SECONDS);
+        entry.state = "returning";
+        entry.rotateReadyAt = TurretSpawner._Now() + TURRET_REAR_ROTATE_SECONDS;
+
+        if (!entry.standbyVfx) entry.standbyVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_STANDBY, entry.pos);
+        if (!entry.standbyLoopSfx) entry.standbyLoopSfx = TurretSpawner._StartLoopSFX3D(TURRET_SFX_STANDBY_LOOP, entry.pos);
+    }
+
+    private static _FireAtTarget(entry: TurretEntry, target: mod.Player): void {
+        if (!PlayerIsAliveAndValid(target)) return;
+        const damage = TURRET_DAMAGE_MIN + Math.random() * (TURRET_DAMAGE_MAX - TURRET_DAMAGE_MIN);
+        try { mod.DealDamage(target, damage, entry.ownerPlayer); } catch { }
+        TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_FIRE, entry.pos, TurretSpawner._YawToRotationVector(entry.currentYawRad));
+        TurretSpawner._PlaySFX3DAtPos(TURRET_SFX_FIRE, entry.pos, 20);
+    }
+
+    /** `frac` is the turret bot's current NormalizedHealth (0..1). */
+    private static _UpdateDamageVfx(entry: TurretEntry, frac: number): void {
+        if (frac <= TURRET_DAMAGE_VFX_HEAVY_THRESHOLD && !entry.damageHeavyVfx) {
+            entry.damageHeavyVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_DAMAGE_HEAVY, entry.pos);
+        }
+        if (frac <= TURRET_DAMAGE_VFX_LIGHT_THRESHOLD && !entry.damageLightVfx) {
+            entry.damageLightVfx = TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_DAMAGE_LIGHT, entry.pos);
+        }
+    }
+
+    /** Common teardown of everything a turret spawned, including killing the bot if it's
+     *  somehow still alive (round-end sweep path). `playDestructionFx` is false for a round-end
+     *  sweep. */
+    private static _TeardownTurret(entry: TurretEntry, playDestructionFx: boolean): void {
+        entry.runToken = ++TurretSpawner._runTokenSeq; // bumps the loop's token so it exits next wake
+        if (entry.botObjId >= 0) {
+            TurretSpawner._losOwners.delete(entry.botObjId);
+            TurretSpawner._botOwnerByObjId.delete(entry.botObjId);
+            TurretSpawner._activeBotObjIds.delete(entry.botObjId);
+        }
+        TurretSpawner._HideTargetAlertIcon(entry);
+        TurretSpawner._StopAlarmBlips(entry);
+        TurretSpawner._UnspawnVfx(entry.standbyVfx);
+        TurretSpawner._UnspawnVfx(entry.activeVfx);
+        TurretSpawner._UnspawnVfx(entry.engageTracerVfx);
+        TurretSpawner._UnspawnVfx(entry.damageLightVfx);
+        TurretSpawner._UnspawnVfx(entry.damageHeavyVfx);
+        TurretSpawner._UnspawnVfx(entry.fovConeVfx);
+        TurretSpawner._StopLoopSFX3D(entry.standbyLoopSfx);
+        if (entry.botPlayer && PlayerIsAliveAndValid(entry.botPlayer)) {
+            try { mod.Kill(entry.botPlayer); } catch { }
+        }
+        if (playDestructionFx) {
+            TurretSpawner._SpawnAndEnableVfx(TURRET_VFX_DESTRUCTION, entry.pos);
+            TurretSpawner._PlaySFX3DAtPos(TURRET_SFX_DESTROYED_POWERDOWN, entry.pos, 20);
+        }
+    }
+
+    private static _DestroyTurret(entry: TurretEntry): void {
+        TurretSpawner._TeardownTurret(entry, true);
+        TurretSpawner._ownerToTurret.delete(entry.ownerObjId);
+        TurretSpawner._cooldownUntil.set(entry.ownerObjId, TurretSpawner._Now() + TURRET_COOLDOWN_AFTER_DESTROYED_SECONDS);
+        console.log(`TurretSpawner | Turret destroyed for owner Player(${entry.ownerObjId}) -- ${TURRET_COOLDOWN_AFTER_DESTROYED_SECONDS}s cooldown started`);
+    }
+
+    /** Called from OnPlayerDied when the dead AI is a turret bot. Returns true if it was. */
+    static HandleDeath(botPlayer: mod.Player, botObjId: number): boolean {
+        const ownerID = TurretSpawner._botOwnerByObjId.get(botObjId);
+        if (ownerID === undefined) return false;
+        TurretSpawner._botOwnerByObjId.delete(botObjId);
+        const entry = TurretSpawner._ownerToTurret.get(ownerID);
+        if (!entry || entry.botObjId !== botObjId) return true; // stale entry, already handled
+        TurretSpawner._DestroyTurret(entry);
+        return true;
+    }
+
+    /** Called from OnPlayerDamaged when the damaged player is a turret bot. No-op otherwise. */
+    static HandleDamaged(botPlayer: mod.Player): void {
+        const botObjId = mod.GetObjId(botPlayer);
+        const ownerID = TurretSpawner._botOwnerByObjId.get(botObjId);
+        if (ownerID === undefined) return;
+        const entry = TurretSpawner._ownerToTurret.get(ownerID);
+        if (!entry || entry.botObjId !== botObjId || !entry.botPlayer) return;
+        let frac = 1;
+        try { frac = mod.GetSoldierState(entry.botPlayer, mod.SoldierStateNumber.NormalizedHealth); } catch { }
+        TurretSpawner._UpdateDamageVfx(entry, frac);
+    }
+}
+
+// ============================================================
+// RorschRailgun -- scripted splash-damage/impulse overlay for the BattlePickup_Rorsch_Mk_2_SMRW
+// "railgun" LMS pickup. The base weapon's own direct-hit damage/penetration (charge-up-then-
+// discharge, breach-loaded single shot) is entirely native -- this layer only adds a small-radius
+// AoE around wherever the shot actually lands: damage to nearby infected, a high knockback
+// impulse (no damage) to nearby vehicles, and an impact VFX.
+//
+// Detection: the mod SDK has no discrete "weapon fired" event for a real weapon -- only the
+// Portal Gadget tool gets OnPortalGadgetFireStart/Stop (see PropSpawner/DecoySpawner/
+// TurretSpawner above), and SoldierStateBool.IsFiring/IsZooming would conflate the whole
+// charge-up hold with the actual discharge. So this polls SoldierStateBool.IsReloading for
+// every player currently holding the Rorsch as their active Primary weapon, and treats the
+// false->true rising edge as "a shot just went off": the weapon is breach-loaded and forced
+// into reload after every shot, so that edge is a reliable one-shot-one-edge signal. At that
+// instant it raycasts along the shooter's current facing to find where the shot landed, then
+// applies the AoE there -- the same "detect fire -> raycast for the landing point" approach
+// PropSpawner/TurretSpawner already use for their own placement raycasts above, just gated on
+// reload instead of a fire-button event.
+// ============================================================
+
+const RORSCH_POLL_INTERVAL_SECONDS = 0.1;
+const RORSCH_RAYCAST_MAX_DISTANCE_METERS = 400;
+const RORSCH_AOE_RADIUS_METERS = 8;
+// Linear falloff from the exact impact point (400) out to the edge of the radius (250)
+const RORSCH_AOE_DAMAGE_MAX = 400;
+const RORSCH_AOE_DAMAGE_MIN = 250;
+// Newton-seconds (see GodotProject/mods/PhysicsImpulse_Gym/README_PhysicsImpulse.ts) -- large
+// enough to visibly launch/flip the mod's light vehicle roster (quad bike, golf cart, dirt bike,
+// etc.), no distance falloff needed on top of that.
+const RORSCH_VEHICLE_IMPULSE_MAGNITUDE = 22000;
+// Electromagnetic discharge flash -- reused purely for its look (same "borrow an unrelated
+// asset for its VFX" approach as TURRET_VFX_FOV_CONE reusing the claymore tripwire above).
+const RORSCH_IMPACT_VFX = mod.RuntimeSpawn_Common.FX_Gadget_ReconDrone_EMP_Hit;
+
+class RorschRailgun {
+    // Player objIds currently holding BattlePickup_Rorsch_Mk_2_SMRW as their active Primary
+    // weapon -- owned entirely by InitPlayer/RemovePlayer (called from
+    // InitializePlayerEquipment); the poll loop below only ever reads it.
+    private static readonly _equipped: Set<number> = new Set();
+    // Last-seen IsReloading per tracked player, for rising-edge detection.
+    private static readonly _wasReloading: Map<number, boolean> = new Map();
+    private static readonly _raycastInFlight: Set<number> = new Set();
+    private static _pollRunning = false;
+
+    /** Called from InitializePlayerEquipment when a survivor's loadout equips the Rorsch. */
+    static InitPlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        RorschRailgun._equipped.add(id);
+        RorschRailgun._wasReloading.set(id, false);
+        RorschRailgun._EnsurePollLoop();
+    }
+
+    /** Called from InitializePlayerEquipment on every equipment refresh, before re-applying the
+     *  new loadout -- stops tracking if this round's roll no longer holds the Rorsch. */
+    static RemovePlayer(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        RorschRailgun._equipped.delete(id);
+        RorschRailgun._wasReloading.delete(id);
+    }
+
+    static HasRaycastInFlight(id: number): boolean {
+        return RorschRailgun._raycastInFlight.has(id);
+    }
+
+    // Single shared loop over every tracked holder rather than one loop per player -- starts
+    // lazily on the first InitPlayer and lets itself wind down once _equipped drains back to
+    // empty (a fresh InitPlayer later just restarts it).
+    private static async _EnsurePollLoop(): Promise<void> {
+        if (RorschRailgun._pollRunning) return;
+        RorschRailgun._pollRunning = true;
+        try {
+            while (RorschRailgun._equipped.size > 0) {
+                await mod.Wait(RORSCH_POLL_INTERVAL_SECONDS);
+                for (const id of Array.from(RorschRailgun._equipped)) {
+                    RorschRailgun._TickPlayer(id);
+                }
+            }
+        } finally {
+            RorschRailgun._pollRunning = false;
+        }
+    }
+
+    private static _TickPlayer(id: number): void {
+        let player: mod.Player | undefined;
+        try { player = mod.GetPlayer(id); } catch { player = undefined; }
+        if (!player || !SafeIsAlive(player)) return;
+
+        const isReloading = SafeGetSoldierStateBool(player, mod.SoldierStateBool.IsReloading, false);
+        const wasReloading = RorschRailgun._wasReloading.get(id) ?? false;
+        RorschRailgun._wasReloading.set(id, isReloading);
+
+        if (isReloading && !wasReloading && !RorschRailgun._raycastInFlight.has(id)) {
+            RorschRailgun._FireImpactRaycast(player, id);
+        }
+    }
+
+    // Same eye-position + facing-direction raycast setup as TurretSpawner._GetRaycastVectors
+    // above -- start 1m ahead of the eye so the ray doesn't immediately self-intersect.
+    private static _FireImpactRaycast(player: mod.Player, id: number): void {
+        const facing = mod.Normalize(mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection));
+        const eyePos = mod.GetSoldierState(player, mod.SoldierStateVector.EyePosition);
+        const start = mod.Add(eyePos, facing);
+        const end = mod.Add(start, mod.Multiply(facing, RORSCH_RAYCAST_MAX_DISTANCE_METERS));
+        RorschRailgun._raycastInFlight.add(id);
+        mod.RayCast(player, start, end);
+    }
+
+    static OnRayCastHit(shooter: mod.Player, point: mod.Vector, _normal: mod.Vector): void {
+        RorschRailgun._raycastInFlight.delete(mod.GetObjId(shooter));
+        RorschRailgun._TriggerImpact(shooter, point);
+    }
+
+    static OnRayCastMissed(shooter: mod.Player): void {
+        RorschRailgun._raycastInFlight.delete(mod.GetObjId(shooter));
+        // Shot flew past RORSCH_RAYCAST_MAX_DISTANCE_METERS without hitting anything -- no
+        // impact point to splash.
+    }
+
+    private static _TriggerImpact(shooter: mod.Player, point: mod.Vector): void {
+        const fx = mod.SpawnObject(RORSCH_IMPACT_VFX, point, ZERO_VEC) as mod.VFX;
+        if (fx) mod.EnableVFX(fx, true);
+
+        // Infected within radius take 150-200 damage, falling off linearly from the exact
+        // impact point (200) to the edge of the radius (150).
+        const infectedTeamId = mod.GetObjId(INFECTED_TEAM);
+        const allPlayers = ConvertArray(mod.AllPlayers()) as mod.Player[];
+        for (const target of allPlayers) {
+            if (!Helpers.HasValidObjId(target) || !SafeIsAlive(target)) continue;
+            let onInfectedTeam = false;
+            try { onInfectedTeam = mod.GetObjId(mod.GetTeam(target)) === infectedTeamId; } catch { continue; }
+            if (!onInfectedTeam) continue;
+
+            const targetPos = mod.GetSoldierState(target, mod.SoldierStateVector.GetPosition);
+            const dist = mod.DistanceBetween(point, targetPos);
+            if (dist > RORSCH_AOE_RADIUS_METERS) continue;
+
+            const t = dist / RORSCH_AOE_RADIUS_METERS; // 0 at the impact point, 1 at the edge
+            const damage = Math.round(RORSCH_AOE_DAMAGE_MAX - (RORSCH_AOE_DAMAGE_MAX - RORSCH_AOE_DAMAGE_MIN) * t);
+            try { mod.DealDamage(target, damage, shooter); } catch { }
+        }
+
+        // Vehicles within radius get shoved hard, radially outward from the impact point, but
+        // take no direct damage from the splash.
+        const vehicles = ConvertArray(mod.AllVehicles()) as mod.Vehicle[];
+        for (const vehicle of vehicles) {
+            if (!IsVehicleRefValid(vehicle)) continue;
+            const vehiclePos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+            const dist = mod.DistanceBetween(point, vehiclePos);
+            if (dist > RORSCH_AOE_RADIUS_METERS) continue;
+
+            const direction = Helpers.NormalizeVector(mod.Subtract(vehiclePos, point));
+            try { mod.ApplyImpulse(vehicle, point, direction, RORSCH_VEHICLE_IMPULSE_MAGNITUDE); } catch { }
+        }
+    }
+}
+
+// ============================================================
+// BattlePickupCleanup -- sweeps up BattlePickup_* weapons (MP RMG, Rorsch Mk 2) left behind in
+// the world with no owner left to reclaim them.
+//
+// Unlike Primary/Secondary, a BattlePickup can't be stored in a loadout slot when its holder
+// swaps to something else -- the engine just drops it as a live world pickup, same as picking
+// one up off the map normally would let you do in reverse. That's normal, wanted behavior while
+// the round is running: the player (or anyone else) can walk back and grab it, so a mid-round
+// drop is deliberately left alone here -- there's no OnWeaponDropped-style event to react to one
+// anyway. This only sweeps at the two points an abandoned pickup has no legitimate owner left:
+// the holder's death (see HandleDeath, called from OnPlayerDied) and end of round (see
+// GameHandler.EndRoundCleanup).
+//
+// mod.UnspawnAllLoot() is the only lever the SDK exposes for this -- there's no per-object query
+// to target just the one pickup a given death or round left behind, so both triggers sweep every
+// loose loot item on the map, not just the relevant one.
+// ============================================================
+
+const BATTLE_PICKUP_WEAPONS: ReadonlySet<mod.Weapons> = new Set([
+    mod.Weapons.BattlePickup_MP_RMG,
+    mod.Weapons.BattlePickup_Rorsch_Mk_2_SMRW,
+]);
+
+class BattlePickupCleanup {
+    // Player objIds whose current life's Primary roll is a BattlePickup_* weapon -- owned
+    // entirely by InitPlayer/RemovePlayer (called from InitializePlayerEquipment); HandleDeath
+    // only ever reads it.
+    private static readonly _holders: Set<number> = new Set();
+
+    /** Called from InitializePlayerEquipment's Primary-weapon branch. */
+    static InitPlayer(player: mod.Player, weapon: mod.Weapons): void {
+        if (BATTLE_PICKUP_WEAPONS.has(weapon)) {
+            BattlePickupCleanup._holders.add(mod.GetObjId(player));
+        }
+    }
+
+    /** Called from InitializePlayerEquipment on every mid-round refresh, before re-applying the
+     *  new loadout -- stops tracking if this round's roll no longer holds a battle pickup. */
+    static RemovePlayer(player: mod.Player): void {
+        BattlePickupCleanup._holders.delete(mod.GetObjId(player));
+    }
+
+    /** Called from OnPlayerDied. If the dying player's current life was tracked as a battle
+     *  pickup holder, their weapon (whether still in hand or already accidentally dropped
+     *  earlier this life) has no owner left to walk back for it -- sweep it up. */
+    static HandleDeath(player: mod.Player): void {
+        const id = mod.GetObjId(player);
+        if (!BattlePickupCleanup._holders.has(id)) return;
+        BattlePickupCleanup._holders.delete(id);
+        console.log(`BattlePickupCleanup | Player(${id}) died holding/having held a battle pickup this life -- sweeping loot`);
+        try { mod.UnspawnAllLoot(); } catch { }
+    }
+
+    /** Round-end sweep -- see GameHandler.EndRoundCleanup. */
+    static CleanupRound(): void {
+        BattlePickupCleanup._holders.clear();
+        try { mod.UnspawnAllLoot(); } catch { }
+    }
+}
+
 export function OnRayCastHit(eventPlayer: mod.Player, eventPoint: mod.Vector, eventNormal: mod.Vector) {
     const id = mod.GetObjId(eventPlayer);
     if (DecoySpawner.HasRaycastInFlight(id)) {
         DecoySpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
     } else if (PropSpawner.HasRaycastInFlight(id)) {
         PropSpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else if (TurretSpawner.HasRaycastInFlight(id)) {
+        TurretSpawner.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else if (TurretSpawner.HasLosRaycastInFlight(id)) {
+        TurretSpawner.OnLosRayCastHit(eventPlayer, eventPoint, eventNormal);
+    } else if (RorschRailgun.HasRaycastInFlight(id)) {
+        RorschRailgun.OnRayCastHit(eventPlayer, eventPoint, eventNormal);
     } else {
         HandleLeapRayCastHit(eventPlayer, eventPoint, eventNormal);
     }
@@ -14700,6 +16074,12 @@ export function OnRayCastMissed(eventPlayer: mod.Player) {
         DecoySpawner.OnRayCastMissed(eventPlayer);
     } else if (PropSpawner.HasRaycastInFlight(id)) {
         PropSpawner.OnRayCastMissed(eventPlayer);
+    } else if (TurretSpawner.HasRaycastInFlight(id)) {
+        TurretSpawner.OnRayCastMissed(eventPlayer);
+    } else if (TurretSpawner.HasLosRaycastInFlight(id)) {
+        TurretSpawner.OnLosRayCastMissed(eventPlayer);
+    } else if (RorschRailgun.HasRaycastInFlight(id)) {
+        RorschRailgun.OnRayCastMissed(eventPlayer);
     } else {
         HandleLeapRayCastMissed(eventPlayer);
     }
@@ -14707,26 +16087,31 @@ export function OnRayCastMissed(eventPlayer: mod.Player) {
 
 export function OnPortalGadgetAimStart(player: mod.Player): void {
     if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnAimStart(player); return; }
+    if (TurretSpawner.IsEquipped(player)) { TurretSpawner.OnAimStart(player); return; }
     PropSpawner.OnAimStart(player);
 }
 
 export function OnPortalGadgetAimStop(player: mod.Player): void {
     if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnAimStop(player); return; }
+    if (TurretSpawner.IsEquipped(player)) { TurretSpawner.OnAimStop(player); return; }
     PropSpawner.OnAimStop(player);
 }
 
 export function OnPortalGadgetLaserToggle(player: mod.Player, eventBoolean: boolean): void {
     if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnLaserToggle(player, eventBoolean); return; }
+    if (TurretSpawner.IsEquipped(player)) { TurretSpawner.OnLaserToggle(player, eventBoolean); return; }
     PropSpawner.OnLaserToggle(player, eventBoolean);
 }
 
 export function OnPortalGadgetFireStart(player: mod.Player): void {
     if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnFireStart(player); return; }
+    if (TurretSpawner.IsEquipped(player)) { TurretSpawner.OnFireStart(player); return; }
     PropSpawner.OnFireStart(player);
 }
 
 export function OnPortalGadgetFireStop(player: mod.Player): void {
     if (DecoySpawner.IsEquipped(player)) { DecoySpawner.OnFireStop(player); return; }
+    if (TurretSpawner.IsEquipped(player)) { TurretSpawner.OnFireStop(player); return; }
     PropSpawner.OnFireStop(player);
 }
 
